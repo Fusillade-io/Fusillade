@@ -1,0 +1,9 @@
+{
+  "$comment": "Basic Load Test - Simple constant VU test",
+  "workers": 10,
+  "duration": "30s",
+  "criteria": {
+    "http_req_duration": ["p95<500"],
+    "http_req_failed": ["rate<0.01"]
+  }
+}

@@ -1,0 +1,32 @@
+# Ramping Load Test
+# Gradually increases load to find performance characteristics
+#
+# Profile:
+#   - Ramp up to 10 VUs over 30s
+#   - Hold at 10 VUs for 1 minute
+#   - Ramp up to 50 VUs over 30s
+#   - Hold at 50 VUs for 2 minutes
+#   - Ramp down to 0 over 30s
+
+schedule:
+  - duration: 30s
+    target: 10
+  - duration: 1m
+    target: 10
+  - duration: 30s
+    target: 50
+  - duration: 2m
+    target: 50
+  - duration: 30s
+    target: 0
+
+# Pass/fail thresholds
+criteria:
+  http_req_duration:
+    - p95<500
+    - avg<200
+  http_req_failed:
+    - rate<0.01
+
+# Graceful shutdown timeout
+stop: 30s

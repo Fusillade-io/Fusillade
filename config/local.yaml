@@ -1,0 +1,17 @@
+# Local Development Testing
+# Use for quick smoke tests during development
+#
+# Usage: fusillade run script.js --config config/local.yaml
+
+workers: 3
+duration: 10s
+
+# Warm up connection pool before test starts
+warmup: http://localhost:8080/health
+
+# Relaxed thresholds for local testing
+criteria:
+  http_req_duration:
+    - p95<1000
+  http_req_failed:
+    - rate<0.1

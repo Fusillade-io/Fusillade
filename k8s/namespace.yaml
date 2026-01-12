@@ -1,0 +1,8 @@
+# Fusillade Namespace
+# Isolates load testing resources
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fusillade
+  labels:
+    app: fusillade

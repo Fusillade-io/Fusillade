@@ -1,0 +1,12 @@
+{
+  "$comment": "Soak Test - Extended duration to detect memory leaks and degradation",
+  "workers": 25,
+  "duration": "1h",
+  "warmup": "https://api.example.com/health",
+  "criteria": {
+    "http_req_duration": ["p95<300", "p99<500", "avg<150"],
+    "http_req_failed": ["rate<0.001"]
+  },
+  "min_iteration_duration": "100ms",
+  "stop": "30s"
+}

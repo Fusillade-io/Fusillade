@@ -1,0 +1,12 @@
+{
+  "$comment": "Constant Arrival Rate - Fixed RPS regardless of response time",
+  "executor": "constant-arrival-rate",
+  "rate": 100,
+  "time_unit": "1s",
+  "workers": 50,
+  "duration": "2m",
+  "criteria": {
+    "http_req_duration": ["p95<200", "avg<100"],
+    "http_req_failed": ["rate<0.01"]
+  }
+}

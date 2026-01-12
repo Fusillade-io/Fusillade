@@ -1,0 +1,19 @@
+{
+  "$comment": "Stress Test - Push system beyond normal capacity",
+  "schedule": [
+    { "duration": "30s", "target": 50 },
+    { "duration": "1m", "target": 50 },
+    { "duration": "30s", "target": 100 },
+    { "duration": "1m", "target": 100 },
+    { "duration": "30s", "target": 200 },
+    { "duration": "2m", "target": 200 },
+    { "duration": "30s", "target": 50 },
+    { "duration": "1m", "target": 0 }
+  ],
+  "criteria": {
+    "http_req_duration": ["p99<2000", "p95<1000"],
+    "http_req_failed": ["rate<0.05"]
+  },
+  "stop": "60s",
+  "stack_size": 524288
+}

@@ -1,0 +1,80 @@
+# Fusillade Worker Deployment
+# Executes load tests and streams metrics to controller
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fusillade-worker
+  labels:
+    app: fusillade
+    component: worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: fusillade
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: fusillade
+        component: worker
+    spec:
+      containers:
+      - name: worker
+        image: fusillade:latest
+        command: ["fusillade", "worker", "--connect", "fusillade-controller:9001"]
+        env:
+        - name: RUST_LOG
+          value: "info"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        # Workers need more resources for load generation
+        # Adjust based on your test requirements
+---
+# Horizontal Pod Autoscaler for workers
+# Scales workers based on CPU usage
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fusillade-worker-hpa
+  labels:
+    app: fusillade
+    component: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fusillade-worker
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+      - type: Pods
+        value: 5
+        periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 60

@@ -1,0 +1,22 @@
+# Chaos Engineering Configuration
+# Tests system resilience under adverse conditions
+#
+# Injects:
+#   - Network latency (jitter)
+#   - Random request failures (drop)
+
+workers: 20
+duration: 5m
+
+# Chaos injection settings
+jitter: 250ms    # Add 0-250ms random latency to each request
+drop: 0.03       # Drop 3% of requests (simulates network issues)
+
+# Thresholds should account for injected failures
+criteria:
+  http_req_duration:
+    - p95<1000    # Higher threshold due to jitter
+  http_req_failed:
+    - rate<0.10   # Account for 3% dropped + real failures
+
+stop: 30s
