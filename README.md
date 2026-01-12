@@ -1,4 +1,4 @@
-# Fusillade 🔥
+# Fusillade 
 
 **High-performance load testing engine written in Rust. JavaScript scripting. Production-ready.**
 
