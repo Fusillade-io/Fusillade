@@ -1,0 +1,48 @@
+# Multi-Scenario Configuration
+# Run different user behaviors concurrently
+#
+# Simulates realistic traffic patterns with:
+#   - Background browsing traffic
+#   - Periodic search spikes
+#   - Checkout flow (delayed start)
+
+scenarios:
+  # Constant background traffic
+  browsing:
+    executor: constant-vus
+    workers: 20
+    duration: 5m
+    exec: browseProducts
+    thresholds:
+      http_req_duration:
+        - p95<300
+
+  # Search traffic with ramping pattern
+  search:
+    executor: ramping-vus
+    schedule:
+      - duration: 1m
+        target: 10
+      - duration: 2m
+        target: 30
+      - duration: 1m
+        target: 10
+      - duration: 1m
+        target: 0
+    exec: searchProducts
+    thresholds:
+      http_req_duration:
+        - p95<500
+
+  # Checkout flow starts after warm-up period
+  checkout:
+    executor: constant-vus
+    workers: 5
+    duration: 4m
+    start_time: 1m
+    exec: checkoutFlow
+    thresholds:
+      http_req_duration:
+        - p99<1000
+      http_req_failed:
+        - rate<0.005

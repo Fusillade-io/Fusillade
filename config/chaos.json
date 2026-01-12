@@ -1,0 +1,12 @@
+{
+  "$comment": "Chaos Engineering - Test resilience with fault injection",
+  "workers": 20,
+  "duration": "5m",
+  "jitter": "250ms",
+  "drop": 0.03,
+  "criteria": {
+    "http_req_duration": ["p95<1000"],
+    "http_req_failed": ["rate<0.10"]
+  },
+  "stop": "30s"
+}

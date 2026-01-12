@@ -1,0 +1,40 @@
+# Stress Test Configuration
+# Pushes the system beyond normal capacity to find breaking points
+#
+# Profile:
+#   - Quick ramp to moderate load
+#   - Aggressive ramp to high load
+#   - Spike to extreme load
+#   - Recovery period
+
+schedule:
+  - duration: 30s
+    target: 50
+  - duration: 1m
+    target: 50
+  - duration: 30s
+    target: 100
+  - duration: 1m
+    target: 100
+  - duration: 30s
+    target: 200
+  - duration: 2m
+    target: 200
+  - duration: 30s
+    target: 50
+  - duration: 1m
+    target: 0
+
+# Stress test thresholds - more lenient than normal
+criteria:
+  http_req_duration:
+    - p99<2000
+    - p95<1000
+  http_req_failed:
+    - rate<0.05
+
+# Allow more time for graceful shutdown under load
+stop: 60s
+
+# Increase stack size for complex scripts under heavy load
+stack_size: 524288

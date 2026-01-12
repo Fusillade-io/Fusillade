@@ -1,0 +1,34 @@
+# Local testing of distributed mode
+# Run: docker-compose up --build
+version: '3.8'
+
+services:
+  controller:
+    build: .
+    command: ["controller", "--listen", "0.0.0.0:9000"]
+    ports:
+      - "9000:9000"   # Dashboard & API
+      - "9001:9001"   # gRPC for workers
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/api/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  worker-1:
+    build: .
+    command: ["worker", "--connect", "controller:9001"]
+    depends_on:
+      - controller
+
+  worker-2:
+    build: .
+    command: ["worker", "--connect", "controller:9001"]
+    depends_on:
+      - controller
+
+  worker-3:
+    build: .
+    command: ["worker", "--connect", "controller:9001"]
+    depends_on:
+      - controller

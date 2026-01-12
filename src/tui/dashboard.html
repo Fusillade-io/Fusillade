@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fusillade Dashboard</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --primary: #3b82f6;
+            --success: #22c55e;
+            --danger: #ef4444;
+            --border: #334155;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            margin-bottom: 2rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+        }
+
+        .metric-label {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-top: 0.5rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .status-ok {
+            color: var(--success);
+        }
+
+        .status-err {
+            color: var(--danger);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>🚀 Fusillade Live</h1>
+
+        <div class="grid">
+            <div class="card">
+                <div class="metric-label">Total Requests</div>
+                <div class="metric-value" id="total-req">0</div>
+            </div>
+            <div class="card">
+                <div class="metric-label">Avg Latency</div>
+                <div class="metric-value" id="avg-lat">0 ms</div>
+            </div>
+            <div class="card">
+                <div class="metric-label">P95 Latency</div>
+                <div class="metric-value" id="p95-lat">0 ms</div>
+            </div>
+            <div class="card">
+                <div class="metric-label">Errors</div>
+                <div class="metric-value status-err" id="errors">0</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Endpoints</h3>
+            <table id="requests-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Count</th>
+                        <th>Avg (ms)</th>
+                        <th>P95 (ms)</th>
+                        <th>Errors</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Rows injected by JS -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h3>Recent Failures</h3>
+            <div id="screenshots-grid"
+                style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem;">
+                <!-- Images injected by JS -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function update() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+
+                document.getElementById('total-req').innerText = data.total_requests.toLocaleString();
+                document.getElementById('avg-lat').innerText = data.avg_latency_ms.toFixed(2) + ' ms';
+                document.getElementById('p95-lat').innerText = data.p95_latency_ms.toFixed(2) + ' ms';
+
+                const errCount = Object.values(data.errors).reduce((a, b) => a + b, 0);
+                document.getElementById('errors').innerText = errCount.toLocaleString();
+
+                const tbody = document.querySelector('#requests-table tbody');
+                tbody.innerHTML = '';
+
+                // Sort requests by name
+                const requests = Object.entries(data.grouped_requests).sort((a, b) => a[0].localeCompare(b[0]));
+
+                for (const [name, stats] of requests) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${name}</td>
+                        <td>${stats.total_requests}</td>
+                        <td>${stats.avg_latency_ms.toFixed(2)}</td>
+                        <td>${stats.p95_latency_ms.toFixed(2)}</td>
+                        <td class="${stats.error_count > 0 ? 'status-err' : ''}">${stats.error_count}</td>
+                    `;
+                    tbody.appendChild(row);
+                }
+
+            } catch (e) {
+                console.error("Failed to fetch stats", e);
+            }
+        }
+
+        async function updateScreenshots() {
+            try {
+                const res = await fetch('/api/screenshots');
+                const files = await res.json();
+                const container = document.getElementById('screenshots-grid');
+                container.innerHTML = '';
+
+                if (files.length === 0) {
+                    container.innerHTML = '<p style="color: var(--text-muted);">No failures recorded.</p>';
+                    return;
+                }
+
+                for (const file of files.slice(0, 8)) {
+                    const div = document.createElement('div');
+                    div.style.border = '1px solid var(--border)';
+                    div.style.borderRadius = '0.5rem';
+                    div.style.overflow = 'hidden';
+
+                    const a = document.createElement('a');
+                    a.href = '/screenshots/' + file;
+                    a.target = '_blank';
+
+                    const img = document.createElement('img');
+                    img.src = '/screenshots/' + file;
+                    img.style.width = '100%';
+                    img.style.display = 'block';
+
+                    const label = document.createElement('div');
+                    label.innerText = file.replace('failure_', '').replace('.png', '');
+                    label.style.padding = '0.5rem';
+                    label.style.fontSize = '0.75rem';
+                    label.style.background = 'var(--bg)';
+                    label.style.color = 'var(--text)';
+                    label.style.whiteSpace = 'nowrap';
+                    label.style.overflow = 'hidden';
+                    label.style.textOverflow = 'ellipsis';
+
+                    a.appendChild(img);
+                    div.appendChild(a);
+                    div.appendChild(label);
+                    container.appendChild(div);
+                }
+            } catch (e) { }
+        }
+
+        setInterval(() => {
+            update();
+            updateScreenshots();
+        }, 1000);
+        update();
+        updateScreenshots();
+    </script>
+</body>
+
+</html>

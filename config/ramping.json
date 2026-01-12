@@ -1,0 +1,15 @@
+{
+  "$comment": "Ramping Load Test - Gradually increase/decrease load",
+  "schedule": [
+    { "duration": "30s", "target": 10 },
+    { "duration": "1m", "target": 10 },
+    { "duration": "30s", "target": 50 },
+    { "duration": "2m", "target": 50 },
+    { "duration": "30s", "target": 0 }
+  ],
+  "criteria": {
+    "http_req_duration": ["p95<500", "avg<200"],
+    "http_req_failed": ["rate<0.01"]
+  },
+  "stop": "30s"
+}

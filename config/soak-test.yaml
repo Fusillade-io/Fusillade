@@ -1,0 +1,28 @@
+# Soak Test (Endurance Test) Configuration
+# Runs at moderate load for extended period to detect:
+#   - Memory leaks
+#   - Resource exhaustion
+#   - Performance degradation over time
+#   - Connection pool issues
+#
+# Recommended: Run for 1-4 hours in staging environment
+
+workers: 25
+duration: 1h
+
+# Warm up connections before long-running test
+warmup: https://api.example.com/health
+
+# Strict thresholds - sustained load should be stable
+criteria:
+  http_req_duration:
+    - p95<300
+    - p99<500
+    - avg<150
+  http_req_failed:
+    - rate<0.001
+
+# Minimum iteration duration prevents tight loops
+min_iteration_duration: 100ms
+
+stop: 30s

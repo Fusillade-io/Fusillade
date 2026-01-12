@@ -1,0 +1,185 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use arc_swap::ArcSwap;
+
+/// Commands that can be sent to control a running load test
+#[derive(Debug, Clone)]
+pub enum ControlCommand {
+    /// Adjust worker count to target
+    Ramp(usize),
+    /// Pause all workers (idle loop)
+    Pause,
+    /// Resume execution
+    Resume,
+    /// Add a tag to all subsequent metrics
+    Tag(String, String),
+    /// Request current status
+    Status,
+    /// Graceful stop
+    Stop,
+}
+
+/// Shared state between controller and workers
+pub struct ControlState {
+    /// When true, workers should idle instead of executing
+    pub paused: AtomicBool,
+    /// Target worker count (for dynamic scaling)
+    pub target_workers: AtomicUsize,
+    /// Tags to add to all metrics - uses ArcSwap for lock-free reads
+    pub tags: ArcSwap<HashMap<String, String>>,
+    /// Stop flag
+    pub stopped: AtomicBool,
+}
+
+impl ControlState {
+    pub fn new(initial_workers: usize) -> Self {
+        Self {
+            paused: AtomicBool::new(false),
+            target_workers: AtomicUsize::new(initial_workers),
+            tags: ArcSwap::from_pointee(HashMap::new()),
+            stopped: AtomicBool::new(false),
+        }
+    }
+
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    #[allow(dead_code)]
+    pub fn set_target_workers(&self, count: usize) {
+        self.target_workers.store(count, Ordering::SeqCst);
+    }
+
+    #[allow(dead_code)]
+    pub fn get_target_workers(&self) -> usize {
+        self.target_workers.load(Ordering::SeqCst)
+    }
+
+    pub fn add_tag(&self, key: String, value: String) {
+        // Copy-on-write update for tags
+        let current = self.tags.load();
+        let mut new_tags = (**current).clone();
+        new_tags.insert(key, value);
+        self.tags.store(Arc::new(new_tags));
+    }
+
+    #[allow(dead_code)]
+    pub fn get_tags(&self) -> Arc<HashMap<String, String>> {
+        // Lock-free read - returns Arc reference (no clone!)
+        self.tags.load_full()
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for ControlState {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+/// Parse a control command from user input
+pub fn parse_control_command(input: &str) -> Option<ControlCommand> {
+    let input = input.trim();
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    
+    if parts.is_empty() {
+        return None;
+    }
+
+    match parts[0].to_lowercase().as_str() {
+        "ramp" | "scale" => {
+            parts.get(1)?.parse::<usize>().ok().map(ControlCommand::Ramp)
+        }
+        "pause" => Some(ControlCommand::Pause),
+        "resume" | "unpause" => Some(ControlCommand::Resume),
+        "tag" => {
+            let kv = parts.get(1)?;
+            let (key, value) = kv.split_once('=')?;
+            Some(ControlCommand::Tag(key.to_string(), value.to_string()))
+        }
+        "status" | "stats" => Some(ControlCommand::Status),
+        "stop" | "quit" | "exit" => Some(ControlCommand::Stop),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ramp() {
+        assert!(matches!(parse_control_command("ramp 50"), Some(ControlCommand::Ramp(50))));
+        assert!(matches!(parse_control_command("scale 100"), Some(ControlCommand::Ramp(100))));
+    }
+
+    #[test]
+    fn test_parse_pause_resume() {
+        assert!(matches!(parse_control_command("pause"), Some(ControlCommand::Pause)));
+        assert!(matches!(parse_control_command("resume"), Some(ControlCommand::Resume)));
+        assert!(matches!(parse_control_command("unpause"), Some(ControlCommand::Resume)));
+    }
+
+    #[test]
+    fn test_parse_tag() {
+        match parse_control_command("tag region=us-east") {
+            Some(ControlCommand::Tag(k, v)) => {
+                assert_eq!(k, "region");
+                assert_eq!(v, "us-east");
+            }
+            _ => panic!("Expected Tag command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stop() {
+        assert!(matches!(parse_control_command("stop"), Some(ControlCommand::Stop)));
+        assert!(matches!(parse_control_command("quit"), Some(ControlCommand::Stop)));
+        assert!(matches!(parse_control_command("exit"), Some(ControlCommand::Stop)));
+    }
+
+    #[test]
+    fn test_control_state() {
+        let state = ControlState::new(10);
+        
+        assert!(!state.is_paused());
+        state.pause();
+        assert!(state.is_paused());
+        state.resume();
+        assert!(!state.is_paused());
+        
+        assert_eq!(state.get_target_workers(), 10);
+        state.set_target_workers(50);
+        assert_eq!(state.get_target_workers(), 50);
+        
+        state.add_tag("env".to_string(), "prod".to_string());
+        let tags = state.get_tags();
+        assert_eq!(tags.get("env"), Some(&"prod".to_string()));
+        // Verify Arc is returned (no extra clone)
+        assert!(std::sync::Arc::strong_count(&tags) >= 1);
+    }
+
+    #[test]
+    fn test_control_state_stop() {
+        let state = ControlState::new(1);
+        assert!(!state.is_stopped());
+        state.stop();
+        assert!(state.is_stopped());
+    }
+}

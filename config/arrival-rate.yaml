@@ -1,0 +1,23 @@
+# Constant Arrival Rate Configuration
+# Maintains fixed request rate regardless of response time
+#
+# Use case: API rate limit testing, SLA verification
+# Unlike VU-based testing, this ensures consistent throughput
+
+executor: constant-arrival-rate
+
+# Target: 100 requests per second
+rate: 100
+time_unit: 1s
+
+# Worker pool to handle the load (should exceed rate / avg_response_time)
+workers: 50
+
+duration: 2m
+
+criteria:
+  http_req_duration:
+    - p95<200
+    - avg<100
+  http_req_failed:
+    - rate<0.01
