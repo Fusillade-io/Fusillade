@@ -87,4 +87,132 @@ mod tests {
         assert!(schema_json.contains("schedule"));
         assert!(schema_json.contains("criteria"));
     }
+
+    #[test]
+    fn test_config_deserialize_minimal() {
+        let yaml = r#"
+workers: 10
+duration: "30s"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.workers, Some(10));
+        assert_eq!(config.duration, Some("30s".to_string()));
+    }
+
+    #[test]
+    fn test_config_deserialize_with_schedule() {
+        let yaml = r#"
+schedule:
+  - duration: "10s"
+    target: 5
+  - duration: "20s"
+    target: 10
+  - duration: "10s"
+    target: 0
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let schedule = config.schedule.unwrap();
+        assert_eq!(schedule.len(), 3);
+        assert_eq!(schedule[0].target, 5);
+        assert_eq!(schedule[1].target, 10);
+        assert_eq!(schedule[2].target, 0);
+    }
+
+    #[test]
+    fn test_config_deserialize_with_criteria() {
+        let yaml = r#"
+criteria:
+  http_req_duration:
+    - "p(95) < 500"
+    - "avg < 200"
+  checks:
+    - "rate > 0.95"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let criteria = config.criteria.unwrap();
+        assert!(criteria.contains_key("http_req_duration"));
+        assert!(criteria.contains_key("checks"));
+        assert_eq!(criteria["http_req_duration"].len(), 2);
+    }
+
+    #[test]
+    fn test_config_deserialize_chaos() {
+        let yaml = r#"
+jitter: "100ms"
+drop: 0.1
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.jitter, Some("100ms".to_string()));
+        assert_eq!(config.drop, Some(0.1));
+    }
+
+    #[test]
+    fn test_config_deserialize_arrival_rate() {
+        let yaml = r#"
+executor: constant-arrival-rate
+rate: 100
+time_unit: "1s"
+duration: "1m"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.executor, Some("constant-arrival-rate".to_string()));
+        assert_eq!(config.rate, Some(100));
+        assert_eq!(config.time_unit, Some("1s".to_string()));
+    }
+
+    #[test]
+    fn test_config_deserialize_multi_scenario() {
+        let yaml = r#"
+scenarios:
+  login:
+    workers: 5
+    duration: "30s"
+    exec: "loginFlow"
+  browse:
+    workers: 20
+    duration: "1m"
+    start_time: "30s"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let scenarios = config.scenarios.unwrap();
+        assert!(scenarios.contains_key("login"));
+        assert!(scenarios.contains_key("browse"));
+        assert_eq!(scenarios["login"].workers, Some(5));
+        assert_eq!(scenarios["browse"].start_time, Some("30s".to_string()));
+    }
+
+    #[test]
+    fn test_config_deserialize_json() {
+        let json = r#"{
+            "workers": 5,
+            "duration": "10s",
+            "iterations": 100
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.workers, Some(5));
+        assert_eq!(config.iterations, Some(100));
+    }
+
+    #[test]
+    fn test_scenario_config_defaults() {
+        let config = ScenarioConfig::default();
+        assert!(config.workers.is_none());
+        assert!(config.duration.is_none());
+        assert!(config.executor.is_none());
+    }
+
+    #[test]
+    fn test_config_serialize_roundtrip() {
+        let config = Config {
+            workers: Some(10),
+            duration: Some("30s".to_string()),
+            drop: Some(0.05),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.workers, parsed.workers);
+        assert_eq!(config.duration, parsed.duration);
+        assert_eq!(config.drop, parsed.drop);
+    }
 }

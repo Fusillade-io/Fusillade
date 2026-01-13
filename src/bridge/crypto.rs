@@ -122,23 +122,34 @@ pub fn register_sync<'js>(ctx: &Ctx<'js>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use md5::Md5;
+    use sha1::Sha1;
+    use sha2::{Sha256, Digest};
+
+    // --- HMAC Tests ---
 
     #[test]
     fn test_hmac_md5() {
         let result = hmac_md5(b"key", b"The quick brown fox jumps over the lazy dog");
         assert_eq!(result.len(), 32);
+        // Known test vector from RFC 2104
+        assert_eq!(result, "80070713463e7749b90c2dc24911e275");
     }
 
     #[test]
     fn test_hmac_sha1() {
         let result = hmac_sha1(b"key", b"The quick brown fox jumps over the lazy dog");
         assert_eq!(result.len(), 40);
+        // Known test vector
+        assert_eq!(result, "de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9");
     }
 
     #[test]
     fn test_hmac_sha256() {
         let result = hmac_sha256(b"key", b"The quick brown fox jumps over the lazy dog");
         assert_eq!(result.len(), 64);
+        // Known test vector
+        assert_eq!(result, "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
     }
 
     #[test]
@@ -153,5 +164,74 @@ mod tests {
         let result1 = hmac_sha256(b"key1", b"data");
         let result2 = hmac_sha256(b"key2", b"data");
         assert_ne!(result1, result2);
+    }
+
+    #[test]
+    fn test_hmac_different_data() {
+        let result1 = hmac_sha256(b"key", b"data1");
+        let result2 = hmac_sha256(b"key", b"data2");
+        assert_ne!(result1, result2);
+    }
+
+    #[test]
+    fn test_hmac_empty_data() {
+        let result = hmac_sha256(b"key", b"");
+        assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn test_hmac_empty_key() {
+        let result = hmac_sha256(b"", b"data");
+        assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn test_hmac_long_key() {
+        // Key longer than block size (64 bytes) should be hashed first
+        let long_key = b"this is a very long key that exceeds the block size of sixty four bytes and should be hashed";
+        let result = hmac_sha256(long_key, b"test data");
+        assert_eq!(result.len(), 64);
+    }
+
+    // --- Direct Hash Tests ---
+
+    #[test]
+    fn test_md5_known_vector() {
+        let mut hasher = Md5::new();
+        hasher.update(b"hello");
+        let result = format!("{:x}", hasher.finalize());
+        assert_eq!(result, "5d41402abc4b2a76b9719d911017c592");
+    }
+
+    #[test]
+    fn test_sha1_known_vector() {
+        let mut hasher = Sha1::new();
+        hasher.update(b"hello");
+        let result = format!("{:x}", hasher.finalize());
+        assert_eq!(result, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
+    }
+
+    #[test]
+    fn test_sha256_known_vector() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"hello");
+        let result = format!("{:x}", hasher.finalize());
+        assert_eq!(result, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    }
+
+    #[test]
+    fn test_md5_empty() {
+        let mut hasher = Md5::new();
+        hasher.update(b"");
+        let result = format!("{:x}", hasher.finalize());
+        assert_eq!(result, "d41d8cd98f00b204e9800998ecf8427e");
+    }
+
+    #[test]
+    fn test_sha256_empty() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"");
+        let result = format!("{:x}", hasher.finalize());
+        assert_eq!(result, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     }
 }
