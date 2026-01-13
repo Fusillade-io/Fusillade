@@ -150,6 +150,7 @@ mod tests {
     fn test_io_bridge_creation() {
         // This test just verifies the bridge can be created
         // Full integration tests require may coroutine context
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let rt = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
