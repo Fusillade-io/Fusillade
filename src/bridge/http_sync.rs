@@ -47,7 +47,7 @@ impl<'js> IntoJs<'js> for SyncHttpResponse {
     }
 }
 
-/// Thread-local ureq agent for connection pooling
+// Thread-local ureq agent for connection pooling
 thread_local! {
     static AGENT: ureq::Agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(60))

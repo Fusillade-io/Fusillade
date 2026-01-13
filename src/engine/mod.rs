@@ -169,8 +169,12 @@ impl Engine {
             let sharded_aggregator = Arc::new(ShardedAggregator::new(num_shards));
 
             // Use crossbeam bounded channel for backpressure at extreme load
-            // Scale buffer with workers: 10 metrics per worker, bounded 20k-100k
-            let channel_size = (total_workers * 10).clamp(20_000, 100_000);
+            // Scale buffer with workers, with higher limits for extreme concurrency
+            let channel_size = if total_workers > 30000 {
+                (total_workers * 5).clamp(50_000, 250_000)
+            } else {
+                (total_workers * 10).clamp(20_000, 100_000)
+            };
             let (tx, rx): (Sender<Metric>, Receiver<Metric>) = crossbeam_channel::bounded(channel_size);
 
             let agg_handle = sharded_aggregator.clone();
@@ -264,14 +268,9 @@ impl Engine {
                 HttpClient::with_pool_and_workers(pool_size, total_workers)
             };
 
-            // Configure may green thread scheduler with worker-scaled stack size
-            // High concurrency (>5K): 24KB stacks to save memory
-            // Low concurrency: 32KB stacks for more headroom
-            let may_stack_size = if total_workers > 5000 {
-                24 * 1024  // 24KB for high concurrency
-            } else {
-                32 * 1024  // 32KB for low/medium concurrency
-            };
+            // Configure may green thread scheduler with fixed stack size
+            // 16KB works for 50K+ workers and complex scripts. Override via options.stack_size if needed.
+            let may_stack_size = 16 * 1024;
             may::config()
                 .set_workers(num_cpus::get())
                 .set_stack_size(may_stack_size);
@@ -289,7 +288,7 @@ impl Engine {
 
             let start_time = Instant::now();
             let mut active_scenario_handles: Vec<JoinHandle<()>> = Vec::new(); // For multi-scenario
-            let mut active_legacy_workers: Vec<(JoinHandle<()>, Arc<AtomicBool>)> = Vec::new(); // For legacy
+            let mut active_legacy_workers: Vec<(may::coroutine::JoinHandle<()>, Arc<AtomicBool>)> = Vec::new(); // For legacy (green threads)
             let mut dynamic_target_legacy: Option<usize> = None; // For legacy ramp
             let schedule_legacy: Vec<(Duration, usize)>;
             let duration_legacy: Duration;
@@ -369,6 +368,7 @@ impl Engine {
                                 .stack_size(stack_sz)
                                 .spawn(move || {
                                 let (runtime, context) = Self::create_runtime().unwrap();
+                                runtime.set_memory_limit(256 * 1024); // 256KB per worker max JS heap
                                 context.with(|ctx| {
                                     // Use standard HTTP path with hyper/Tokio (better connection pooling)
                                     crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop).unwrap();
@@ -578,16 +578,18 @@ impl Engine {
                             let jitter = config.jitter.clone();
                             let drop = config.drop;
                             let control_state = control_state.clone();
-                            // Legacy mode: scale stack size with workers (256KB-512KB range)
-                            let default_stack = if total_workers > 5000 { 256 * 1024 } else { 512 * 1024 };
-                            let stack_sz = config.stack_size.unwrap_or(default_stack);
+                            // Legacy mode: use tiered stack sizes same as multi-scenario
+                            let stack_sz = config.stack_size.unwrap_or(may_stack_size);
                             let tokio_rt = shared_tokio_rt.clone();
                             let client = shared_http_client.clone();
                             
-                            let h = std::thread::Builder::new()
+                            // Spawn as may coroutine instead of OS thread for higher concurrency
+                            // SAFETY: Stack size is configured to be sufficient for JS execution
+                            let h = unsafe { may::coroutine::Builder::new()
                                 .stack_size(stack_sz)
                                 .spawn(move || {
                                 let (runtime, context) = Self::create_runtime().unwrap();
+                                runtime.set_memory_limit(256 * 1024); // 256KB per worker max JS heap
                                 context.with(|ctx| {
                                     // Pass std::sync::mpsc::Sender directly - no bridge thread needed!
                                     // Clone tx since we need it for both bridge and iteration metrics
@@ -605,9 +607,9 @@ impl Engine {
 
                                     let mut iteration_count: u64 = 0;
                                     while running_clone.load(Ordering::Relaxed) {
-                                        // Pause logic
+                                        // Pause logic - use may sleep to yield coroutine
                                         while control_state.is_paused() && running_clone.load(Ordering::Relaxed) {
-                                            std::thread::sleep(Duration::from_millis(100));
+                                            may::coroutine::sleep(Duration::from_millis(100));
                                         }
                                         if control_state.is_stopped() || !running_clone.load(Ordering::Relaxed) {
                                             break;
@@ -651,7 +653,7 @@ impl Engine {
                                         }
                                         if let Some(min_dur) = min_iter_duration {
                                             if elapsed < min_dur {
-                                                std::thread::sleep(min_dur - elapsed);
+                                                may::coroutine::sleep(min_dur - elapsed);
                                             }
                                         }
                                         // No artificial delay - let async I/O provide natural pacing
@@ -661,8 +663,8 @@ impl Engine {
                                 runtime.run_gc();
                                 std::mem::drop(context);
                                 std::mem::drop(runtime);
-                            });
-                            active_legacy_workers.push((h.expect("Failed to spawn worker thread"), running));
+                            }) };
+                            active_legacy_workers.push((h.expect("Failed to spawn coroutine"), running));
                         }
                     }
                     
@@ -696,8 +698,9 @@ impl Engine {
                     println!("Graceful stop: waiting up to {}s for workers to finish...", graceful_stop_duration.as_secs_f64());
                     let stop_start = Instant::now();
                     while stop_start.elapsed() < graceful_stop_duration {
-                         let all_finished = active_legacy_workers.iter().all(|(h, _)| h.is_finished());
-                         if all_finished {
+                         // Check if all workers have stopped (running flag is false means iteration loop exited)
+                         let all_stopped = active_legacy_workers.iter().all(|(_, r)| !r.load(Ordering::Relaxed));
+                         if all_stopped {
                              break;
                          }
                          std::thread::sleep(Duration::from_millis(100));
