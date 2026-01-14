@@ -4,12 +4,19 @@
 
 Fusillade is a modern load testing platform that combines the raw speed of **Rust** with the developer-friendly scripting of **JavaScript**.
 
-## Quick Start
+## Installation
 
+**[Download latest release](https://github.com/yourusername/fusillade/releases)** (Recommended)
+
+Or build from source:
 ```bash
-# Install
 cargo install --path .
+```
 
+See [INSTALL.md](INSTALL.md) for detailed installation instructions (Docker, Source, Windows, etc).
+
+## Quick Start
+```bash
 # Run a test
 fusillade run scenarios/test.js
 
@@ -87,7 +94,10 @@ fusillade convert --input recording.har --output flow.js
 
 ## Documentation
 
-See [documentation.md](documentation.md) for the complete API reference.
+- **[Documentation](DOCUMENTATION.md)**: Logic API and CLI reference.
+- **[Installation](INSTALL.md)**: Setup guide.
+- **[Changelog](CHANGELOG.md)**: Version history.
+- **[Contributing](CONTRIBUTING.md)**: How to help.
 
 ## Technology
 
