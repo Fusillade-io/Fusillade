@@ -4,7 +4,7 @@ Fusillade is a high-performance load testing tool written in Rust. You can insta
 
 ## Option 1: Download Binary (Recommended)
 
-You can download the pre-built binaries for Linux, macOS, and Windows from the [Releases page](https://github.com/yourusername/fusillade/releases).
+You can download the pre-built binaries for Linux, macOS, and Windows from the [Releases page](https://github.com/Fusillade-io/Fusillade/releases).
 
 1.  **Download** the archive for your operating system.
 2.  **Extract** the archive.
@@ -30,8 +30,8 @@ This method provides the best performance as the binary is optimized for your sp
 1.  **Clone the repository:**
 
     ```bash
-    git clone https://github.com/yourusername/fusillade.git
-    cd fusillade
+    git clone https://github.com/Fusillade-io/Fusillade.git
+    cd Fusillade
     ```
 
 2.  **Build and install:**
@@ -74,7 +74,9 @@ You can run Fusillade as a Docker container without installing Rust locally.
 
 ### Shell Alias
 
-For convenience, you can set up a shorter alias `fusi` for the `fusillade` command.
+If you built from source using `cargo install --path .`, both `fusillade` and `fusi` binaries are installed automatically.
+
+If you downloaded a pre-built binary and want a shorter command, you can set up an alias:
 
 **Bash / Zsh:**
 
@@ -88,13 +90,4 @@ Usage:
 
 ```bash
 fusi run scenarios/test.js
-```
-
-### Shell Completion
-
-To generate shell completion scripts (if supported by your build):
-
-```bash
-fusillade completion bash > ~/.fusillade-completion
-source ~/.fusillade-completion
 ```

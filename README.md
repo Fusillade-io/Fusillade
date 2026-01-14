@@ -6,7 +6,7 @@ Fusillade is a modern load testing platform that combines the raw speed of **Rus
 
 ## Installation
 
-**[Download latest release](https://github.com/yourusername/fusillade/releases)** (Recommended)
+**[Download latest release](https://github.com/Fusillade-io/Fusillade/releases)** (Recommended)
 
 Or build from source:
 ```bash
