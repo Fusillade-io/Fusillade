@@ -2,14 +2,6 @@
 
 Fusillade is a high-performance load testing tool written in Rust. You can install it by building from source or using Docker.
 
-## Prerequisites
-
-- **Rust**: Latest stable version (required for building from source).
-  - Install via [rustup.rs](https://rustup.rs): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- **Protoc**: Protocol Buffers compiler (required for gRPC support).
-  - Ubuntu/Debian: `sudo apt-get install protobuf-compiler`
-  - macOS: `brew install protobuf`
-
 ## Option 1: Download Binary (Recommended)
 
 You can download the pre-built binaries for Linux, macOS, and Windows from the [Releases page](https://github.com/yourusername/fusillade/releases).
@@ -25,6 +17,15 @@ You can download the pre-built binaries for Linux, macOS, and Windows from the [
 ## Option 2: Build from Source (Advanced)
 
 This method provides the best performance as the binary is optimized for your specific machine architecture.
+
+### Prerequisites
+
+- **Rust**: Latest stable version.
+  - Install via [rustup.rs](https://rustup.rs): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- **Protoc**: Protocol Buffers compiler (required for gRPC support).
+  - Ubuntu/Debian: `sudo apt-get install protobuf-compiler`
+  - macOS: `brew install protobuf`
+  - Windows: `choco install protoc`
 
 1.  **Clone the repository:**
 
