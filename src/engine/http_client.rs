@@ -203,8 +203,11 @@ impl HttpClient {
         Self { client }
     }
 
+    /// Make an HTTP request. If `response_sink` is true, the response body is read from the network
+    /// (required for connection keep-alive) but immediately discarded to save memory.
+    /// The returned Response will have an empty body when sink mode is enabled.
     // Must be called inside a Tokio Runtime
-    pub async fn request(&self, req: Request<String>) -> Result<(Response<Bytes>, RequestTimings), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn request(&self, req: Request<String>, response_sink: bool) -> Result<(Response<Bytes>, RequestTimings), Box<dyn std::error::Error + Send + Sync>> {
         let request_start = Instant::now();
 
         let url = req.uri().clone();
@@ -236,7 +239,27 @@ impl HttpClient {
 
         // Split response to consume body
         let (parts, body_stream) = response.into_parts();
-        let body = body_stream.collect().await?.to_bytes();
+
+        // Always read the body stream to completion (required for connection keep-alive/reuse)
+        // When response_sink is enabled, we discard the bytes immediately to save memory
+        let (body, resp_body_size) = if response_sink {
+            // Sink mode: read and discard body chunks, only track size
+            let mut total_size = 0usize;
+            let mut stream = body_stream;
+            while let Some(chunk) = stream.frame().await {
+                if let Ok(frame) = chunk {
+                    if let Some(data) = frame.data_ref() {
+                        total_size += data.len();
+                    }
+                }
+            }
+            (Bytes::new(), total_size)
+        } else {
+            // Normal mode: collect body into memory
+            let body = body_stream.collect().await?.to_bytes();
+            let size = body.len();
+            (body, size)
+        };
         let receive_end = Instant::now();
 
         // Simple timing: measure actual durations without connector-level breakdown
@@ -260,9 +283,10 @@ impl HttpClient {
         timings.duration = timings.sending + timings.waiting + timings.receiving;
 
         // Calculate response size (headers + body)
-        let mut resp_size = body.len();
+        // Use resp_body_size which tracks actual bytes read (works for both normal and sink mode)
+        let mut resp_size = resp_body_size;
         // Status line: HTTP/1.1 STATUS REASON\r\n (approx 15 chars + reason)
-        resp_size += 15; 
+        resp_size += 15;
         for (k, v) in parts.headers.iter() {
              resp_size += k.as_str().len() + 2 + v.len() + 2;
         }

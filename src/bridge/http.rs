@@ -113,10 +113,11 @@ fn version_to_proto(version: http::Version) -> String {
     }
 }
 
-pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime: Arc<Runtime>, jitter_str: Option<String>, drop_prob: Option<f64>) -> Result<()> {
+pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime: Arc<Runtime>, jitter_str: Option<String>, drop_prob: Option<f64>, response_sink: bool) -> Result<()> {
     // Parse jitter once
     let global_jitter = jitter_str.as_deref().and_then(parse_duration_str);
     let global_drop = drop_prob;
+    let global_response_sink = response_sink;
     let http = Object::new(ctx.clone())?;
     let cookie_store = std::rc::Rc::new(RefCell::new(CookieStore::default()));
 
@@ -131,6 +132,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let runtime = rt_base.clone();
         let jitter = global_jitter;
         let drop = global_drop;
+        let response_sink = global_response_sink;
 
         let mut method_str: String = opts.get("method").unwrap_or_else(|_| "GET".to_string());
         let mut url_str: String = opts.get("url").map_err(|_| rquickjs::Error::new_from_js("url is required", "ValueError"))?;
@@ -200,7 +202,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
                     tokio::time::sleep(j).await;
                 }
 
-                let request_future = client.request(req);
+                let request_future = client.request(req, response_sink);
                 if let Some(timeout) = timeout_duration {
                     match tokio::time::timeout(timeout, request_future).await {
                         Ok(result) => result,
@@ -231,6 +233,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
                     }
 
                     // Body is already read in client.request and inside response
+                    // When response_sink is enabled, body will be empty (Bytes::new())
                     let body = response.body().clone();
 
                     let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
@@ -289,7 +292,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
     let tx_get = tx.clone();
     let cs_get = cookie_store.clone();
     let rt_get = runtime.clone();
-    
+    let sink_get = global_response_sink;
+
     http.set("get", Function::new(ctx.clone(), move |url_str: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<HttpResponse> {
         let mut name_tag = None;
         let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
@@ -314,7 +318,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let runtime = rt_get.clone();
         let jitter = global_jitter;
         let drop = global_drop;
-        
+        let response_sink = sink_get;
+
         let mut current_url = url_str.clone();
         let mut redirects = 0;
 
@@ -352,7 +357,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
                 }
                 if let Some(j) = jitter { tokio::time::sleep(j).await; }
 
-                let request_future = client.request(req);
+                let request_future = client.request(req, response_sink);
                 if let Some(timeout) = timeout_duration {
                     match tokio::time::timeout(timeout, request_future).await {
                         Ok(result) => result,
@@ -432,7 +437,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
     let tx_post = tx.clone();
     let cs_post = cookie_store.clone();
     let rt_post = runtime.clone();
-    
+    let sink_post = global_response_sink;
+
     http.set("post", Function::new(ctx.clone(), move |url_str: String, body: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<HttpResponse> {
         let mut name_tag = None;
         let mut headers_map: Option<HashMap<String, String>> = None;
@@ -459,7 +465,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let runtime = rt_post.clone();
         let jitter = global_jitter;
         let drop = global_drop;
-        
+        let response_sink = sink_post;
+
         let mut current_url = url_str.clone();
         let mut redirects = 0;
         let mut current_method = Method::POST;
@@ -601,7 +608,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
                 }
                 if let Some(j) = jitter { tokio::time::sleep(j).await; }
 
-                let request_future = client.request(req);
+                let request_future = client.request(req, response_sink);
                 if let Some(timeout) = timeout_duration {
                     match tokio::time::timeout(timeout, request_future).await {
                         Ok(result) => result,
@@ -680,7 +687,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
     let tx_put = tx.clone();
     let cs_put = cookie_store.clone();
     let rt_put = runtime.clone();
-    
+    let sink_put = global_response_sink;
+
     http.set("put", Function::new(ctx.clone(), move |url_str: String, body: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<HttpResponse> {
         let mut name_tag = None;
         let mut headers_map: Option<HashMap<String, String>> = None;
@@ -706,6 +714,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let runtime = rt_put.clone();
         let jitter = global_jitter;
         let drop = global_drop;
+        let response_sink = sink_put;
         let url_parsed = Url::parse(&url_str).map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
         let mut req_builder = Request::builder().method(Method::PUT).uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
         let mut cookie_header_val = String::new();
@@ -718,7 +727,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let res_result = runtime.block_on(async {
             if let Some(d) = drop { if rand::thread_rng().gen::<f64>() < d { return Err(Box::new(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Simulated network drop")) as Box<dyn std::error::Error + Send + Sync>); } }
             if let Some(j) = jitter { tokio::time::sleep(j).await; }
-            let request_future = client.request(req);
+            let request_future = client.request(req, response_sink);
             if let Some(timeout) = timeout_duration {
                 match tokio::time::timeout(timeout, request_future).await {
                     Ok(result) => result,
@@ -754,7 +763,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
     let tx_del = tx.clone();
     let cs_del = cookie_store.clone();
     let rt_del = runtime.clone();
-    
+    let sink_del = global_response_sink;
+
     http.set("del", Function::new(ctx.clone(), move |url_str: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<HttpResponse> {
         let mut name_tag: Option<String> = None;
         let mut headers_map: Option<HashMap<String, String>> = None;
@@ -780,6 +790,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let runtime = rt_del.clone();
         let jitter = global_jitter;
         let drop = global_drop;
+        let response_sink = sink_del;
         let url_parsed = Url::parse(&url_str).map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
         let mut req_builder = Request::builder().method(Method::DELETE).uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
         let mut cookie_header_val = String::new();
@@ -792,7 +803,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let res_result = runtime.block_on(async {
             if let Some(d) = drop { if rand::thread_rng().gen::<f64>() < d { return Err(Box::new(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Simulated network drop")) as Box<dyn std::error::Error + Send + Sync>); } }
             if let Some(j) = jitter { tokio::time::sleep(j).await; }
-            let request_future = client.request(req);
+            let request_future = client.request(req, response_sink);
             if let Some(timeout) = timeout_duration {
                 match tokio::time::timeout(timeout, request_future).await {
                     Ok(result) => result,
@@ -828,7 +839,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
     let tx_patch = tx.clone();
     let cs_patch = cookie_store.clone();
     let rt_patch = runtime.clone();
-    
+    let sink_patch = global_response_sink;
+
     http.set("patch", Function::new(ctx.clone(), move |url_str: String, body: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<HttpResponse> {
         let mut name_tag: Option<String> = None;
         let mut headers_map: Option<HashMap<String, String>> = None;
@@ -854,6 +866,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let runtime = rt_patch.clone();
         let jitter = global_jitter;
         let drop = global_drop;
+        let response_sink = sink_patch;
         let url_parsed = Url::parse(&url_str).map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
         let mut req_builder = Request::builder().method(Method::PATCH).uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
         let mut cookie_header_val = String::new();
@@ -866,7 +879,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let res_result = runtime.block_on(async {
             if let Some(d) = drop { if rand::thread_rng().gen::<f64>() < d { return Err(Box::new(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "Simulated network drop")) as Box<dyn std::error::Error + Send + Sync>); } }
             if let Some(j) = jitter { tokio::time::sleep(j).await; }
-            let request_future = client.request(req);
+            let request_future = client.request(req, response_sink);
             if let Some(timeout) = timeout_duration {
                 match tokio::time::timeout(timeout, request_future).await {
                     Ok(result) => result,
@@ -902,7 +915,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
     let tx_head = tx.clone();
     let cs_head = cookie_store.clone();
     let rt_head = runtime.clone();
-    
+    let sink_head = global_response_sink;
+
     http.set("head", Function::new(ctx.clone(), move |url_str: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<HttpResponse> {
         let mut name_tag: Option<String> = None;
         let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
@@ -924,6 +938,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let client = c_head.clone();
         let tx = tx_head.clone();
         let runtime = rt_head.clone();
+        let response_sink = sink_head;
         let url_parsed = Url::parse(&url_str).map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
         let mut req_builder = Request::builder().method(Method::HEAD).uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
         let mut cookie_header_val = String::new();
@@ -933,7 +948,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let start = Instant::now();
         // Execute request with optional timeout
         let res_result = runtime.block_on(async {
-            let request_future = client.request(req);
+            let request_future = client.request(req, response_sink);
             if let Some(timeout) = timeout_duration {
                 match tokio::time::timeout(timeout, request_future).await {
                     Ok(result) => result,
@@ -968,7 +983,8 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
     let tx_opts = tx.clone();
     let cs_opts = cookie_store.clone();
     let rt_opts = runtime.clone();
-    
+    let sink_opts = global_response_sink;
+
     http.set("options", Function::new(ctx.clone(), move |url_str: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<HttpResponse> {
         let mut name_tag: Option<String> = None;
         let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
@@ -990,6 +1006,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let client = c_opts.clone();
         let tx = tx_opts.clone();
         let runtime = rt_opts.clone();
+        let response_sink = sink_opts;
         let url_parsed = Url::parse(&url_str).map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
         let mut req_builder = Request::builder().method(Method::OPTIONS).uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
         let mut cookie_header_val = String::new();
@@ -999,7 +1016,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let start = Instant::now();
         // Execute request with optional timeout
         let res_result = runtime.block_on(async {
-            let request_future = client.request(req);
+            let request_future = client.request(req, response_sink);
             if let Some(timeout) = timeout_duration {
                 match tokio::time::timeout(timeout, request_future).await {
                     Ok(result) => result,

@@ -55,11 +55,13 @@ thread_local! {
 }
 
 /// Register synchronous HTTP functions using ureq (no Tokio overhead)
-pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
+pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) -> Result<()> {
     let http = Object::new(ctx.clone())?;
+    let global_response_sink = response_sink;
 
     // GET - most common, highly optimized
     let tx_get = tx.clone();
+    let sink_get = global_response_sink;
     http.set("get", Function::new(ctx.clone(), move |url_str: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<SyncHttpResponse> {
         let name_tag: Option<String> = rest.first()
             .and_then(|arg| arg.as_object())
@@ -90,7 +92,15 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
                 }
 
                 let body_start = Instant::now();
-                let body = response.into_string().unwrap_or_default().into_bytes();
+                // When response_sink is enabled, read and discard the body to save memory
+                // Body must still be read for connection keep-alive
+                let body = if sink_get {
+                    // Read and discard - consume the response but don't store
+                    let _ = response.into_string();
+                    Vec::new()
+                } else {
+                    response.into_string().unwrap_or_default().into_bytes()
+                };
                 let receiving = body_start.elapsed();
                 let duration = start.elapsed();
 
@@ -147,6 +157,7 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
 
     // POST
     let tx_post = tx.clone();
+    let sink_post = global_response_sink;
     http.set("post", Function::new(ctx.clone(), move |url_str: String, body: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<SyncHttpResponse> {
         let name_tag: Option<String> = rest.first()
             .and_then(|arg| arg.as_object())
@@ -185,7 +196,12 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
                 }
 
                 let body_start = Instant::now();
-                let resp_body = response.into_string().unwrap_or_default().into_bytes();
+                let resp_body = if sink_post {
+                    let _ = response.into_string();
+                    Vec::new()
+                } else {
+                    response.into_string().unwrap_or_default().into_bytes()
+                };
                 let receiving = body_start.elapsed();
                 let duration = start.elapsed();
 
@@ -241,6 +257,7 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
 
     // PUT
     let tx_put = tx.clone();
+    let sink_put = global_response_sink;
     http.set("put", Function::new(ctx.clone(), move |url_str: String, body: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<SyncHttpResponse> {
         let name_tag: Option<String> = rest.first()
             .and_then(|arg| arg.as_object())
@@ -272,7 +289,12 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
                         headers.insert(name, val.to_string());
                     }
                 }
-                let resp_body = response.into_string().unwrap_or_default().into_bytes();
+                let resp_body = if sink_put {
+                    let _ = response.into_string();
+                    Vec::new()
+                } else {
+                    response.into_string().unwrap_or_default().into_bytes()
+                };
 
                 let metric_name: Cow<str> = match &name_tag {
                     Some(n) => Cow::Borrowed(n.as_str()),
@@ -309,6 +331,7 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
 
     // DELETE
     let tx_del = tx.clone();
+    let sink_del = global_response_sink;
     http.set("del", Function::new(ctx.clone(), move |url_str: String, rest: rquickjs::function::Rest<rquickjs::Value>| -> Result<SyncHttpResponse> {
         let name_tag: Option<String> = rest.first()
             .and_then(|arg| arg.as_object())
@@ -338,7 +361,12 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
                         headers.insert(name, val.to_string());
                     }
                 }
-                let resp_body = response.into_string().unwrap_or_default().into_bytes();
+                let resp_body = if sink_del {
+                    let _ = response.into_string();
+                    Vec::new()
+                } else {
+                    response.into_string().unwrap_or_default().into_bytes()
+                };
 
                 let metric_name: Cow<str> = match &name_tag {
                     Some(n) => Cow::Borrowed(n.as_str()),
