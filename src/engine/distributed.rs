@@ -333,8 +333,8 @@ async fn handle_api_workers(
 ) -> Json<WorkerListResponse> {
     let workers = match state.workers.read() {
         Ok(guard) => guard
-            .iter()
-            .map(|(_, w)| WorkerInfoResponse {
+            .values()
+            .map(|w| WorkerInfoResponse {
                 id: w.id.clone(),
                 address: w.address.clone(),
                 available_cpus: w.available_cpus,

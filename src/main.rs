@@ -304,15 +304,13 @@ fn main() -> Result<()> {
                 // Spawn input thread
                 std::thread::spawn(move || {
                     let stdin = std::io::stdin();
-                    for line in stdin.lock().lines() {
-                        if let Ok(line) = line {
-                            if let Some(cmd) = parse_control_command(&line) {
-                                if tx.send(cmd).is_err() {
-                                    break; // Channel closed
-                                }
-                            } else if !line.trim().is_empty() {
-                                println!("Unknown command: {}", line.trim());
+                    for line in stdin.lock().lines().map_while(Result::ok) {
+                        if let Some(cmd) = parse_control_command(&line) {
+                            if tx.send(cmd).is_err() {
+                                break; // Channel closed
                             }
+                        } else if !line.trim().is_empty() {
+                            println!("Unknown command: {}", line.trim());
                         }
                     }
                 });

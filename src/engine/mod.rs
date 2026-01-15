@@ -167,7 +167,7 @@ impl Engine {
 
             // Dynamic shard count: target ~100 workers per shard for optimal contention
             // At 10k workers: 100 shards = 100 workers/shard (vs old 625 workers/shard)
-            let num_shards = (total_workers / 100).max(16).min(256);
+            let num_shards = (total_workers / 100).clamp(16, 256);
             let sharded_aggregator = Arc::new(ShardedAggregator::new(num_shards));
 
             // Use crossbeam bounded channel for backpressure at extreme load
@@ -189,7 +189,6 @@ impl Engine {
                 let rx = rx.clone();
                 let agg_handle = agg_handle.clone();
                 let metrics_url = metrics_url.clone();
-                let num_shards = num_shards;
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -264,7 +263,7 @@ impl Engine {
             );
             // Scale connection pool with workers: target ~1 idle connection per 5 workers
             // At 10k workers: 2000 idle connections per host (reduced from 3333)
-            let pool_size = (total_workers / 5).max(500).min(2000);
+            let pool_size = (total_workers / 5).clamp(500, 2000);
             let shared_http_client = {
                 let _guard = shared_tokio_rt.enter();
                 HttpClient::with_pool_and_workers(pool_size, total_workers)
