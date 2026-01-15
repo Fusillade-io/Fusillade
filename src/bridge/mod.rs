@@ -43,21 +43,21 @@ pub fn register_env(ctx: &Ctx) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: HttpClient, shared_data: data::SharedData, worker_id: usize, aggregator: SharedAggregator, runtime: Arc<Runtime>, jitter: Option<String>, drop: Option<f64>) -> Result<()> {
+pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: HttpClient, shared_data: data::SharedData, worker_id: usize, aggregator: SharedAggregator, runtime: Arc<Runtime>, jitter: Option<String>, drop: Option<f64>, response_sink: bool) -> Result<()> {
     let globals = ctx.globals();
     let tx_print = tx.clone();
     globals.set("print", Function::new(ctx.clone(), move |msg: String| {
         print(tx_print.clone(), msg);
     }))?;
-    
+
     globals.set("sleep", Function::new(ctx.clone(), move |secs: f64| {
         std::thread::sleep(Duration::from_secs_f64(secs));
     }))?;
 
     globals.set("__WORKER_ID", worker_id)?;
-    
+
     // Register internal modules
-    http::register_sync(ctx, tx.clone(), client, runtime, jitter, drop)?;
+    http::register_sync(ctx, tx.clone(), client, runtime, jitter, drop, response_sink)?;
     check::register_sync(ctx, tx.clone())?;
     group::register_sync(ctx)?;
     file::register_sync(ctx)?;
@@ -82,7 +82,7 @@ pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: Ht
 /// Fast sync registration using ureq - bypasses Tokio for lower latency
 /// Use this for May green thread workers
 #[allow(clippy::too_many_arguments)]
-pub fn register_globals_sync_fast<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, shared_data: data::SharedData, worker_id: usize, aggregator: SharedAggregator) -> Result<()> {
+pub fn register_globals_sync_fast<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, shared_data: data::SharedData, worker_id: usize, aggregator: SharedAggregator, response_sink: bool) -> Result<()> {
     let globals = ctx.globals();
     let tx_print = tx.clone();
     globals.set("print", Function::new(ctx.clone(), move |msg: String| {
@@ -97,7 +97,7 @@ pub fn register_globals_sync_fast<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, share
     globals.set("__WORKER_ID", worker_id)?;
 
     // Use sync HTTP (ureq) - no Tokio overhead
-    http_sync::register_sync_http(ctx, tx.clone())?;
+    http_sync::register_sync_http(ctx, tx.clone(), response_sink)?;
     check::register_sync(ctx, tx.clone())?;
     group::register_sync(ctx)?;
     file::register_sync(ctx)?;

@@ -73,7 +73,7 @@ impl Engine {
         };
 
         let config = context.with(|ctx| {
-            crate::bridge::register_globals_sync(&ctx, tx, client, dummy_shared_data, 0, dummy_aggregator, tokio_rt, None, None).expect("Failed to register globals in config extraction");
+            crate::bridge::register_globals_sync(&ctx, tx, client, dummy_shared_data, 0, dummy_aggregator, tokio_rt, None, None, false).expect("Failed to register globals in config extraction");
             let module_name = script_path.to_string_lossy().to_string();
             let module = Module::declare(ctx.clone(), module_name, script_content)?;
             let (module, _) = module.eval()?;
@@ -88,7 +88,8 @@ impl Engine {
                         if let Some(r) = obj.remove("rate") { obj.insert("rate".to_string(), r); }
                         if let Some(tu) = obj.remove("timeUnit") { obj.insert("time_unit".to_string(), tu); }
                         if let Some(mid) = obj.remove("minIterationDuration") { obj.insert("min_iteration_duration".to_string(), mid); }
-                        
+                        if let Some(rs) = obj.remove("responseSink") { obj.insert("response_sink".to_string(), rs); }
+
                         // Handle scenarios with k6-compatible key mapping
                         if let Some(scenarios) = obj.get_mut("scenarios") {
                             if let Some(scenarios_obj) = scenarios.as_object_mut() {
@@ -98,6 +99,7 @@ impl Engine {
                                         if let Some(vus) = scenario_obj.remove("vus") { scenario_obj.insert("workers".to_string(), vus); }
                                         if let Some(stages) = scenario_obj.remove("stages") { scenario_obj.insert("schedule".to_string(), stages); }
                                         if let Some(tu) = scenario_obj.remove("timeUnit") { scenario_obj.insert("time_unit".to_string(), tu); }
+                                        if let Some(rs) = scenario_obj.remove("responseSink") { scenario_obj.insert("response_sink".to_string(), rs); }
                                     }
                                 }
                             }
@@ -221,7 +223,7 @@ impl Engine {
                                         .uri(format!("{}/metrics", url))
                                         .body(body)
                                     {
-                                        let _ = rt.block_on(client.request(req));
+                                        let _ = rt.block_on(client.request(req, false));
                                     }
                                     last_send = Instant::now();
                                 }
@@ -358,6 +360,7 @@ impl Engine {
                             let drop = drop;
                             // Use worker-scaled stack for green threads (configurable)
                             let stack_sz = scenario_config.stack_size.unwrap_or(may_stack_size);
+                            let response_sink = scenario_config.response_sink.unwrap_or(false);
                             let tokio_rt = shared_tokio_rt.clone();
                             let client = shared_http_client.clone();
                             let control_state = control_state.clone();
@@ -371,7 +374,7 @@ impl Engine {
                                 runtime.set_memory_limit(256 * 1024); // 256KB per worker max JS heap
                                 context.with(|ctx| {
                                     // Use standard HTTP path with hyper/Tokio (better connection pooling)
-                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop).unwrap();
+                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop, response_sink).unwrap();
                                     // Set scenario name global for automatic tagging
                                     ctx.globals().set("__SCENARIO", scenario_name.clone()).unwrap();
                                     let module = Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).unwrap();
@@ -577,12 +580,13 @@ impl Engine {
                             let max_iterations = config.iterations;
                             let jitter = config.jitter.clone();
                             let drop = config.drop;
+                            let response_sink = config.response_sink.unwrap_or(false);
                             let control_state = control_state.clone();
                             // Legacy mode: use tiered stack sizes same as multi-scenario
                             let stack_sz = config.stack_size.unwrap_or(may_stack_size);
                             let tokio_rt = shared_tokio_rt.clone();
                             let client = shared_http_client.clone();
-                            
+
                             // Spawn as may coroutine instead of OS thread for higher concurrency
                             // SAFETY: Stack size is configured to be sufficient for JS execution
                             let h = unsafe { may::coroutine::Builder::new()
@@ -593,7 +597,7 @@ impl Engine {
                                 context.with(|ctx| {
                                     // Pass std::sync::mpsc::Sender directly - no bridge thread needed!
                                     // Clone tx since we need it for both bridge and iteration metrics
-                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop).unwrap();
+                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop, response_sink).unwrap();
                                     let module = Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).unwrap();
                                     let (module, _) = module.eval().unwrap();
                                     let func: Function = module.get("default").unwrap();
@@ -763,7 +767,7 @@ impl Engine {
                     .body("".to_string());
                 
                 if let Ok(r) = req {
-                        let _ = rt.block_on(async move { tokio::time::timeout(Duration::from_secs(10), client.request(r)).await });
+                        let _ = rt.block_on(async move { tokio::time::timeout(Duration::from_secs(10), client.request(r, false)).await });
                 }
             })
         }).collect();
@@ -792,10 +796,10 @@ impl Engine {
         };
         
         let result = context.with(|ctx| {
-            crate::bridge::register_globals_sync(&ctx, tx_print, client, shared_data, 0, aggregator, tokio_rt, None, None)?;
+            crate::bridge::register_globals_sync(&ctx, tx_print, client, shared_data, 0, aggregator, tokio_rt, None, None, false)?;
             let module = Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content)?;
             let (module, _) = module.eval()?;
-            
+
             if let Ok(setup_fn) = module.get::<_, Function>("setup") {
                 let result = setup_fn.call::<_, Value>(())?;
                 if !result.is_undefined() {
@@ -824,7 +828,7 @@ impl Engine {
         };
 
         context.with(|ctx| {
-            crate::bridge::register_globals_sync(&ctx, tx, client, shared_data, 0, aggregator, tokio_rt, None, None)?;
+            crate::bridge::register_globals_sync(&ctx, tx, client, shared_data, 0, aggregator, tokio_rt, None, None, false)?;
             let _ = ctx.eval::<Value, _>(script_content)?;
             Ok::<(), anyhow::Error>(())
         })?;
@@ -853,10 +857,10 @@ impl Engine {
         };
 
         let _ = context.with(|ctx| {
-            crate::bridge::register_globals_sync(&ctx, tx_print, client, shared_data, 0, aggregator, tokio_rt, None, None)?;
+            crate::bridge::register_globals_sync(&ctx, tx_print, client, shared_data, 0, aggregator, tokio_rt, None, None, false)?;
             let module = Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content)?;
             let (module, _) = module.eval()?;
-            
+
             if let Ok(teardown_fn) = module.get::<_, Function>("teardown") {
                 let data_val = if let Some(json) = data {
                     json_parse(ctx.clone(), &json).unwrap_or(Value::new_undefined(ctx.clone()))

@@ -35,6 +35,12 @@ pub struct ScenarioConfig {
     pub thresholds: Option<HashMap<String, Vec<String>>>,
     /// Worker thread stack size in bytes (default: 128KB). Increase if encountering stack overflows.
     pub stack_size: Option<usize>,
+    /// Sink (discard) response bodies to save memory. Body is still downloaded from the network
+    /// (required for connection keep-alive), but immediately discarded instead of being stored.
+    /// When enabled, response.body will be null. Useful for high-throughput tests
+    /// where response content is not needed for assertions.
+    #[serde(alias = "responseSink")]
+    pub response_sink: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
@@ -69,6 +75,12 @@ pub struct Config {
     pub drop: Option<f64>,
     /// Worker thread stack size in bytes (default: 128KB). Increase to 256KB or higher if encountering stack overflows.
     pub stack_size: Option<usize>,
+    /// Sink (discard) response bodies to save memory. Body is still downloaded from the network
+    /// (required for connection keep-alive), but immediately discarded instead of being stored.
+    /// When enabled, response.body will be null. Useful for high-throughput tests
+    /// where response content is not needed for assertions.
+    #[serde(alias = "responseSink")]
+    pub response_sink: Option<bool>,
 }
 
 impl Config {
@@ -214,5 +226,45 @@ scenarios:
         assert_eq!(config.workers, parsed.workers);
         assert_eq!(config.duration, parsed.duration);
         assert_eq!(config.drop, parsed.drop);
+    }
+
+    #[test]
+    fn test_config_response_sink() {
+        let yaml = r#"
+workers: 10
+duration: "30s"
+response_sink: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.response_sink, Some(true));
+    }
+
+    #[test]
+    fn test_config_response_sink_camel_case() {
+        let json = r#"{
+            "workers": 5,
+            "duration": "10s",
+            "responseSink": true
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.response_sink, Some(true));
+    }
+
+    #[test]
+    fn test_scenario_config_response_sink() {
+        let yaml = r#"
+scenarios:
+  load_test:
+    workers: 100
+    duration: "1m"
+    response_sink: true
+  normal_test:
+    workers: 10
+    duration: "30s"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let scenarios = config.scenarios.unwrap();
+        assert_eq!(scenarios["load_test"].response_sink, Some(true));
+        assert_eq!(scenarios["normal_test"].response_sink, None);
     }
 }

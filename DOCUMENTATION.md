@@ -233,6 +233,7 @@ Fusillade is configured via the `export const options` object in your script.
 | `min_iteration_duration` | String | Minimum time each iteration must take. If an iteration finishes faster, it waits before starting the next. Useful for rate limiting. | `'1s'` |
 | `scenarios` | Object | Multiple named scenarios with independent configs (see below). | `{ fast: {...}, slow: {...} }` |
 | `stack_size` | Number | Worker thread stack size in bytes. Default: `262144` (256KB). Increase if encountering stack overflows with complex scripts. | `524288` |
+| `response_sink` | Boolean | Sink (discard) response bodies to save memory. See [Response Sink Mode](#response-sink-mode) below. | `true` |
 
 ### Scenarios
 
@@ -269,6 +270,66 @@ export function checkoutFlow() { /* checkout logic */ }
 | `startTime` | String | Delay before starting (e.g., `"30s"`) |
 | `thresholds` | Object | Per-scenario pass/fail criteria |
 | `stack_size` | Number | Worker stack size in bytes (default: 256KB) |
+| `response_sink` | Boolean | Discard response bodies for this scenario |
+
+### Response Sink Mode
+
+When testing at high concurrency with large response bodies, memory usage can become a bottleneck. The `response_sink` option addresses this by discarding response bodies immediately after download.
+
+**How it works:**
+- **Network**: The full response body is still downloaded from the server (required for HTTP connection keep-alive/reuse)
+- **Memory**: Body bytes are discarded immediately instead of being stored
+- **Response object**: `response.body` will be `null` or empty when sink mode is enabled
+- **Metrics**: Response size is still tracked correctly for bandwidth metrics
+
+**When to use:**
+- High-throughput tests (1000+ workers) with large response bodies
+- Tests where you only care about status codes and headers, not body content
+- Memory-constrained environments
+
+**Example:**
+
+```javascript
+export const options = {
+    workers: 1000,
+    duration: '5m',
+    response_sink: true,  // or responseSink (camelCase)
+};
+
+export default function() {
+    const res = http.get('https://api.example.com/large-payload');
+
+    // These still work:
+    check(res, {
+        'status is 200': (r) => r.status === 200,
+        'has content-type': (r) => r.headers['content-type'] !== undefined,
+    });
+
+    // This will be empty/null when response_sink is enabled:
+    // res.body
+}
+```
+
+**Per-scenario configuration:**
+
+```javascript
+export const options = {
+    scenarios: {
+        heavy_load: {
+            workers: 1000,
+            duration: '5m',
+            response_sink: true,  // Only sink bodies for this scenario
+            exec: 'heavyTest',
+        },
+        validation: {
+            workers: 10,
+            duration: '5m',
+            // response_sink defaults to false - bodies are available
+            exec: 'validateResponses',
+        },
+    },
+};
+```
 
 ---
 
@@ -510,7 +571,7 @@ The optional `options` argument supports:
 
 The `Response` object returned by requests contains:
 * `status` (Number): HTTP status code (e.g., 200, 404). `0` for network/timeout errors.
-* `body` (String): Response body as text.
+* `body` (String): Response body as text. **Note:** Will be `null`/empty when `response_sink` is enabled.
 * `headers` (Object): Response headers.
 * `proto` (String): HTTP protocol version:
     * `"h1"`: HTTP/0.9, HTTP/1.0, HTTP/1.1
