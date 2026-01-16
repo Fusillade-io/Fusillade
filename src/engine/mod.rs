@@ -121,13 +121,14 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub fn run_load_test(
         self: Arc<Self>,
-        script_path: PathBuf, 
-        script_content: String, 
-        config: Config, 
-        json_output: bool, 
-        export_json: Option<PathBuf>, 
+        script_path: PathBuf,
+        script_content: String,
+        config: Config,
+        json_output: bool,
+        export_json: Option<PathBuf>,
         _export_html: Option<PathBuf>,
         controller_metrics_url: Option<String>,
+        controller_metrics_auth: Option<String>,
         control_rx: Option<std::sync::mpsc::Receiver<control::ControlCommand>>,
     ) -> Result<crate::stats::ReportStats> {
         if let Some(url) = &config.warmup {
@@ -181,6 +182,7 @@ impl Engine {
 
             let agg_handle = sharded_aggregator.clone();
             let metrics_url = controller_metrics_url.clone();
+            let metrics_auth = controller_metrics_auth.clone();
 
             // Spawn multiple aggregator consumer threads for parallel metric processing
             // This prevents the single-consumer bottleneck at high throughput
@@ -496,10 +498,19 @@ impl Engine {
             }
 
             // UNIFIED CONTROL LOOP
-            
+
             // If multi-scenario, we loop until all handles are done or stopped
             // If legacy, we loop based on duration_legacy
-            
+
+            // Setup periodic metrics reporting if URL is specified
+            let metrics_client = if metrics_url.is_some() {
+                Some(HttpClient::new())
+            } else {
+                None
+            };
+            let mut last_metrics_send = Instant::now();
+            let metrics_interval = Duration::from_secs(5);
+
             'main_loop: loop {
                 if is_multi_scenario {
                     if active_scenario_handles.iter().all(|h| h.is_finished()) {
@@ -680,7 +691,57 @@ impl Engine {
                         }
                     }
                 } // End legacy scaling for this loop tick
-                
+
+                // Periodic metrics reporting to external URL
+                if let (Some(ref url), Some(ref client)) = (&metrics_url, &metrics_client) {
+                    if last_metrics_send.elapsed() >= metrics_interval {
+                        // Merge sharded aggregator and convert to report for accurate stats
+                        let merged = sharded_aggregator.merge();
+                        let report = merged.to_report();
+                        let elapsed_secs = start_time.elapsed().as_secs_f64().max(0.001);
+                        let rps = report.total_requests as f64 / elapsed_secs;
+
+                        // Calculate error count
+                        let error_count: usize = report.errors.values().sum();
+
+                        // Calculate active workers
+                        let active_workers = if is_multi_scenario {
+                            total_workers as i32 // Approximate for multi-scenario
+                        } else {
+                            active_legacy_workers.len() as i32
+                        };
+
+                        // Build metrics payload matching control plane format
+                        let payload = serde_json::json!({
+                            "requests_total": report.total_requests,
+                            "requests_per_sec": rps,
+                            "latency_avg_ms": report.avg_latency_ms,
+                            "latency_p95_ms": report.p95_latency_ms,
+                            "errors": error_count,
+                            "active_workers": active_workers
+                        });
+
+                        // Send metrics to URL
+                        let body = payload.to_string();
+                        let mut req_builder = http::Request::builder()
+                            .method(Method::POST)
+                            .uri(url)
+                            .header("Content-Type", "application/json");
+
+                        // Add auth header if provided (format: "HeaderName: value")
+                        if let Some(ref auth) = metrics_auth {
+                            if let Some((header_name, header_value)) = auth.split_once(':') {
+                                req_builder = req_builder.header(header_name.trim(), header_value.trim());
+                            }
+                        }
+
+                        if let Ok(req) = req_builder.body(body) {
+                            let _ = shared_tokio_rt.block_on(client.request(req, false));
+                        }
+                        last_metrics_send = Instant::now();
+                    }
+                }
+
                 std::thread::sleep(Duration::from_millis(100));
             } // End main_loop
             

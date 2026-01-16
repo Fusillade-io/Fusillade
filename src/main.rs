@@ -129,6 +129,12 @@ enum Commands {
         /// Output configuration (e.g., --out otlp=http://localhost:4318/v1/metrics)
         #[arg(long)]
         out: Option<String>,
+        /// URL to stream real-time metrics to during test execution (e.g., http://localhost:8080/metrics)
+        #[arg(long)]
+        metrics_url: Option<String>,
+        /// Authentication header for metrics URL (format: "HeaderName: value")
+        #[arg(long)]
+        metrics_auth: Option<String>,
         /// Chaos: Add jitter latency (e.g., "500ms")
         #[arg(long)]
         jitter: Option<String>,
@@ -235,7 +241,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { scenario, workers, duration, json, export_json, export_html, out, jitter, drop, estimate_cost, interactive, cloud, region } => {
+        Commands::Run { scenario, workers, duration, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region } => {
             // Cloud mode: Upload to Fusillade Cloud
             if cloud {
                 return run_cloud_test(scenario, workers, duration, region);
@@ -264,7 +270,7 @@ fn main() -> Result<()> {
                     iterations: Some(5),
                     ..final_config.clone()
                 };
-                let dry_report = engine_arc.clone().run_load_test(scenario.clone(), script_content.clone(), dry_config, true, None, None, None, None)?;
+                let dry_report = engine_arc.clone().run_load_test(scenario.clone(), script_content.clone(), dry_config, true, None, None, None, None, None)?;
                 
                 // Calculate estimates
                 let requests = dry_report.total_requests.max(1) as f64;
@@ -344,7 +350,7 @@ fn main() -> Result<()> {
                 None
             };
             
-            let report = engine_arc.run_load_test(scenario.clone(), script_content, final_config, json, export_json, export_html, None, control_rx)?;
+            let report = engine_arc.run_load_test(scenario.clone(), script_content, final_config, json, export_json, export_html, metrics_url, metrics_auth, control_rx)?;
 
             // Handle OTLP export if --out otlp=<url> is specified
             if let Some(out_config) = out {
