@@ -4,6 +4,8 @@ pub mod types;
 pub mod recorder;
 pub mod bundler;
 pub mod cloud;
+pub mod init;
+pub mod validate;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

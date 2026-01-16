@@ -10,6 +10,7 @@ rquickjs = { version = "0.11", features = ["loader", "futures", "macro", "classe
 ureq = { version = "2.10", features = ["json", "cookies"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies", "http2", "brotli", "gzip", "multipart", "stream"] }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
