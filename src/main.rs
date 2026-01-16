@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -146,6 +147,29 @@ enum Commands {
         /// Cloud region to run in (default: us-east-1)
         #[arg(long, default_value = "us-east-1")]
         region: String,
+    },
+    /// Initialize a new test script with starter template
+    Init {
+        /// Output file path (default: test.js)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Also create a fusillade.yaml config file
+        #[arg(long)]
+        config: bool,
+    },
+    /// Validate a script without running it
+    Validate {
+        /// Path to the scenario JS file
+        scenario: PathBuf,
+        /// Optional config file to validate
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Generate shell completions
+    Completion {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
     },
     Worker {
         #[arg(short, long, default_value = "0.0.0.0:8080")]
@@ -342,6 +366,17 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            Ok(())
+        }
+        Commands::Init { output, config } => {
+            fusillade::cli::init::run_init(output.as_deref(), config)
+        }
+        Commands::Validate { scenario, config } => {
+            fusillade::cli::validate::run_validate(&scenario, config.as_deref())
+        }
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            generate(shell, &mut cmd, "fusillade", &mut std::io::stdout());
             Ok(())
         }
         Commands::Exec { script } => {

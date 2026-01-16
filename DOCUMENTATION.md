@@ -942,6 +942,50 @@ Executes a load test script.
 * `--drop <PROBABILITY>`: Chaos: Drop requests with probability 0.0-1.0 (e.g., `0.05`).
 * `--estimate-cost [THRESHOLD]`: Run a dry-run to estimate bandwidth costs. Optional threshold in dollars (default: $10).
 
+### `fusillade init`
+Initialize a new test script with a starter template.
+
+**Options:**
+* `-o, --output <FILE>`: Output file path (default: `test.js`).
+* `--config`: Also create a `fusillade.yaml` config file.
+
+**Example:**
+```bash
+fusillade init -o scenarios/my_test.js --config
+```
+
+### `fusillade validate`
+Validate a script without running it. Checks for JavaScript syntax errors, configuration validity, and import resolution.
+
+**Arguments:**
+* `<SCENARIO>`: Path to the JavaScript scenario file.
+
+**Options:**
+* `-c, --config <FILE>`: Optional config file to validate alongside the script.
+
+**Example:**
+```bash
+fusillade validate scenarios/checkout.js --config config/stress.yaml
+```
+
+### `fusillade completion`
+Generate shell completion scripts for tab-completion support.
+
+**Arguments:**
+* `<SHELL>`: Shell to generate completions for (`bash`, `zsh`, `fish`, `powershell`, `elvish`).
+
+**Example:**
+```bash
+# Bash (add to ~/.bashrc)
+fusillade completion bash >> ~/.bashrc
+
+# Zsh (add to ~/.zshrc)
+fusillade completion zsh >> ~/.zshrc
+
+# Fish
+fusillade completion fish > ~/.config/fish/completions/fusillade.fish
+```
+
 ### `fusillade types`
 Generates TypeScript type definitions (`index.d.ts`) for IDE support.
 
@@ -1325,6 +1369,10 @@ When running with `--interactive` (or `-i`), Fusillade accepts commands via stdi
 | `fusillade run <file> -i` | Run with interactive control |
 | `fusillade run <file> --jitter 500ms --drop 0.05` | Run with chaos injection |
 | `fusillade run <file> --estimate-cost` | Estimate transfer costs first |
+| `fusillade init` | Create starter test script |
+| `fusillade init -o test.js --config` | Create script and config file |
+| `fusillade validate <file>` | Validate script without running |
+| `fusillade completion <shell>` | Generate shell completions |
 | `fusillade export <errors.json> --format curl` | Export failures to cURL |
 | `fusillade replay <errors.json>` | Replay failed requests |
 | `fusillade types -o index.d.ts` | Generate TypeScript definitions |
