@@ -127,6 +127,7 @@ impl WorkerServer {
                             None,  // export_json
                             None,  // export_html
                             None,  // metrics_url (TODO: stream to controller)
+                            None,  // metrics_auth
                             None,  // control_rx
                         );
 
@@ -190,7 +191,7 @@ async fn handle_start(
     // Spawn the test in a background task
     tokio::spawn(async move {
         // Run load test. If metrics_url is present, we need to stream metrics there.
-        let _ = engine.run_load_test(script_path, script_content, config, true, None, None, metrics_url, None);
+        let _ = engine.run_load_test(script_path, script_content, config, true, None, None, metrics_url, None, None);
     });
 
     Json(WorkerStatus { status: "started".to_string() })
