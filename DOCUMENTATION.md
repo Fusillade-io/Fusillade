@@ -938,7 +938,7 @@ Executes a load test script.
 * `--out <CONFIG>`: Output configuration. Supports:
   * `--out otlp=<URL>`: Export to OTLP endpoint (e.g., `otlp=http://localhost:4318/v1/metrics`)
   * `--out csv=<FILE>`: Export to CSV file
-* `--metrics-url <URL>`: Stream real-time metrics to a URL during test execution.
+* `--metrics-url <URL>`: Stream real-time metrics to a URL during test execution. Sends periodic JSON payloads with RPS, latency, errors, etc. At test completion, sends a summary to `<URL>/summary` with endpoint breakdown and HTTP status code counts.
 * `--metrics-auth <HEADER>`: Authentication header for metrics URL (format: `HeaderName: value`).
 * `-i, --interactive`: Enable interactive control mode (pause, resume, ramp workers).
 * `--cloud`: Run on Fusillade Cloud instead of locally.
