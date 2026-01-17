@@ -116,7 +116,7 @@ struct Cli {
 enum Commands {
     Run {
         scenario: PathBuf,
-        #[arg(short, long)]
+        #[arg(short, long, alias = "vus")]
         workers: Option<usize>,
         #[arg(short, long)]
         duration: Option<String>,
@@ -156,6 +156,9 @@ enum Commands {
         /// Cloud region to run in (default: us-east-1)
         #[arg(long, default_value = "us-east-1")]
         region: String,
+        /// Disable per-endpoint (per-URL) metrics tracking
+        #[arg(long)]
+        no_endpoint_tracking: bool,
     },
     /// Initialize a new test script with starter template
     Init {
@@ -244,7 +247,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region } => {
+        Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region, no_endpoint_tracking } => {
             // Cloud mode: Upload to Fusillade Cloud
             if cloud {
                 return run_cloud_test(scenario, workers, duration, region);
@@ -259,6 +262,7 @@ fn main() -> Result<()> {
             if let Some(d) = duration { final_config.duration = Some(d); }
             if let Some(j) = jitter { final_config.jitter = Some(j); }
             if let Some(p) = drop { final_config.drop = Some(p); }
+            if no_endpoint_tracking { final_config.no_endpoint_tracking = Some(true); }
 
             // Headless mode: either --headless or --json enables non-TUI mode
             let headless_mode = headless || json;
