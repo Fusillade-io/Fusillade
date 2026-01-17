@@ -931,13 +931,18 @@ Executes a load test script.
 **Options:**
 * `-w, --workers <NUM>`: Override the number of concurrent workers (VUs).
 * `-d, --duration <DURATION>`: Override the test duration (e.g., `30s`, `5m`).
+* `--headless`: Run in headless mode (no TUI, suitable for CI/CD).
 * `--json`: Output metrics in newline-delimited JSON format to stdout.
 * `--export-json <FILE>`: Save the final summary report to a JSON file.
 * `--export-html <FILE>`: Save the final summary report to an HTML file.
 * `--out <CONFIG>`: Output configuration. Supports:
   * `--out otlp=<URL>`: Export to OTLP endpoint (e.g., `otlp=http://localhost:4318/v1/metrics`)
   * `--out csv=<FILE>`: Export to CSV file
+* `--metrics-url <URL>`: Stream real-time metrics to a URL during test execution.
+* `--metrics-auth <HEADER>`: Authentication header for metrics URL (format: `HeaderName: value`).
 * `-i, --interactive`: Enable interactive control mode (pause, resume, ramp workers).
+* `--cloud`: Run on Fusillade Cloud instead of locally.
+* `--region <REGION>`: Cloud region to run in (default: `us-east-1`).
 * `--jitter <DURATION>`: Chaos: Add artificial latency to requests (e.g., `500ms`).
 * `--drop <PROBABILITY>`: Chaos: Drop requests with probability 0.0-1.0 (e.g., `0.05`).
 * `--estimate-cost [THRESHOLD]`: Run a dry-run to estimate bandwidth costs. Optional threshold in dollars (default: $10).
