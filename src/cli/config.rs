@@ -81,6 +81,11 @@ pub struct Config {
     /// where response content is not needed for assertions.
     #[serde(alias = "responseSink")]
     pub response_sink: Option<bool>,
+    /// Disable per-endpoint (per-URL) metrics tracking. When enabled, only aggregate
+    /// metrics are collected, reducing memory usage for high-cardinality URL patterns.
+    /// Endpoint tracking is ON by default.
+    #[serde(alias = "noEndpointTracking")]
+    pub no_endpoint_tracking: Option<bool>,
 }
 
 impl Config {
