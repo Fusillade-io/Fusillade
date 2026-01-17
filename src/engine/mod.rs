@@ -712,6 +712,7 @@ impl Engine {
                         };
 
                         // Build metrics payload matching control plane format
+                        // Note: Endpoint metrics are sent separately at completion to avoid performance overhead
                         let payload = serde_json::json!({
                             "requests_total": report.total_requests,
                             "requests_per_sec": rps,
@@ -780,6 +781,44 @@ impl Engine {
             else { merged_agg.report(); }
 
             if let Some(path) = export_json { let _ = std::fs::write(path, merged_agg.to_json()); }
+
+            // Send final summary with endpoint metrics to control plane
+            if let (Some(ref url), Some(ref client)) = (&metrics_url, &metrics_client) {
+                // Build endpoint metrics for per-URL breakdown (sent once at completion)
+                let endpoints: Vec<serde_json::Value> = report.grouped_requests.iter()
+                    .map(|(name, req_report)| {
+                        serde_json::json!({
+                            "name": name,
+                            "requests": req_report.total_requests,
+                            "avg_latency_ms": req_report.avg_latency_ms,
+                            "p95_latency_ms": req_report.p95_latency_ms,
+                            "min_latency_ms": req_report.min_latency_ms,
+                            "max_latency_ms": req_report.max_latency_ms,
+                            "errors": req_report.error_count
+                        })
+                    })
+                    .collect();
+
+                if !endpoints.is_empty() {
+                    let summary_payload = serde_json::json!({ "endpoints": endpoints });
+                    let summary_url = url.replace("/metrics", "/summary");
+
+                    let mut req_builder = http::Request::builder()
+                        .method(Method::POST)
+                        .uri(&summary_url)
+                        .header("Content-Type", "application/json");
+
+                    if let Some(ref auth) = metrics_auth {
+                        if let Some((header_name, header_value)) = auth.split_once(':') {
+                            req_builder = req_builder.header(header_name.trim(), header_value.trim());
+                        }
+                    }
+
+                    if let Ok(req) = req_builder.body(summary_payload.to_string()) {
+                        let _ = shared_tokio_rt.block_on(client.request(req, false));
+                    }
+                }
+            }
 
             // Save to history DB
             if let Ok(db) = crate::stats::db::HistoryDb::open_default() {
