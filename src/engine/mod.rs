@@ -800,7 +800,15 @@ impl Engine {
                     .collect();
 
                 if !endpoints.is_empty() {
-                    let summary_payload = serde_json::json!({ "endpoints": endpoints });
+                    // Include global status codes breakdown
+                    let status_codes: std::collections::HashMap<String, usize> = report.status_codes.iter()
+                        .map(|(code, count)| (code.to_string(), *count))
+                        .collect();
+
+                    let summary_payload = serde_json::json!({
+                        "endpoints": endpoints,
+                        "status_codes": status_codes
+                    });
                     let summary_url = url.replace("/metrics", "/summary");
 
                     let mut req_builder = http::Request::builder()
