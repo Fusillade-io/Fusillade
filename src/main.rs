@@ -120,6 +120,9 @@ enum Commands {
         workers: Option<usize>,
         #[arg(short, long)]
         duration: Option<String>,
+        /// Run in headless mode (no TUI, suitable for CI/CD)
+        #[arg(long)]
+        headless: bool,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -241,7 +244,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { scenario, workers, duration, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region } => {
+        Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region } => {
             // Cloud mode: Upload to Fusillade Cloud
             if cloud {
                 return run_cloud_test(scenario, workers, duration, region);
@@ -257,7 +260,9 @@ fn main() -> Result<()> {
             if let Some(j) = jitter { final_config.jitter = Some(j); }
             if let Some(p) = drop { final_config.drop = Some(p); }
 
-            if !json { println!("Running scenario..."); }
+            // Headless mode: either --headless or --json enables non-TUI mode
+            let headless_mode = headless || json;
+            if !headless_mode { println!("Running scenario..."); }
             let engine_arc = Arc::new(engine);
 
             // Cost estimation if requested
@@ -350,7 +355,7 @@ fn main() -> Result<()> {
                 None
             };
             
-            let report = engine_arc.run_load_test(scenario.clone(), script_content, final_config, json, export_json, export_html, metrics_url, metrics_auth, control_rx)?;
+            let report = engine_arc.run_load_test(scenario.clone(), script_content, final_config, headless_mode, export_json, export_html, metrics_url, metrics_auth, control_rx)?;
 
             // Handle OTLP export if --out otlp=<url> is specified
             if let Some(out_config) = out {
