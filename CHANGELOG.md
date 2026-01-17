@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-01-17
+
+### Added
+- **`--vus` Alias**: Added `--vus` as an alias for `--workers` for k6 compatibility.
+- **`--headless` Flag**: Restored `--headless` flag for CI/CD mode. TUI is now the default when running locally.
+- **`--no-endpoint-tracking` Flag**: New option to disable per-URL metrics collection, reducing memory usage for high-cardinality URL patterns.
+
 ## [0.5.4] - 2026-01-17
 
 ### Added
