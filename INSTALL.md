@@ -91,3 +91,66 @@ Usage:
 ```bash
 fusi run scenarios/test.js
 ```
+
+---
+
+## Platform-Specific Quick Start
+
+### Linux / macOS
+
+```bash
+# Download (adjust URL for your platform)
+curl -L https://github.com/Fusillade-io/Fusillade/releases/latest/download/fusillade-linux-x64.tar.gz -o fusillade.tar.gz
+tar -xzf fusillade.tar.gz
+chmod +x fusillade
+./fusillade --version
+```
+
+### Windows (PowerShell)
+
+```powershell
+# Download the Windows binary
+Invoke-WebRequest -Uri "https://github.com/Fusillade-io/Fusillade/releases/latest/download/fusillade-windows-x64.exe" -OutFile "fusillade.exe"
+
+# Verify installation
+.\fusillade.exe --version
+```
+
+---
+
+## Troubleshooting
+
+### Linux: File Descriptor Limits
+
+When running load tests with many concurrent workers, you may hit system file descriptor limits. Increase the limit before running:
+
+```bash
+# Check current limit
+ulimit -n
+
+# Increase for current session
+ulimit -n 65535
+
+# Permanent fix: Add to /etc/security/limits.conf
+# * soft nofile 65535
+# * hard nofile 65535
+```
+
+**Symptoms of hitting limits:**
+- "Too many open files" errors
+- Connection failures at high concurrency
+- Test fails to scale beyond ~1000 workers
+
+### macOS: Too Many Open Files
+
+macOS has a lower default limit. Use:
+
+```bash
+sudo launchctl limit maxfiles 65535 200000
+ulimit -n 65535
+```
+
+### Windows: Connection Limits
+
+Windows may require registry tweaks for high-concurrency testing. See [Microsoft documentation on TCP/IP settings](https://docs.microsoft.com/en-us/windows-server/networking/technologies/network-subsystem/net-sub-performance-tuning-nics).
+

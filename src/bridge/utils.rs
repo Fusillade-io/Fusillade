@@ -74,7 +74,7 @@ mod tests {
     fn test_random_int_range() {
         for _ in 0..100 {
             let val = random_int(1, 10);
-            assert!(val >= 1 && val <= 10);
+            assert!((1..=10).contains(&val));
         }
     }
 
@@ -94,7 +94,7 @@ mod tests {
     fn test_random_int_negative() {
         for _ in 0..100 {
             let val = random_int(-10, -1);
-            assert!(val >= -10 && val <= -1);
+            assert!((-10..=-1).contains(&val));
         }
     }
 
