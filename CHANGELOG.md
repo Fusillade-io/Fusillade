@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-01-18
+
+### Added
+- **k6 Migration Guide**: New section in documentation with step-by-step instructions for migrating from k6.
+- **Windows PowerShell Install**: Added PowerShell download commands to INSTALL.md.
+- **Linux/macOS Troubleshooting**: Added file descriptor limit guidance for high-concurrency testing.
+
+### Fixed
+- **Clippy Warnings**: Resolved 2 style warnings in test code.
+
 ## [0.5.6] - 2026-01-17
 
 ### Added
