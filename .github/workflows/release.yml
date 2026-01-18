@@ -19,19 +19,19 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact_name: fusillade
-            asset_name: fusillade-linux-amd64
+            asset_name: fusillade-linux-x64
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact_name: fusillade
-            asset_name: fusillade-darwin-amd64
+            asset_name: fusillade-macos-x64
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact_name: fusillade
-            asset_name: fusillade-darwin-arm64
+            asset_name: fusillade-macos-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact_name: fusillade.exe
-            asset_name: fusillade-windows-amd64.exe
+            asset_name: fusillade-windows-x64.exe
 
     steps:
       - name: Checkout code
