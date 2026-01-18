@@ -99,9 +99,8 @@ fusi run scenarios/test.js
 ### Linux / macOS
 
 ```bash
-# Download (adjust URL for your platform)
-curl -L https://github.com/Fusillade-io/Fusillade/releases/latest/download/fusillade-linux-x64.tar.gz -o fusillade.tar.gz
-tar -xzf fusillade.tar.gz
+# Download (adjust URL for your platform: linux-x64, macos-x64, macos-arm64)
+curl -L https://github.com/Fusillade-io/Fusillade/releases/latest/download/fusillade-linux-x64 -o fusillade
 chmod +x fusillade
 ./fusillade --version
 ```
