@@ -17,6 +17,44 @@ Fusillade is designed to be a binary-compatible, higher-performance alternative 
 | **Binary Size** | ~20MB | ~10MB |
 | **Ecosystem** | Mature (Extensions) | Native Rust Performance |
 
+### Migrating from k6
+
+Fusillade is designed to be k6-compatible. Most scripts work with minimal changes:
+
+**Step 1: Remove imports** — Fusillade provides globals instead of imports:
+
+```javascript
+// k6 script
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+// Fusillade script (no imports needed)
+// http, check, sleep are available globally
+```
+
+**Step 2: Rename `vus` to `workers`** (optional — `vus` works in options too):
+
+```javascript
+export const options = {
+    workers: 100,  // Same as k6's vus
+    duration: '30s',
+};
+```
+
+**Step 3: Run your test:**
+
+```bash
+fusi run your-k6-script.js
+```
+
+**Key differences:**
+| k6 | Fusillade |
+|----|-----------|
+| `import http from 'k6/http'` | `http` is a global |
+| `vus` in options | `workers` (or `vus` via CLI `--vus`) |
+| Extensions required for MQTT/AMQP | Built-in |
+| Response always has body | `response.body` is null with `response_sink: true` |
+
 ---
 
 ## 2. Core Philosophy & Architecture
