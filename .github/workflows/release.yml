@@ -59,23 +59,21 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --manifest-path Cargo.toml
 
-      - name: Archive Binary
+      - name: Prepare Binary (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar -czf ../../../${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}
 
-      - name: Archive Binary (Windows)
+      - name: Prepare Binary (Windows)
         if: runner.os == 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.asset_name }}.zip ${{ matrix.artifact_name }}
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.*
+          path: ${{ matrix.asset_name }}
 
   release:
     needs: build
