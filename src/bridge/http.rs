@@ -1056,6 +1056,49 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         }
     }))?;
 
+    // http.formEncode(obj) - Encode object as application/x-www-form-urlencoded
+    http.set("formEncode", Function::new(ctx.clone(), move |obj: Object| -> Result<String> {
+        let mut pairs: Vec<String> = Vec::new();
+        for key in obj.keys::<String>() {
+            if let Ok(k) = key {
+                let encoded_key = urlencoding::encode(&k);
+                if let Ok(v) = obj.get::<_, String>(&k) {
+                    pairs.push(format!("{}={}", encoded_key, urlencoding::encode(&v)));
+                } else if let Ok(v) = obj.get::<_, i64>(&k) {
+                    pairs.push(format!("{}={}", encoded_key, v));
+                } else if let Ok(v) = obj.get::<_, f64>(&k) {
+                    pairs.push(format!("{}={}", encoded_key, v));
+                } else if let Ok(v) = obj.get::<_, bool>(&k) {
+                    pairs.push(format!("{}={}", encoded_key, v));
+                }
+            }
+        }
+        Ok(pairs.join("&"))
+    }))?;
+
+    // http.url(base, params?) - Build URL with query parameters
+    http.set("url", Function::new(ctx.clone(), move |base_url: String, params: Option<Object>| -> Result<String> {
+        if let Some(p) = params {
+            let mut url = Url::parse(&base_url).map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
+            for key in p.keys::<String>() {
+                if let Ok(k) = key {
+                    if let Ok(v) = p.get::<_, String>(&k) {
+                        url.query_pairs_mut().append_pair(&k, &v);
+                    } else if let Ok(v) = p.get::<_, i64>(&k) {
+                        url.query_pairs_mut().append_pair(&k, &v.to_string());
+                    } else if let Ok(v) = p.get::<_, f64>(&k) {
+                        url.query_pairs_mut().append_pair(&k, &v.to_string());
+                    } else if let Ok(v) = p.get::<_, bool>(&k) {
+                        url.query_pairs_mut().append_pair(&k, &v.to_string());
+                    }
+                }
+            }
+            Ok(url.to_string())
+        } else {
+            Ok(base_url)
+        }
+    }))?;
+
     // http.file(path, filename?, contentType?)
     // Returns a JSON string that http.post can parse to detect multipart
     http.set("file", Function::new(ctx.clone(), move |path: String, filename: Option<String>, content_type: Option<String>| -> Result<String> {
@@ -1133,5 +1176,51 @@ mod tests {
             proto: "h2".to_string(),
         };
         assert_eq!(response.proto, "h2");
+    }
+
+    #[test]
+    fn test_parse_duration_str_seconds() {
+        assert_eq!(parse_duration_str("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration_str("1s"), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_parse_duration_str_milliseconds() {
+        assert_eq!(parse_duration_str("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration_str("100ms"), Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn test_parse_duration_str_minutes() {
+        assert_eq!(parse_duration_str("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_duration_str("1m"), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_parse_duration_str_raw_number() {
+        assert_eq!(parse_duration_str("1000"), Some(Duration::from_millis(1000)));
+    }
+
+    #[test]
+    fn test_url_to_uri_simple() {
+        let url = Url::parse("https://api.example.com/users").unwrap();
+        let uri = url_to_uri(&url).unwrap();
+        assert_eq!(uri.scheme_str(), Some("https"));
+        assert_eq!(uri.host(), Some("api.example.com"));
+        assert_eq!(uri.path(), "/users");
+    }
+
+    #[test]
+    fn test_url_to_uri_with_port() {
+        let url = Url::parse("https://api.example.com:8080/users").unwrap();
+        let uri = url_to_uri(&url).unwrap();
+        assert_eq!(uri.port_u16(), Some(8080));
+    }
+
+    #[test]
+    fn test_url_to_uri_with_query() {
+        let url = Url::parse("https://api.example.com/search?q=test&page=1").unwrap();
+        let uri = url_to_uri(&url).unwrap();
+        assert_eq!(uri.query(), Some("q=test&page=1"));
     }
 }

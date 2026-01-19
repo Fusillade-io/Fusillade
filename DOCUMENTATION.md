@@ -542,7 +542,21 @@ criteria:
 * `http.head(url, [options])`: Performs a HEAD request (returns headers only).
 * `http.options(url, [options])`: Performs an OPTIONS request (for CORS preflight).
 * `http.file(path, [filename], [contentType])`: Reads a file and returns a JSON string marker for multipart uploads.
+* `http.url(baseUrl, [params])`: Build URL with query parameters. Returns URL string.
+* `http.formEncode(obj)`: Encode object as `application/x-www-form-urlencoded` string.
 * `http.request({ method, url, body, headers, name, timeout })`: Generic request builder.
+
+```javascript
+// http.url() example
+const url = http.url('https://api.example.com/search', { q: 'test', page: 1 });
+// Returns: https://api.example.com/search?q=test&page=1
+
+// http.formEncode() example
+const body = http.formEncode({ username: 'user', password: 'pass' });
+http.post('https://api.example.com/login', body, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+});
+```
 
 ### Request Options
 
@@ -657,6 +671,21 @@ const userId = users[__WORKER_ID % users.length];
 const apiKey = __ENV.API_KEY || 'default-key';
 ```
 
+**Automatic `.env` File Loading:**
+
+Fusillade automatically loads `.env` files when running tests. It checks:
+1. The script's directory first
+2. The current working directory
+
+```bash
+# .env file format
+API_KEY=your-secret-key
+BASE_URL=https://api.example.com
+DEBUG=true
+```
+
+Environment variables set in the shell take precedence over `.env` file values.
+
 ### Unit Testing
 
 Fusillade provides a built-in unit testing framework for verifying logic before running load tests.
@@ -757,6 +786,36 @@ Efficiently share large read-only datasets (like user credentials) across all wo
 
 ```javascript
 const users = new SharedArray('users', () => JSON.parse(open('./data/users.json')));
+```
+
+### SharedCSV
+
+Load CSV files efficiently with automatic header parsing. Data is shared across all workers.
+
+```javascript
+const users = new SharedCSV('./data/users.csv');
+
+export default function() {
+    // Get row by index (returns object with column names as keys)
+    const user = users.get(__WORKER_ID % users.length);
+    http.post('/login', JSON.stringify({ email: user.email, password: user.password }));
+
+    // Get random row
+    const randomUser = users.random();
+}
+```
+
+**Properties & Methods:**
+* `length`: Number of rows (excluding header)
+* `headers`: Array of column names
+* `get(index)`: Get row by index as object
+* `random()`: Get random row as object
+
+**Example CSV file (`users.csv`):**
+```
+email,password,name
+user1@example.com,pass123,John
+user2@example.com,pass456,Jane
 ```
 
 ### Browser Automation

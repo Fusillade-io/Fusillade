@@ -26,6 +26,7 @@ tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 chrono = { version = "0.4.42", features = ["serde"] }
 cookie_store = "0.21"
 url = "2.5"
+urlencoding = "2.1"
 base64 = "0.22"
 md-5 = "0.10"
 sha1 = "0.10"
