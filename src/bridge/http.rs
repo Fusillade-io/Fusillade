@@ -1099,6 +1099,170 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         }
     }))?;
 
+    // http.batch(requests) - Execute multiple requests in parallel
+    // requests: Array of { method, url, body?, headers?, name?, tags? }
+    let c_batch = client.clone();
+    let tx_batch = tx.clone();
+    let rt_batch = runtime.clone();
+    let sink_batch = global_response_sink;
+
+    http.set("batch", Function::new(ctx.clone(), move |requests: rquickjs::Array<'_>| -> Result<Vec<HttpResponse>> {
+        let client = c_batch.clone();
+        let tx = tx_batch.clone();
+        let runtime = rt_batch.clone();
+        let response_sink = sink_batch;
+
+        // Collect request specs
+        let mut request_specs: Vec<(String, String, Option<String>, Option<HashMap<String, String>>, Option<String>, HashMap<String, String>, Option<Duration>)> = Vec::new();
+
+        for item in requests.iter::<Object>() {
+            let obj = item?;
+            let method: String = obj.get("method").unwrap_or_else(|_| "GET".to_string());
+            let url: String = obj.get("url").map_err(|_| rquickjs::Error::new_from_js("url is required", "ValueError"))?;
+            let body: Option<String> = obj.get("body").ok();
+            let headers: Option<HashMap<String, String>> = obj.get("headers").ok();
+            let name: Option<String> = obj.get("name").ok();
+            let tags: HashMap<String, String> = obj.get("tags").unwrap_or_default();
+            let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+            if let Ok(timeout_str) = obj.get::<_, String>("timeout") {
+                timeout_duration = parse_duration_str(&timeout_str);
+            } else if let Ok(timeout_ms) = obj.get::<_, u64>("timeout") {
+                timeout_duration = Some(Duration::from_millis(timeout_ms));
+            }
+            request_specs.push((method, url, body, headers, name, tags, timeout_duration));
+        }
+
+        // Execute all requests in parallel
+        let results: Vec<HttpResponse> = runtime.block_on(async {
+            let futures: Vec<_> = request_specs.into_iter().map(|(method_str, url_str, body, headers_map, name_opt, tags, timeout_duration)| {
+                let client = client.clone();
+                let tx = tx.clone();
+                async move {
+                    let url_parsed = match Url::parse(&url_str) {
+                        Ok(u) => u,
+                        Err(_) => {
+                            return HttpResponse {
+                                status: 0,
+                                body: Bytes::from("Invalid URL"),
+                                headers: HashMap::new(),
+                                timings: RequestTimings::default(),
+                                proto: "h1".to_string(),
+                            };
+                        }
+                    };
+                    let method = Method::from_bytes(method_str.to_uppercase().as_bytes()).unwrap_or(Method::GET);
+
+                    let uri = match url_to_uri(&url_parsed) {
+                        Some(u) => u,
+                        None => {
+                            return HttpResponse {
+                                status: 0,
+                                body: Bytes::from("Failed to convert URL to URI"),
+                                headers: HashMap::new(),
+                                timings: RequestTimings::default(),
+                                proto: "h1".to_string(),
+                            };
+                        }
+                    };
+
+                    let mut req_builder = Request::builder()
+                        .method(method)
+                        .uri(uri);
+
+                    if let Some(h) = &headers_map {
+                        for (k, v) in h {
+                            req_builder = req_builder.header(k, v);
+                        }
+                    }
+
+                    let final_body = body.unwrap_or_default();
+                    let req = match req_builder.body(final_body) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            return HttpResponse {
+                                status: 0,
+                                body: Bytes::from("Failed to build request"),
+                                headers: HashMap::new(),
+                                timings: RequestTimings::default(),
+                                proto: "h1".to_string(),
+                            };
+                        }
+                    };
+
+                    let start = Instant::now();
+                    let request_future = client.request(req, response_sink);
+
+                    let res_result = if let Some(timeout) = timeout_duration {
+                        match tokio::time::timeout(timeout, request_future).await {
+                            Ok(result) => result,
+                            Err(_) => {
+                                let duration = start.elapsed();
+                                let timings = RequestTimings { duration, ..Default::default() };
+                                let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
+                                let _ = tx.send(Metric::Request {
+                                    name: format!("{}{}", crate::bridge::group::get_current_group_prefix(), metric_name),
+                                    timings,
+                                    status: 0,
+                                    error: Some("request timeout".to_string()),
+                                    tags: tags.clone(),
+                                });
+                                return HttpResponse {
+                                    status: 0,
+                                    body: Bytes::from("request timeout"),
+                                    headers: HashMap::new(),
+                                    timings,
+                                    proto: "h1".to_string(),
+                                };
+                            }
+                        }
+                    } else {
+                        request_future.await
+                    };
+
+                    match res_result {
+                        Ok((response, timings)) => {
+                            let status = response.status().as_u16();
+                            let proto = version_to_proto(response.version());
+                            let mut resp_headers: HashMap<String, String> = HashMap::with_capacity(response.headers().len());
+                            for (name, val) in response.headers() {
+                                if let Ok(val_str) = val.to_str() {
+                                    resp_headers.insert(name.to_string(), val_str.to_string());
+                                }
+                            }
+                            let body = response.body().clone();
+                            let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
+                            let _ = tx.send(Metric::Request {
+                                name: format!("{}{}", crate::bridge::group::get_current_group_prefix(), metric_name),
+                                timings,
+                                status,
+                                error: None,
+                                tags: tags.clone(),
+                            });
+                            HttpResponse { status, body, headers: resp_headers, timings, proto }
+                        },
+                        Err(e) => {
+                            let duration = start.elapsed();
+                            let timings = RequestTimings { duration, ..Default::default() };
+                            let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
+                            let _ = tx.send(Metric::Request {
+                                name: format!("{}{}", crate::bridge::group::get_current_group_prefix(), metric_name),
+                                timings,
+                                status: 0,
+                                error: Some(e.to_string()),
+                                tags: tags.clone(),
+                            });
+                            HttpResponse { status: 0, body: Bytes::from(e.to_string()), headers: HashMap::new(), timings, proto: "h1".to_string() }
+                        }
+                    }
+                }
+            }).collect();
+
+            futures::future::join_all(futures).await
+        });
+
+        Ok(results)
+    }))?;
+
     // http.file(path, filename?, contentType?)
     // Returns a JSON string that http.post can parse to detect multipart
     http.set("file", Function::new(ctx.clone(), move |path: String, filename: Option<String>, content_type: Option<String>| -> Result<String> {

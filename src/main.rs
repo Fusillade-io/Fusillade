@@ -159,6 +159,9 @@ enum Commands {
         /// Disable per-endpoint (per-URL) metrics tracking
         #[arg(long)]
         no_endpoint_tracking: bool,
+        /// Watch script for changes and re-run automatically (development mode)
+        #[arg(long)]
+        watch: bool,
     },
     /// Initialize a new test script with starter template
     Init {
@@ -247,7 +250,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region, no_endpoint_tracking } => {
+        Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region, no_endpoint_tracking, watch } => {
             // Load .env file if present (check script directory, then current directory)
             let script_dir = scenario.parent().unwrap_or(std::path::Path::new("."));
             let env_paths = [
@@ -276,6 +279,63 @@ fn main() -> Result<()> {
             // Cloud mode: Upload to Fusillade Cloud
             if cloud {
                 return run_cloud_test(scenario, workers, duration, region);
+            }
+
+            // Watch mode: Automatically re-run test when script changes
+            if watch {
+                println!("Watch mode: monitoring {} for changes", scenario.display());
+                println!("Press Ctrl+C to stop\n");
+
+                let mut last_modified = std::fs::metadata(&scenario)
+                    .and_then(|m| m.modified())
+                    .ok();
+
+                loop {
+                    // Run test with reduced settings for dev workflow
+                    let engine = Engine::new()?;
+                    let script_content = std::fs::read_to_string(&scenario).unwrap();
+                    let mut watch_config = engine.extract_config(scenario.clone(), script_content.clone()).unwrap().unwrap_or_default();
+
+                    // Use provided values or defaults for watch mode
+                    if let Some(w) = workers { watch_config.workers = Some(w); }
+                    else if watch_config.workers.is_none() { watch_config.workers = Some(1); }
+
+                    if let Some(d) = duration.clone() { watch_config.duration = Some(d); }
+                    else if watch_config.duration.is_none() { watch_config.duration = Some("5s".to_string()); }
+
+                    if let Some(j) = jitter.clone() { watch_config.jitter = Some(j); }
+                    if let Some(p) = drop { watch_config.drop = Some(p); }
+                    if no_endpoint_tracking { watch_config.no_endpoint_tracking = Some(true); }
+
+                    println!("--- Running test (workers: {}, duration: {}) ---",
+                        watch_config.workers.unwrap_or(1),
+                        watch_config.duration.as_deref().unwrap_or("5s"));
+
+                    let engine_arc = Arc::new(engine);
+                    let _ = engine_arc.run_load_test(
+                        scenario.clone(),
+                        script_content,
+                        watch_config,
+                        true, // Always headless in watch mode
+                        None, None, None, None, None
+                    );
+
+                    println!("\n--- Waiting for changes to {} ---\n", scenario.display());
+
+                    // Poll for file changes
+                    loop {
+                        std::thread::sleep(Duration::from_millis(500));
+                        let current_modified = std::fs::metadata(&scenario)
+                            .and_then(|m| m.modified())
+                            .ok();
+
+                        if current_modified != last_modified {
+                            last_modified = current_modified;
+                            println!("File changed, re-running...\n");
+                            break;
+                        }
+                    }
+                }
             }
 
             // Local mode: Run test locally
