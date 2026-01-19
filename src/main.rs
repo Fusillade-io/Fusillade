@@ -244,6 +244,13 @@ enum Commands {
     },
     /// Check authentication status
     Whoami,
+    /// Compare two test run summaries
+    Compare {
+        /// Path to baseline JSON summary
+        baseline: PathBuf,
+        /// Path to current JSON summary
+        current: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -660,6 +667,94 @@ fn main() -> Result<()> {
                     println!("Get your API key at https://fusillade.io/settings");
                 }
             }
+            Ok(())
+        }
+        Commands::Compare { baseline, current } => {
+            // Load both JSON summaries
+            let baseline_content = std::fs::read_to_string(&baseline)
+                .map_err(|e| anyhow::anyhow!("Failed to read baseline: {}", e))?;
+            let current_content = std::fs::read_to_string(&current)
+                .map_err(|e| anyhow::anyhow!("Failed to read current: {}", e))?;
+
+            let baseline_json: serde_json::Value = serde_json::from_str(&baseline_content)
+                .map_err(|e| anyhow::anyhow!("Invalid baseline JSON: {}", e))?;
+            let current_json: serde_json::Value = serde_json::from_str(&current_content)
+                .map_err(|e| anyhow::anyhow!("Invalid current JSON: {}", e))?;
+
+            println!("Comparison: {} vs {}", baseline.display(), current.display());
+            println!("{}", "=".repeat(60));
+
+            // Compare key metrics
+            fn get_f64(v: &serde_json::Value, key: &str) -> Option<f64> {
+                v.get(key).and_then(|x| x.as_f64())
+            }
+            fn get_u64(v: &serde_json::Value, key: &str) -> Option<u64> {
+                v.get(key).and_then(|x| x.as_u64())
+            }
+
+            fn format_change(baseline: f64, current: f64, lower_is_better: bool) -> String {
+                let diff = current - baseline;
+                let pct = if baseline > 0.0 { (diff / baseline) * 100.0 } else { 0.0 };
+                let arrow = if diff > 0.0 { "+" } else { "" };
+                let color = if (lower_is_better && diff < 0.0) || (!lower_is_better && diff > 0.0) {
+                    "\x1b[32m" // Green - improvement
+                } else if diff.abs() < 0.01 {
+                    "\x1b[0m" // No change
+                } else {
+                    "\x1b[31m" // Red - regression
+                };
+                format!("{}{}{:.1}%\x1b[0m", color, arrow, pct)
+            }
+
+            // Total requests
+            if let (Some(b), Some(c)) = (get_u64(&baseline_json, "total_requests"), get_u64(&current_json, "total_requests")) {
+                let pct = format_change(b as f64, c as f64, false);
+                println!("Total Requests:     {:>10} -> {:>10}  ({})", b, c, pct);
+            }
+
+            // Average latency
+            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "avg_latency_ms"), get_f64(&current_json, "avg_latency_ms")) {
+                let pct = format_change(b, c, true);
+                println!("Avg Latency (ms):   {:>10.2} -> {:>10.2}  ({})", b, c, pct);
+            }
+
+            // P95 latency
+            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "p95_latency_ms"), get_f64(&current_json, "p95_latency_ms")) {
+                let pct = format_change(b, c, true);
+                println!("P95 Latency (ms):   {:>10.2} -> {:>10.2}  ({})", b, c, pct);
+            }
+
+            // P99 latency
+            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "p99_latency_ms"), get_f64(&current_json, "p99_latency_ms")) {
+                let pct = format_change(b, c, true);
+                println!("P99 Latency (ms):   {:>10.2} -> {:>10.2}  ({})", b, c, pct);
+            }
+
+            // Max latency
+            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "max_latency_ms"), get_f64(&current_json, "max_latency_ms")) {
+                let pct = format_change(b, c, true);
+                println!("Max Latency (ms):   {:>10.2} -> {:>10.2}  ({})", b, c, pct);
+            }
+
+            // RPS
+            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "rps"), get_f64(&current_json, "rps")) {
+                let pct = format_change(b, c, false);
+                println!("RPS:                {:>10.2} -> {:>10.2}  ({})", b, c, pct);
+            }
+
+            // Error rate (if errors key exists)
+            let baseline_errors = baseline_json.get("errors").and_then(|e| e.as_object()).map(|e| e.values().filter_map(|v| v.as_u64()).sum::<u64>()).unwrap_or(0);
+            let current_errors = current_json.get("errors").and_then(|e| e.as_object()).map(|e| e.values().filter_map(|v| v.as_u64()).sum::<u64>()).unwrap_or(0);
+            let baseline_total = get_u64(&baseline_json, "total_requests").unwrap_or(1);
+            let current_total = get_u64(&current_json, "total_requests").unwrap_or(1);
+            let baseline_error_rate = (baseline_errors as f64 / baseline_total as f64) * 100.0;
+            let current_error_rate = (current_errors as f64 / current_total as f64) * 100.0;
+            let pct = format_change(baseline_error_rate, current_error_rate, true);
+            println!("Error Rate (%):     {:>10.2} -> {:>10.2}  ({})", baseline_error_rate, current_error_rate, pct);
+
+            println!("{}", "=".repeat(60));
+            println!("\x1b[32mGreen\x1b[0m = improvement, \x1b[31mRed\x1b[0m = regression");
+
             Ok(())
         }
     }
