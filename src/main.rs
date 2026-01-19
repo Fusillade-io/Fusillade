@@ -248,11 +248,36 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region, no_endpoint_tracking } => {
+            // Load .env file if present (check script directory, then current directory)
+            let script_dir = scenario.parent().unwrap_or(std::path::Path::new("."));
+            let env_paths = [
+                script_dir.join(".env"),
+                PathBuf::from(".env"),
+            ];
+            for env_path in &env_paths {
+                if env_path.exists() {
+                    if let Ok(contents) = std::fs::read_to_string(env_path) {
+                        for line in contents.lines() {
+                            let line = line.trim();
+                            if line.is_empty() || line.starts_with('#') { continue; }
+                            if let Some((key, value)) = line.split_once('=') {
+                                let key = key.trim();
+                                let value = value.trim().trim_matches('"').trim_matches('\'');
+                                if std::env::var(key).is_err() {
+                                    std::env::set_var(key, value);
+                                }
+                            }
+                        }
+                    }
+                    break; // Only load first .env found
+                }
+            }
+
             // Cloud mode: Upload to Fusillade Cloud
             if cloud {
                 return run_cloud_test(scenario, workers, duration, region);
             }
-            
+
             // Local mode: Run test locally
             let engine = Engine::new()?;
             let script_content = std::fs::read_to_string(&scenario).unwrap();

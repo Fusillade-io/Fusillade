@@ -106,12 +106,146 @@ impl SharedArray {
     }
 }
 
+// CSV row type: header names -> values
+pub type CsvData = Arc<RwLock<HashMap<String, Arc<(Vec<String>, Vec<Vec<String>>)>>>>;
+
+#[derive(Clone)]
+pub struct CsvDataWrapper(pub CsvData);
+
+unsafe impl<'js> JsLifetime<'js> for CsvDataWrapper {
+    type Changed<'to> = CsvDataWrapper;
+}
+
+#[derive(Clone)]
+#[rquickjs::class]
+pub struct SharedCSV {
+    headers: Vec<String>,
+    rows: Arc<Vec<Vec<String>>>,
+}
+
+impl<'js> Trace<'js> for SharedCSV {
+    fn trace<'a>(&self, _tracer: Tracer<'a, 'js>) {
+        // No JS values to trace
+    }
+}
+
+unsafe impl<'js> JsLifetime<'js> for SharedCSV {
+    type Changed<'to> = SharedCSV;
+}
+
+#[rquickjs::methods]
+impl SharedCSV {
+    #[qjs(constructor)]
+    pub fn new<'js>(ctx: Ctx<'js>, path: String) -> Result<SharedCSV> {
+        // Retrieve CsvData from context userdata
+        let csv_data = if let Some(wrapper) = ctx.userdata::<CsvDataWrapper>() {
+            wrapper.0.clone()
+        } else {
+            return Err(rquickjs::Error::new_from_js("CsvData not found in context", "Error"));
+        };
+
+        let mut data_opt: Option<Arc<(Vec<String>, Vec<Vec<String>>)>> = None;
+
+        // 1. Try Read
+        {
+            let read = csv_data.read().map_err(|_| rquickjs::Error::new_from_js("CsvData lock poisoned (read)", "Error"))?;
+            if let Some(d) = read.get(&path) {
+                data_opt = Some(d.clone());
+            }
+        }
+
+        // 2. Parse CSV if missing
+        if data_opt.is_none() {
+            let mut write = csv_data.write().map_err(|_| rquickjs::Error::new_from_js("CsvData lock poisoned (write)", "Error"))?;
+            if let Some(d) = write.get(&path) {
+                data_opt = Some(d.clone());
+            } else {
+                // Read and parse CSV file
+                let content = std::fs::read_to_string(&path)
+                    .map_err(|_| rquickjs::Error::new_from_js("Failed to read CSV file", "IOError"))?;
+
+                let mut lines = content.lines();
+                let headers: Vec<String> = lines.next()
+                    .ok_or_else(|| rquickjs::Error::new_from_js("CSV file is empty", "Error"))?
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').to_string())
+                    .collect();
+
+                let rows: Vec<Vec<String>> = lines
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| {
+                        line.split(',')
+                            .map(|s| s.trim().trim_matches('"').to_string())
+                            .collect()
+                    })
+                    .collect();
+
+                let arc_data = Arc::new((headers, rows));
+                write.insert(path.clone(), arc_data.clone());
+                data_opt = Some(arc_data);
+            }
+        }
+
+        let data = data_opt.ok_or_else(|| rquickjs::Error::new_from_js("Failed to initialize SharedCSV", "Error"))?;
+        Ok(SharedCSV {
+            headers: data.0.clone(),
+            rows: Arc::new(data.1.clone())
+        })
+    }
+
+    #[qjs(get, rename = "length")]
+    pub fn length(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[qjs(get, rename = "headers")]
+    pub fn get_headers<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        let arr = rquickjs::Array::new(ctx.clone())?;
+        for (i, h) in self.headers.iter().enumerate() {
+            arr.set(i, h.clone())?;
+        }
+        Ok(arr.into_value())
+    }
+
+    /// Get row by index as object with header keys
+    #[qjs(rename = "get")]
+    pub fn get<'js>(&self, ctx: Ctx<'js>, index: usize) -> Result<Value<'js>> {
+        match self.rows.get(index) {
+            Some(row) => {
+                let obj = Object::new(ctx.clone())?;
+                for (i, header) in self.headers.iter().enumerate() {
+                    if let Some(value) = row.get(i) {
+                        obj.set(header.clone(), value.clone())?;
+                    }
+                }
+                Ok(obj.into_value())
+            }
+            None => Ok(Value::new_undefined(ctx)),
+        }
+    }
+
+    /// Get random row
+    #[qjs(rename = "random")]
+    pub fn random<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        if self.rows.is_empty() {
+            return Ok(Value::new_undefined(ctx));
+        }
+        let index = rand::random::<usize>() % self.rows.len();
+        self.get(ctx, index)
+    }
+}
+
 pub fn register_sync(ctx: &Ctx, shared_data: SharedData) -> Result<()> {
     // Store shared_data in context so constructor can access it
     let _ = ctx.store_userdata(SharedDataWrapper(shared_data));
 
-    // Register the class (which includes the constructor)
+    // Store CSV data in context
+    let csv_data: CsvData = Arc::new(RwLock::new(HashMap::new()));
+    let _ = ctx.store_userdata(CsvDataWrapper(csv_data));
+
+    // Register the classes (which includes the constructors)
     Class::<SharedArray>::define(&ctx.globals())?;
-    
+    Class::<SharedCSV>::define(&ctx.globals())?;
+
     Ok(())
 }
