@@ -4,60 +4,7 @@
 
 ---
 
-## 1. Why Fusillade? (vs. k6)
-
-Fusillade is designed to be a binary-compatible, higher-performance alternative to Grafana k6.
-
-| Feature | Grafana k6 (Go) | Fusillade (Rust) |
-| :--- | :--- | :--- |
-| **Runtime** | Go + goja (JS) | Rust + QuickJS (`rquickjs`) |
-| **Concurrency** | Goroutines | OS Threads (Zero-Cost Abstraction) |
-| **Memory Overhead** | Moderate (GC) | Low (RAII / Manual Mgmt) |
-| **Protocols** | HTTP, WS, gRPC | HTTP/2, WS, gRPC, **MQTT, AMQP, SSE** |
-| **Binary Size** | ~20MB | ~10MB |
-| **Ecosystem** | Mature (Extensions) | Native Rust Performance |
-
-### Migrating from k6
-
-Fusillade is designed to be k6-compatible. Most scripts work with minimal changes:
-
-**Step 1: Remove imports** — Fusillade provides globals instead of imports:
-
-```javascript
-// k6 script
-import http from 'k6/http';
-import { check, sleep } from 'k6';
-
-// Fusillade script (no imports needed)
-// http, check, sleep are available globally
-```
-
-**Step 2: Rename `vus` to `workers`** (optional — `vus` works in options too):
-
-```javascript
-export const options = {
-    workers: 100,  // Same as k6's vus
-    duration: '30s',
-};
-```
-
-**Step 3: Run your test:**
-
-```bash
-fusi run your-k6-script.js
-```
-
-**Key differences:**
-| k6 | Fusillade |
-|----|-----------|
-| `import http from 'k6/http'` | `http` is a global |
-| `vus` in options | `workers` (or `vus` via CLI `--vus`) |
-| Extensions required for MQTT/AMQP | Built-in |
-| Response always has body | `response.body` is null with `response_sink: true` |
-
----
-
-## 2. Core Philosophy & Architecture
+## 1. Core Philosophy & Architecture
 
 * **Performance (The Host):** The engine handles networking, threading, and resource management using Rust's sync ecosystem (`std::thread`) and `reqwest::blocking` heavily tuned for HTTP/2 multiplexing.
 * **Scripting (The Guest):** Users define test logic in standard JavaScript (ES Modules). The JS context is strictly for logic; it does not handle I/O directly.
@@ -66,7 +13,7 @@ fusi run your-k6-script.js
 
 ---
 
-## 3. Technology Stack
+## 2. Technology Stack
 
 * **Language:** Rust (2021 edition)
 * **JS Runtime:** `rquickjs` (QuickJS bindings)
@@ -84,7 +31,7 @@ fusi run your-k6-script.js
 
 ---
 
-## 4. Usage Guide
+## 3. Usage Guide
 
 ### Installation
 
@@ -106,7 +53,7 @@ fusillade run scenarios/test.js
 
 ### Writing a Test Scenario
 
-Fusillade supports modern ES Modules, local imports, and k6-compatible options.
+Fusillade supports modern ES Modules and local imports.
 
 **File: `scenarios/checkout.js`**
 
@@ -255,7 +202,7 @@ fusillade convert --input recording.har --output flow.js
 
 ---
 
-## 5. Configuration Options
+## 4. Configuration Options
 
 Fusillade is configured via the `export const options` object in your script.
 
@@ -371,7 +318,7 @@ export const options = {
 
 ---
 
-## 6. Configuration Files
+## 5. Configuration Files
 
 Fusillade supports external configuration files in **YAML** or **JSON** format. These are useful for:
 - Separating test logic (script) from test parameters (config)
@@ -583,7 +530,7 @@ criteria:
 
 ---
 
-## 7. Global API Reference
+## 6. Global API Reference
 
 ### http Module
 
@@ -610,6 +557,7 @@ The optional `options` argument supports:
 The `Response` object returned by requests contains:
 * `status` (Number): HTTP status code (e.g., 200, 404). `0` for network/timeout errors.
 * `body` (String): Response body as text. **Note:** Will be `null`/empty when `response_sink` is enabled.
+* `json()` (Function): Parses body as JSON and returns the result. Equivalent to `JSON.parse(res.body)`.
 * `headers` (Object): Response headers.
 * `proto` (String): HTTP protocol version:
     * `"h1"`: HTTP/0.9, HTTP/1.0, HTTP/1.1
@@ -623,6 +571,13 @@ The `Response` object returned by requests contains:
     * `sending`: Time sending the request.
     * `waiting`: Time waiting for the first byte (TTFB).
     * `receiving`: Time reading the response.
+
+```javascript
+// Using res.json() for cleaner code
+const res = http.get('https://api.example.com/users');
+const data = res.json();  // Instead of JSON.parse(res.body)
+print(data.users.length);
+```
 
 **Note:** Use the `name` tag in options to group dynamic URLs (e.g., `/products/1` -> `/products/:id`) for cleaner metrics.
 
@@ -940,7 +895,7 @@ export default function() {
 
 ---
 
-## 8. Directory Structure
+## 7. Directory Structure
 
 ### Source Code (src/)
 
@@ -958,7 +913,7 @@ export default function() {
 
 ---
 
-## 9. CLI Reference
+## 8. CLI Reference
 
 ### `fusillade run`
 Executes a load test script.
@@ -1247,7 +1202,7 @@ Execute a JavaScript snippet directly (for debugging).
 
 ---
 
-## 10. Chaos Engineering (Fault Injection)
+## 9. Chaos Engineering (Fault Injection)
 
 Fusillade includes native chaos engineering capabilities to test how your system behaves under adverse conditions—without needing external tools like Toxiproxy.
 
@@ -1280,7 +1235,7 @@ Dropped requests are recorded as failures with status `0` and error `"Simulated 
 
 ---
 
-## 11. Cost Estimation
+## 10. Cost Estimation
 
 Estimate data transfer costs before running large-scale tests to avoid surprise bandwidth bills.
 
@@ -1329,7 +1284,7 @@ Proceed? [y/N]
 
 ---
 
-## 12. Smart Replay (Error Debugging)
+## 11. Smart Replay (Error Debugging)
 
 When requests fail during a load test, Fusillade can capture them for later analysis and replay.
 
@@ -1376,7 +1331,7 @@ The errors file uses JSONL format for streaming writes:
 
 ---
 
-## 13. Interactive Flight Control
+## 12. Interactive Flight Control
 
 Control your load test in real-time with the `--interactive` flag.
 
@@ -1403,7 +1358,7 @@ When running with `--interactive` (or `-i`), Fusillade accepts commands via stdi
 
 ---
 
-## 14. CLI Quick Reference
+## 13. CLI Quick Reference
 
 | Command | Description |
 |---------|-------------|
@@ -1427,7 +1382,7 @@ When running with `--interactive` (or `-i`), Fusillade accepts commands via stdi
 
 ---
 
-## 15. Testing
+## 14. Testing
 
 ### Running Unit Tests
 

@@ -25,6 +25,7 @@ impl<'js> IntoJs<'js> for SyncHttpResponse {
         obj.set("proto", "h1")?;
 
         let body_str = String::from_utf8_lossy(&self.body);
+        let body_string = body_str.to_string();
         obj.set("body", body_str.as_ref())?;
 
         let headers_obj = Object::new(ctx.clone())?;
@@ -42,6 +43,14 @@ impl<'js> IntoJs<'js> for SyncHttpResponse {
         timings_obj.set("waiting", self.timings.waiting.as_secs_f64() * 1000.0)?;
         timings_obj.set("receiving", self.timings.receiving.as_secs_f64() * 1000.0)?;
         obj.set("timings", timings_obj)?;
+
+        // Add json() method to parse body as JSON
+        let ctx_clone = ctx.clone();
+        obj.set("json", Function::new(ctx.clone(), move || -> Result<Value<'_>> {
+            let json_global: Object = ctx_clone.globals().get("JSON")?;
+            let parse: Function = json_global.get("parse")?;
+            parse.call((body_string.clone(),))
+        }))?;
 
         Ok(obj.into_value())
     }
