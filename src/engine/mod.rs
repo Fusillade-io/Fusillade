@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rquickjs::{Context, Runtime, Module, Function, Value, Object, Ctx, loader::{FileResolver, ScriptLoader}, CatchResultExt};
+use rquickjs::{Context, Runtime, Module, Function, Value, Object, Ctx, loader::{FileResolver, ScriptLoader}, CatchResultExt, CaughtError};
 use tokio::time::{Duration, Instant};
 use crate::cli::config::Config;
 use crate::stats::{Metric, StatsAggregator, SharedAggregator, ShardedAggregator};
@@ -15,6 +15,26 @@ use http::Method;
 // Will use may::coroutine when worker spawning is migrated
 #[allow(unused_imports)]
 use may::coroutine;
+
+/// Format a CaughtError with detailed message and stack trace (including line numbers)
+fn format_js_error(error: &CaughtError) -> String {
+    match error {
+        CaughtError::Exception(ex) => {
+            let message = ex.message().unwrap_or_else(|| "Unknown error".to_string());
+            if let Some(stack) = ex.stack() {
+                format!("{}\n{}", message, stack)
+            } else {
+                message
+            }
+        }
+        CaughtError::Value(val) => {
+            format!("Exception: {:?}", val)
+        }
+        CaughtError::Error(e) => {
+            e.to_string()
+        }
+    }
+}
 
 
 
@@ -378,8 +398,22 @@ impl Engine {
                                     crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop, response_sink).unwrap();
                                     // Set scenario name global for automatic tagging
                                     ctx.globals().set("__SCENARIO", scenario_name.clone()).unwrap();
-                                    let module = Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).unwrap();
-                                    let (module, _) = module.eval().unwrap();
+
+                                    // Module declaration with better error handling
+                                    let module = match Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).catch(&ctx) {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            eprintln!("[Scenario: {}] Script error:\n{}", scenario_name, format_js_error(&e));
+                                            return;
+                                        }
+                                    };
+                                    let (module, _) = match module.eval().catch(&ctx) {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            eprintln!("[Scenario: {}] Script error:\n{}", scenario_name, format_js_error(&e));
+                                            return;
+                                        }
+                                    };
                                     
                                     // Get the exec function (default or custom)
                                     let func: Function = module.get(&exec_fn).unwrap_or_else(|_| {
@@ -422,11 +456,12 @@ impl Engine {
                                                 });
                                             },
                                             Err(e) => {
+                                                let error_msg = format_js_error(&e);
                                                 let _ = tx.send(Metric::Request {
                                                     name: format!("{}::iteration", scenario_name),
                                                     timings,
                                                     status: 0,
-                                                    error: Some(e.to_string()),
+                                                    error: Some(error_msg),
                                                     tags,
                                                 });
                                             }
@@ -608,9 +643,29 @@ impl Engine {
                                     // Pass std::sync::mpsc::Sender directly - no bridge thread needed!
                                     // Clone tx since we need it for both bridge and iteration metrics
                                     crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop, response_sink).unwrap();
-                                    let module = Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).unwrap();
-                                    let (module, _) = module.eval().unwrap();
-                                    let func: Function = module.get("default").unwrap();
+
+                                    // Module declaration with better error handling
+                                    let module = match Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).catch(&ctx) {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            eprintln!("Script error:\n{}", format_js_error(&e));
+                                            return;
+                                        }
+                                    };
+                                    let (module, _) = match module.eval().catch(&ctx) {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            eprintln!("Script error:\n{}", format_js_error(&e));
+                                            return;
+                                        }
+                                    };
+                                    let func: Function = match module.get("default") {
+                                        Ok(f) => f,
+                                        Err(_) => {
+                                            eprintln!("Script error: 'default' function not found. Did you forget to export default function?");
+                                            return;
+                                        }
+                                    };
                                     
                                     // Parse setup data once
                                     let data_val = if let Some(json) = setup_data_clone.as_ref() {
@@ -648,11 +703,12 @@ impl Engine {
                                                 });
                                             },
                                             Err(e) => {
+                                                let error_msg = format_js_error(&e);
                                                 let _ = tx.send(Metric::Request {
                                                     name: "iteration".to_string(),
                                                     timings,
                                                     status: 0,
-                                                    error: Some(e.to_string()),
+                                                    error: Some(error_msg),
                                                     tags,
                                                 });
                                             }

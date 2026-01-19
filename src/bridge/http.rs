@@ -161,6 +161,11 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
              timeout_duration = Some(Duration::from_millis(timeout_ms));
         }
 
+        // Retry configuration
+        let max_retries: u32 = opts.get("retry").unwrap_or(0);
+        let retry_delay_ms: u64 = opts.get("retryDelay").unwrap_or(100);
+        let mut retry_count: u32 = 0;
+
         let mut redirects = 0;
         loop {
             let url_parsed = Url::parse(&url_str).map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
@@ -274,6 +279,15 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
                     return Ok(HttpResponse { status, body, headers: resp_headers, timings, proto });
                 },
                 Err(e) => {
+                    // Retry logic with exponential backoff
+                    if retry_count < max_retries {
+                        retry_count += 1;
+                        let delay = Duration::from_millis(retry_delay_ms * (1 << (retry_count - 1).min(5)));
+                        runtime.block_on(async { tokio::time::sleep(delay).await; });
+                        redirects = 0; // Reset redirects for retry
+                        continue;
+                    }
+
                     let duration = start.elapsed();
                     let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
 

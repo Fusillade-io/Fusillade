@@ -575,6 +575,18 @@ The optional `options` argument supports:
 * `name` (String): Custom metric tag for aggregating dynamic URLs.
 * `tags` (Object): Custom tags for filtering/aggregating metrics (e.g., `{ type: 'checkout', region: 'us-east' }`).
 * `timeout` (String): Request timeout duration (e.g., `'10s'`, `'500ms'`). Defaults to `'60s'`. Returns status `0` and error `"request timeout"` on failure.
+* `retry` (Number): Number of retry attempts on failure. Defaults to `0`. Uses exponential backoff.
+* `retryDelay` (Number): Initial retry delay in milliseconds. Defaults to `100`. Doubles each retry (up to 32x).
+
+```javascript
+// Retry failed requests with exponential backoff
+const res = http.request({
+    method: 'GET',
+    url: 'https://api.example.com/flaky-endpoint',
+    retry: 3,        // Retry up to 3 times
+    retryDelay: 200  // Start with 200ms, then 400ms, 800ms
+});
+```
 
 ### Response Object
 
@@ -1009,6 +1021,28 @@ Executes a load test script.
 * `--drop <PROBABILITY>`: Chaos: Drop requests with probability 0.0-1.0 (e.g., `0.05`).
 * `--estimate-cost [THRESHOLD]`: Run a dry-run to estimate bandwidth costs. Optional threshold in dollars (default: $10).
 * `--watch`: Watch script for changes and re-run automatically (development mode). Uses 1 worker and 5s duration by default unless overridden.
+
+### `fusillade compare`
+Compare two test run summaries to identify performance regressions or improvements.
+
+**Arguments:**
+* `<BASELINE>`: Path to baseline JSON summary (e.g., `results-baseline.json`)
+* `<CURRENT>`: Path to current JSON summary (e.g., `results-current.json`)
+
+**Example:**
+```bash
+# Export summaries from two runs
+fusillade run test.js --export-json baseline.json
+# ... make changes ...
+fusillade run test.js --export-json current.json
+
+# Compare the results
+fusillade compare baseline.json current.json
+```
+
+Output shows percentage change for each metric:
+- **Green**: Improvement (lower latency, higher RPS)
+- **Red**: Regression (higher latency, lower RPS)
 
 ### `fusillade init`
 Initialize a new test script with a starter template.
