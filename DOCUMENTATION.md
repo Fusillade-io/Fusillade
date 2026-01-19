@@ -545,6 +545,7 @@ criteria:
 * `http.url(baseUrl, [params])`: Build URL with query parameters. Returns URL string.
 * `http.formEncode(obj)`: Encode object as `application/x-www-form-urlencoded` string.
 * `http.request({ method, url, body, headers, name, timeout })`: Generic request builder.
+* `http.batch(requests)`: Execute multiple requests in parallel. Returns array of responses.
 
 ```javascript
 // http.url() example
@@ -556,6 +557,15 @@ const body = http.formEncode({ username: 'user', password: 'pass' });
 http.post('https://api.example.com/login', body, {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
 });
+
+// http.batch() example - parallel requests
+const responses = http.batch([
+    { method: 'GET', url: 'https://api.example.com/users' },
+    { method: 'GET', url: 'https://api.example.com/posts' },
+    { method: 'POST', url: 'https://api.example.com/log', body: JSON.stringify({ event: 'test' }) }
+]);
+// responses is an array of Response objects in the same order
+console.log(responses[0].status, responses[1].status, responses[2].status);
 ```
 
 ### Request Options
@@ -998,6 +1008,7 @@ Executes a load test script.
 * `--jitter <DURATION>`: Chaos: Add artificial latency to requests (e.g., `500ms`).
 * `--drop <PROBABILITY>`: Chaos: Drop requests with probability 0.0-1.0 (e.g., `0.05`).
 * `--estimate-cost [THRESHOLD]`: Run a dry-run to estimate bandwidth costs. Optional threshold in dollars (default: $10).
+* `--watch`: Watch script for changes and re-run automatically (development mode). Uses 1 worker and 5s duration by default unless overridden.
 
 ### `fusillade init`
 Initialize a new test script with a starter template.
