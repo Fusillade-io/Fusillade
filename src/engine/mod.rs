@@ -891,11 +891,33 @@ impl Engine {
 
             // Teardown
             let _ = self.run_teardown(&script_path, &script_content, setup_data.as_deref().map(|s| s.to_string()), aggregator.clone());
-            
-            report
+
+            // Validate thresholds if criteria are defined
+            let threshold_failures = if let Some(ref criteria) = config.criteria {
+                merged_agg.validate_thresholds(criteria)
+            } else {
+                Vec::new()
+            };
+
+            // If abort_on_fail is enabled and thresholds failed, print failures and return error
+            if config.abort_on_fail.unwrap_or(false) && !threshold_failures.is_empty() {
+                eprintln!("\nThreshold failures:");
+                for failure in &threshold_failures {
+                    eprintln!("  {}", failure);
+                }
+                return Err(anyhow::anyhow!("Thresholds breached: {} failure(s)", threshold_failures.len()));
+            } else if !threshold_failures.is_empty() {
+                // Print threshold failures as warnings even if not aborting
+                eprintln!("\nThreshold failures (warnings):");
+                for failure in &threshold_failures {
+                    eprintln!("  {}", failure);
+                }
+            }
+
+            Ok(report)
         });
 
-        handle.join().map_err(|_| anyhow::anyhow!("Test thread panicked"))
+        handle.join().map_err(|_| anyhow::anyhow!("Test thread panicked"))?
     }
 
     fn calculate_target(schedule: &[(Duration, usize)], elapsed: Duration) -> usize {

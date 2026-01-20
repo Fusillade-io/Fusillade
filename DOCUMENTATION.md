@@ -219,6 +219,7 @@ Fusillade is configured via the `export const options` object in your script.
 | `scenarios` | Object | Multiple named scenarios with independent configs (see below). | `{ fast: {...}, slow: {...} }` |
 | `stack_size` | Number | Worker thread stack size in bytes. Default: `262144` (256KB). Increase if encountering stack overflows with complex scripts. | `524288` |
 | `response_sink` | Boolean | Sink (discard) response bodies to save memory. See [Response Sink Mode](#response-sink-mode) below. | `true` |
+| `abort_on_fail` | Boolean | Abort the test immediately if any threshold is breached. Useful for CI/CD to fail fast. When enabled, the test exits with a non-zero status code on threshold failure. | `true` |
 
 ### Scenarios
 
@@ -544,6 +545,9 @@ criteria:
 * `http.file(path, [filename], [contentType])`: Reads a file and returns a JSON string marker for multipart uploads.
 * `http.url(baseUrl, [params])`: Build URL with query parameters. Returns URL string.
 * `http.formEncode(obj)`: Encode object as `application/x-www-form-urlencoded` string.
+* `http.basicAuth(username, password)`: Generate Basic auth header value (returns `"Basic base64..."`).
+* `http.bearerToken(token)`: Generate Bearer auth header value (returns `"Bearer token"`).
+* `http.setDefaults(options)`: Set global defaults for all requests (timeout, headers).
 * `http.request({ method, url, body, headers, name, timeout })`: Generic request builder.
 * `http.batch(requests)`: Execute multiple requests in parallel. Returns array of responses.
 
@@ -566,6 +570,27 @@ const responses = http.batch([
 ]);
 // responses is an array of Response objects in the same order
 console.log(responses[0].status, responses[1].status, responses[2].status);
+
+// http.basicAuth() and http.bearerToken() examples
+http.get('https://api.example.com/private', {
+    headers: { 'Authorization': http.basicAuth('user', 'pass') }
+});
+
+const token = 'eyJhbGciOiJIUzI1NiIs...';
+http.get('https://api.example.com/me', {
+    headers: { 'Authorization': http.bearerToken(token) }
+});
+
+// http.setDefaults() example - set global defaults for all requests
+http.setDefaults({
+    timeout: '10s',
+    headers: {
+        'X-API-Key': __ENV.API_KEY,
+        'Accept': 'application/json'
+    }
+});
+// All subsequent requests will use these defaults
+http.get('https://api.example.com/data');  // Uses 10s timeout and default headers
 ```
 
 ### Request Options
@@ -577,6 +602,8 @@ The optional `options` argument supports:
 * `timeout` (String): Request timeout duration (e.g., `'10s'`, `'500ms'`). Defaults to `'60s'`. Returns status `0` and error `"request timeout"` on failure.
 * `retry` (Number): Number of retry attempts on failure. Defaults to `0`. Uses exponential backoff.
 * `retryDelay` (Number): Initial retry delay in milliseconds. Defaults to `100`. Doubles each retry (up to 32x).
+* `followRedirects` (Boolean): Whether to follow HTTP redirects (3xx). Defaults to `true`.
+* `maxRedirects` (Number): Maximum number of redirects to follow. Defaults to `5`.
 
 ```javascript
 // Retry failed requests with exponential backoff
@@ -594,6 +621,10 @@ The `Response` object returned by requests contains:
 * `status` (Number): HTTP status code (e.g., 200, 404). `0` for network/timeout errors.
 * `body` (String): Response body as text. **Note:** Will be `null`/empty when `response_sink` is enabled.
 * `json()` (Function): Parses body as JSON and returns the result. Equivalent to `JSON.parse(res.body)`.
+* `bodyContains(str)` (Function): Returns `true` if body contains the given string.
+* `bodyMatches(pattern)` (Function): Returns `true` if body matches the regex pattern.
+* `hasHeader(name, [value])` (Function): Returns `true` if header exists. If `value` is provided, also checks the header value matches.
+* `isJson()` (Function): Returns `true` if body is valid JSON.
 * `headers` (Object): Response headers.
 * `proto` (String): HTTP protocol version:
     * `"h1"`: HTTP/0.9, HTTP/1.0, HTTP/1.1
@@ -613,6 +644,16 @@ The `Response` object returned by requests contains:
 const res = http.get('https://api.example.com/users');
 const data = res.json();  // Instead of JSON.parse(res.body)
 print(data.users.length);
+
+// Using response matchers for cleaner checks
+check(res, {
+    'status is 200': (r) => r.status === 200,
+    'body contains success': (r) => r.bodyContains('success'),
+    'body matches pattern': (r) => r.bodyMatches(/order-\d+/),
+    'has content-type': (r) => r.hasHeader('content-type'),
+    'content-type is json': (r) => r.hasHeader('content-type', 'application/json'),
+    'response is valid json': (r) => r.isJson(),
+});
 ```
 
 **Note:** Use the `name` tag in options to group dynamic URLs (e.g., `/products/1` -> `/products/:id`) for cleaner metrics.
@@ -663,6 +704,7 @@ check(response, {
 ```
 
 * `sleep(seconds)`: Pauses the virtual user for the specified duration (fractional seconds supported).
+* `sleepRandom(min, max)`: Pauses for a random duration between `min` and `max` seconds. Useful for realistic think times.
 * `print(message)`: Logs a message to stdout and the worker logs file.
 * `open(path)`: Reads a file from the local filesystem and returns its content as a string. Useful for loading data files (e.g., JSON or CSV). Only available during initialization, not inside the default function.
 
@@ -792,6 +834,11 @@ Fusillade provides built-in globals for common operations:
 * `utils.randomInt(min, max)`: Random integer in range [min, max].
 * `utils.randomString(length)`: Random alphanumeric string.
 * `utils.randomItem(array)`: Pick a random element from an array.
+* `utils.randomEmail()`: Generate a random email address (e.g., `"abc123@test.com"`).
+* `utils.randomPhone()`: Generate a random US phone number (e.g., `"+1-555-123-4567"`).
+* `utils.randomName()`: Generate a random name object with `first`, `last`, and `full` properties.
+* `utils.randomDate(startYear, endYear)`: Generate a random date string in YYYY-MM-DD format.
+* `utils.sequentialId()`: Generate a unique sequential ID (unique across workers).
 
 ```javascript
 // Examples
@@ -800,6 +847,13 @@ const token = encoding.b64encode('user:pass');
 const id = utils.uuid();
 const num = utils.randomInt(1, 100);
 const user = utils.randomItem(users);
+
+// Data generation for signup tests
+const email = utils.randomEmail();         // "xk7f2b1q@test.com"
+const phone = utils.randomPhone();         // "+1-555-847-2901"
+const name = utils.randomName();           // { first: "John", last: "Smith", full: "John Smith" }
+const dob = utils.randomDate(1970, 2000);  // "1985-07-23"
+const orderId = utils.sequentialId();      // Unique ID per worker, e.g., 1000000001
 ```
 
 ### SharedArray

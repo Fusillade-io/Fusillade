@@ -15,6 +15,13 @@ use hyper::body::Bytes;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Global HTTP request defaults that can be set via http.setDefaults()
+#[derive(Default, Clone)]
+struct HttpDefaults {
+    timeout: Option<Duration>,
+    headers: HashMap<String, String>,
+}
+
 /// Parse a duration string (e.g., "30s", "500ms", "1m") into std::time::Duration
 fn parse_duration_str(s: &str) -> Option<Duration> {
     if s.ends_with("ms") {
@@ -81,6 +88,9 @@ impl<'js> IntoJs<'js> for HttpResponse {
         let body_string = body_str.to_string();
         obj.set("body", body_str.as_ref())?;
 
+        // Clone headers for use in hasHeader method before moving into JS object
+        let headers_for_check = self.headers.clone();
+
         let headers_obj = Object::new(ctx.clone())?;
         for (k, v) in self.headers {
             headers_obj.set(k, v)?;
@@ -100,10 +110,60 @@ impl<'js> IntoJs<'js> for HttpResponse {
 
         // Add json() method to parse body as JSON
         let ctx_clone = ctx.clone();
+        let body_for_json = body_string.clone();
         obj.set("json", Function::new(ctx.clone(), move || -> Result<Value<'_>> {
             let json_global: Object = ctx_clone.globals().get("JSON")?;
             let parse: Function = json_global.get("parse")?;
-            parse.call((body_string.clone(),))
+            parse.call((body_for_json.clone(),))
+        }))?;
+
+        // Add bodyContains(str) method - check if body contains string
+        let body_for_contains = body_string.clone();
+        obj.set("bodyContains", Function::new(ctx.clone(), move |needle: String| -> bool {
+            body_for_contains.contains(&needle)
+        }))?;
+
+        // Add bodyMatches(pattern) method - check if body matches regex
+        let body_for_matches = body_string.clone();
+        obj.set("bodyMatches", Function::new(ctx.clone(), move |pattern: String| -> bool {
+            match regex::Regex::new(&pattern) {
+                Ok(re) => re.is_match(&body_for_matches),
+                Err(_) => false,
+            }
+        }))?;
+
+        // Add hasHeader(name, value?) method - check if header exists (and optionally matches value)
+        obj.set("hasHeader", Function::new(ctx.clone(), move |name: String, value: Option<String>| -> bool {
+            match headers_for_check.get(&name) {
+                Some(v) => {
+                    if let Some(expected) = value {
+                        v == &expected
+                    } else {
+                        true
+                    }
+                }
+                None => {
+                    // Try case-insensitive lookup
+                    let name_lower = name.to_lowercase();
+                    headers_for_check.iter().any(|(k, v)| {
+                        if k.to_lowercase() == name_lower {
+                            if let Some(ref expected) = value {
+                                v == expected
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    })
+                }
+            }
+        }))?;
+
+        // Add isJson() method - check if body is valid JSON
+        let body_for_is_json = body_string.clone();
+        obj.set("isJson", Function::new(ctx.clone(), move || -> bool {
+            serde_json::from_str::<serde_json::Value>(&body_for_is_json).is_ok()
         }))?;
 
         Ok(obj.into_value())
@@ -129,11 +189,13 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
     let global_response_sink = response_sink;
     let http = Object::new(ctx.clone())?;
     let cookie_store = std::rc::Rc::new(RefCell::new(CookieStore::default()));
+    let defaults = std::rc::Rc::new(RefCell::new(HttpDefaults::default()));
 
     let c_base = client.clone();
     let tx_base = tx.clone();
     let cs_base = cookie_store.clone();
     let rt_base = runtime.clone();
+    let defaults_base = defaults.clone();
     
     http.set("request", Function::new(ctx.clone(), move |opts: Object| -> Result<HttpResponse> {
         let client = c_base.clone();
@@ -143,28 +205,54 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         let drop = global_drop;
         let response_sink = global_response_sink;
 
+        // Get defaults
+        let defs = defaults_base.borrow();
+
         let mut method_str: String = opts.get("method").unwrap_or_else(|_| "GET".to_string());
         let mut url_str: String = opts.get("url").map_err(|_| rquickjs::Error::new_from_js("url is required", "ValueError"))?;
         let name_opt: Option<String> = opts.get("name").ok();
         let body: Option<String> = opts.get("body").ok();
-        let headers_map: Option<HashMap<String, String>> = opts.get("headers").ok();
+        let request_headers: Option<HashMap<String, String>> = opts.get("headers").ok();
+
+        // Merge default headers with request headers (request headers take precedence)
+        let headers_map: Option<HashMap<String, String>> = if defs.headers.is_empty() {
+            request_headers
+        } else {
+            let mut merged = defs.headers.clone();
+            if let Some(req_h) = request_headers {
+                for (k, v) in req_h {
+                    merged.insert(k, v);
+                }
+            }
+            Some(merged)
+        };
+
         let mut tags: HashMap<String, String> = opts.get("tags").unwrap_or_default();
         // Auto-inject scenario tag from global if available
         let ctx = opts.ctx();
         if let Ok(scenario_name) = ctx.globals().get::<_, String>("__SCENARIO") {
             tags.insert("scenario".to_string(), scenario_name);
         }
-        let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+
+        // Use default timeout if not specified in request
+        let mut timeout_duration: Option<Duration> = defs.timeout.or(Some(Duration::from_secs(60)));
         if let Ok(timeout_str) = opts.get::<_, String>("timeout") {
              timeout_duration = parse_duration_str(&timeout_str);
         } else if let Ok(timeout_ms) = opts.get::<_, u64>("timeout") {
              timeout_duration = Some(Duration::from_millis(timeout_ms));
         }
 
+        // Drop the borrow before the async block
+        std::mem::drop(defs);
+
         // Retry configuration
         let max_retries: u32 = opts.get("retry").unwrap_or(0);
         let retry_delay_ms: u64 = opts.get("retryDelay").unwrap_or(100);
         let mut retry_count: u32 = 0;
+
+        // Redirect configuration
+        let follow_redirects: bool = opts.get("followRedirects").unwrap_or(true);
+        let max_redirects: u32 = opts.get("maxRedirects").unwrap_or(5);
 
         let mut redirects = 0;
         loop {
@@ -266,7 +354,7 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
                         }
                     }
 
-                    if (300..400).contains(&status) && redirects < 5 {
+                    if follow_redirects && (300..400).contains(&status) && redirects < max_redirects {
                         if let Some(loc_str) = location_header {
                             let next_url = url_parsed.join(&loc_str).map_err(|_| rquickjs::Error::new_from_js("Invalid Redirect URL", "UrlError"))?;
                             url_str = next_url.to_string();
@@ -1111,6 +1199,44 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>, client: HttpClient, runtime:
         } else {
             Ok(base_url)
         }
+    }))?;
+
+    // http.basicAuth(username, password) - Generate Basic auth header value
+    http.set("basicAuth", Function::new(ctx.clone(), move |username: String, password: String| -> String {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let credentials = format!("{}:{}", username, password);
+        format!("Basic {}", STANDARD.encode(credentials.as_bytes()))
+    }))?;
+
+    // http.bearerToken(token) - Generate Bearer auth header value
+    http.set("bearerToken", Function::new(ctx.clone(), move |token: String| -> String {
+        format!("Bearer {}", token)
+    }))?;
+
+    // http.setDefaults(opts) - Set global request defaults
+    let defaults_set = defaults.clone();
+    http.set("setDefaults", Function::new(ctx.clone(), move |opts: Object| -> Result<()> {
+        let mut d = defaults_set.borrow_mut();
+
+        // Parse timeout
+        if let Ok(timeout_str) = opts.get::<_, String>("timeout") {
+            d.timeout = parse_duration_str(&timeout_str);
+        } else if let Ok(timeout_ms) = opts.get::<_, u64>("timeout") {
+            d.timeout = Some(Duration::from_millis(timeout_ms));
+        }
+
+        // Parse headers
+        if let Ok(headers) = opts.get::<_, Object>("headers") {
+            for key in headers.keys::<String>() {
+                if let Ok(k) = key {
+                    if let Ok(v) = headers.get::<_, String>(&k) {
+                        d.headers.insert(k, v);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }))?;
 
     // http.batch(requests) - Execute multiple requests in parallel

@@ -86,6 +86,10 @@ pub struct Config {
     /// Endpoint tracking is ON by default.
     #[serde(alias = "noEndpointTracking")]
     pub no_endpoint_tracking: Option<bool>,
+    /// Abort the test immediately if any threshold is breached. Useful for CI/CD to fail fast.
+    /// When enabled, the test will exit with a non-zero status code on threshold failure.
+    #[serde(alias = "abortOnFail")]
+    pub abort_on_fail: Option<bool>,
 }
 
 impl Config {

@@ -21,6 +21,7 @@ pub mod replay;
 use rquickjs::{Ctx, Function, Result};
 use std::time::Duration;
 use crossbeam_channel::Sender;
+use rand::Rng;
 use crate::stats::{Metric, SharedAggregator};
 use crate::engine::http_client::HttpClient;
 use std::sync::Arc;
@@ -54,6 +55,15 @@ pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: Ht
         std::thread::sleep(Duration::from_secs_f64(secs));
     }))?;
 
+    globals.set("sleepRandom", Function::new(ctx.clone(), move |min: f64, max: f64| {
+        let duration = if min >= max {
+            min
+        } else {
+            min + rand::thread_rng().gen::<f64>() * (max - min)
+        };
+        std::thread::sleep(Duration::from_secs_f64(duration));
+    }))?;
+
     globals.set("__WORKER_ID", worker_id)?;
 
     // Register internal modules
@@ -62,7 +72,7 @@ pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: Ht
     group::register_sync(ctx)?;
     file::register_sync(ctx)?;
     data::register_sync(ctx, shared_data)?;
-    utils::register_sync(ctx)?;
+    utils::register_sync(ctx, worker_id)?;
     ws::register_sync(ctx)?;
     grpc::register_sync(ctx)?;
     stats::register_sync(ctx, aggregator)?;
@@ -94,6 +104,16 @@ pub fn register_globals_sync_fast<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, share
         may::coroutine::sleep(Duration::from_secs_f64(secs));
     }))?;
 
+    globals.set("sleepRandom", Function::new(ctx.clone(), move |min: f64, max: f64| {
+        let duration = if min >= max {
+            min
+        } else {
+            min + rand::thread_rng().gen::<f64>() * (max - min)
+        };
+        // Use may::coroutine::sleep for green thread compatibility
+        may::coroutine::sleep(Duration::from_secs_f64(duration));
+    }))?;
+
     globals.set("__WORKER_ID", worker_id)?;
 
     // Use sync HTTP (ureq) - no Tokio overhead
@@ -102,7 +122,7 @@ pub fn register_globals_sync_fast<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, share
     group::register_sync(ctx)?;
     file::register_sync(ctx)?;
     data::register_sync(ctx, shared_data)?;
-    utils::register_sync(ctx)?;
+    utils::register_sync(ctx, worker_id)?;
     // Note: ws, grpc, mqtt, amqp, sse still need async runtime - skip for fast path
     stats::register_sync(ctx, aggregator)?;
     encoding::register_sync(ctx)?;
