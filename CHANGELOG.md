@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-01-19
+
+### Added
+- **Better Error Messages**: JavaScript errors now include line numbers and stack traces for easier debugging.
+- **Request Retry**: New `retry` and `retryDelay` options for automatic retry with exponential backoff on failed requests.
+- **`fusillade compare`**: New command to compare two test run summaries and identify performance regressions or improvements.
+
+### Improved
+- Graceful handling of script syntax and module loading errors.
+
+## [0.6.0] - 2026-01-19
+
+### Added
+- **`http.batch()`**: Execute multiple HTTP requests in parallel. Returns array of responses in same order.
+- **`--watch` Mode**: Watch script for changes and automatically re-run tests during development. Uses 1 worker and 5s duration by default.
+- **`http.url()`**: Build URLs with query parameters (e.g., `http.url('https://api.example.com/search', { q: 'test' })`).
+- **`http.formEncode()`**: Encode objects as `application/x-www-form-urlencoded` strings.
+- **`SharedCSV`**: Load CSV files with automatic header parsing. Data shared across all workers.
+- **Automatic `.env` Loading**: `.env` files are automatically loaded from script directory or current working directory.
+
 ## [0.5.9] - 2026-01-18
 
 ### Changed
