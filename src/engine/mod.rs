@@ -292,8 +292,8 @@ impl Engine {
             };
 
             // Configure may green thread scheduler with fixed stack size
-            // 16KB works for 50K+ workers and complex scripts. Override via options.stack_size if needed.
-            let may_stack_size = 16 * 1024;
+            // 32KB works for 50K+ workers and complex scripts. Override via options.stack_size if needed.
+            let may_stack_size = 32 * 1024;
             may::config()
                 .set_workers(num_cpus::get())
                 .set_stack_size(may_stack_size);
