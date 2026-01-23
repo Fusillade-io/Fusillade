@@ -361,6 +361,7 @@ fn main() -> Result<()> {
             if let Some(j) = jitter { final_config.jitter = Some(j); }
             if let Some(p) = drop { final_config.drop = Some(p); }
             if no_endpoint_tracking { final_config.no_endpoint_tracking = Some(true); }
+            if memory_safe { final_config.memory_safe = Some(true); }
 
             // Pre-flight memory check (unless disabled)
             if !no_memory_check {

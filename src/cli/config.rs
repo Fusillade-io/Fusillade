@@ -90,6 +90,11 @@ pub struct Config {
     /// When enabled, the test will exit with a non-zero status code on threshold failure.
     #[serde(alias = "abortOnFail")]
     pub abort_on_fail: Option<bool>,
+    /// Enable memory-safe mode: throttle worker spawning if memory usage is high.
+    /// When system memory exceeds 85%, new worker spawning is paused.
+    /// When memory exceeds 95%, existing workers are gradually stopped.
+    #[serde(alias = "memorySafe")]
+    pub memory_safe: Option<bool>,
 }
 
 impl Config {

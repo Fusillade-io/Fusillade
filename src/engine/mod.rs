@@ -318,6 +318,33 @@ impl Engine {
             let duration_legacy: Duration;
             let mut next_worker_id = 1;
 
+            // Memory-safe mode: Set up monitoring flags
+            let memory_throttle = Arc::new(AtomicBool::new(false));
+            let memory_critical = Arc::new(AtomicBool::new(false));
+            let _memory_monitor = if config.memory_safe.unwrap_or(false) {
+                let throttle_flag = memory_throttle.clone();
+                let critical_flag = memory_critical.clone();
+                Some(memory::MemoryMonitor::start(
+                    Duration::from_secs(2),
+                    move |info| {
+                        // Warning threshold (85%): pause new worker spawning
+                        eprintln!("[Memory] Warning: {:.1}% used ({} available). Throttling worker spawns.", 
+                            info.usage_percent() * 100.0,
+                            memory::format_bytes(info.available_bytes));
+                        throttle_flag.store(true, Ordering::Relaxed);
+                    },
+                    move |info| {
+                        // Critical threshold (95%): signal for worker reduction
+                        eprintln!("[Memory] CRITICAL: {:.1}% used ({} available). Stopping new workers.", 
+                            info.usage_percent() * 100.0,
+                            memory::format_bytes(info.available_bytes));
+                        critical_flag.store(true, Ordering::Relaxed);
+                    },
+                ))
+            } else {
+                None
+            };
+
             // Check if we have multiple scenarios
             let is_multi_scenario = config.scenarios.is_some();
 
@@ -636,6 +663,22 @@ impl Engine {
                     let target_workers = dynamic_target_legacy.unwrap_or(scheduled_target);
 
                     if target_workers > active_legacy_workers.len() {
+                        // Memory-safe mode: Skip spawning if memory is throttled
+                        if memory_throttle.load(Ordering::Relaxed) {
+                            // Check if memory has recovered (below warning threshold)
+                            let info = memory::MemoryInfo::current();
+                            if info.usage_percent() < memory::WARN_THRESHOLD_PERCENT {
+                                memory_throttle.store(false, Ordering::Relaxed);
+                                memory_critical.store(false, Ordering::Relaxed);
+                                eprintln!("[Memory] Recovered: {:.1}% used. Resuming worker spawning.", 
+                                    info.usage_percent() * 100.0);
+                            } else {
+                                // Still throttled, skip spawning this tick
+                                std::thread::sleep(Duration::from_millis(100));
+                                continue;
+                            }
+                        }
+
                         for _ in 0..(target_workers - active_legacy_workers.len()) {
                             let worker_id = next_worker_id;
                             next_worker_id += 1;
