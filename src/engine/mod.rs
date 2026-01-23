@@ -437,19 +437,37 @@ impl Engine {
                                             break;
                                         }
 
+                                        // Reset sleep tracker before each iteration
+                                        crate::bridge::reset_sleep_tracker();
                                         let iter_start = Instant::now();
                                         let call_result = func.call::<_, ()>((data_val.clone(),)).catch(&ctx);
-                                        let elapsed = iter_start.elapsed(); // Single elapsed() call
-                                        let timings = crate::stats::RequestTimings { duration: elapsed, ..Default::default() };
+                                        let elapsed = iter_start.elapsed(); // Total elapsed time including sleep
+                                        let sleep_time = crate::bridge::get_sleep_accumulated();
+                                        let active_time = elapsed.saturating_sub(sleep_time); // Actual work time excluding sleep
+
+                                        // Primary metric: iteration (active time only - excludes sleep)
+                                        let timings = crate::stats::RequestTimings { duration: active_time, ..Default::default() };
+                                        // Secondary metric: iteration_total (includes sleep for pacing analysis)
+                                        let timings_total = crate::stats::RequestTimings { duration: elapsed, ..Default::default() };
+
                                         // Get tags Arc once (no clone of HashMap contents)
                                         let tags_arc = control_state.get_tags();
                                         let tags: HashMap<String, String> = (*tags_arc).clone();
 
                                         match call_result {
                                             Ok(_) => {
+                                                // Send active time metric (default - what users want to measure)
                                                 let _ = tx.send(Metric::Request {
                                                     name: format!("{}::iteration", scenario_name),
                                                     timings,
+                                                    status: 200,
+                                                    error: None,
+                                                    tags: tags.clone(),
+                                                });
+                                                // Send total time metric (includes sleep for throughput/pacing analysis)
+                                                let _ = tx.send(Metric::Request {
+                                                    name: format!("{}::iteration_total", scenario_name),
+                                                    timings: timings_total,
                                                     status: 200,
                                                     error: None,
                                                     tags,
@@ -460,6 +478,13 @@ impl Engine {
                                                 let _ = tx.send(Metric::Request {
                                                     name: format!("{}::iteration", scenario_name),
                                                     timings,
+                                                    status: 0,
+                                                    error: Some(error_msg.clone()),
+                                                    tags: tags.clone(),
+                                                });
+                                                let _ = tx.send(Metric::Request {
+                                                    name: format!("{}::iteration_total", scenario_name),
+                                                    timings: timings_total,
                                                     status: 0,
                                                     error: Some(error_msg),
                                                     tags,
@@ -684,19 +709,37 @@ impl Engine {
                                             break;
                                         }
                                         
+                                        // Reset sleep tracker before each iteration
+                                        crate::bridge::reset_sleep_tracker();
                                         let iter_start = Instant::now();
                                         let call_result = func.call::<_, ()>((data_val.clone(),)).catch(&ctx);
-                                        let elapsed = iter_start.elapsed(); // Single elapsed() call
-                                        let timings = crate::stats::RequestTimings { duration: elapsed, ..Default::default() };
+                                        let elapsed = iter_start.elapsed(); // Total elapsed time including sleep
+                                        let sleep_time = crate::bridge::get_sleep_accumulated();
+                                        let active_time = elapsed.saturating_sub(sleep_time); // Actual work time excluding sleep
+
+                                        // Primary metric: iteration (active time only - excludes sleep)
+                                        let timings = crate::stats::RequestTimings { duration: active_time, ..Default::default() };
+                                        // Secondary metric: iteration_total (includes sleep for pacing analysis)
+                                        let timings_total = crate::stats::RequestTimings { duration: elapsed, ..Default::default() };
+
                                         // Get tags Arc once (no clone of HashMap contents)
                                         let tags_arc = control_state.get_tags();
                                         let tags: HashMap<String, String> = (*tags_arc).clone();
 
                                         match call_result {
                                             Ok(_) => {
+                                                // Send active time metric (default - what users want to measure)
                                                 let _ = tx.send(Metric::Request {
                                                     name: "iteration".to_string(),
                                                     timings,
+                                                    status: 200,
+                                                    error: None,
+                                                    tags: tags.clone(),
+                                                });
+                                                // Send total time metric (includes sleep for throughput/pacing analysis)
+                                                let _ = tx.send(Metric::Request {
+                                                    name: "iteration_total".to_string(),
+                                                    timings: timings_total,
                                                     status: 200,
                                                     error: None,
                                                     tags,
@@ -707,6 +750,13 @@ impl Engine {
                                                 let _ = tx.send(Metric::Request {
                                                     name: "iteration".to_string(),
                                                     timings,
+                                                    status: 0,
+                                                    error: Some(error_msg.clone()),
+                                                    tags: tags.clone(),
+                                                });
+                                                let _ = tx.send(Metric::Request {
+                                                    name: "iteration_total".to_string(),
+                                                    timings: timings_total,
                                                     status: 0,
                                                     error: Some(error_msg),
                                                     tags,

@@ -703,8 +703,8 @@ check(response, {
 });
 ```
 
-* `sleep(seconds)`: Pauses the virtual user for the specified duration (fractional seconds supported).
-* `sleepRandom(min, max)`: Pauses for a random duration between `min` and `max` seconds. Useful for realistic think times.
+* `sleep(seconds)`: Pauses the virtual user for the specified duration (fractional seconds supported). Sleep time is automatically excluded from iteration response time metrics.
+* `sleepRandom(min, max)`: Pauses for a random duration between `min` and `max` seconds. Useful for realistic think times. Sleep time is automatically excluded from iteration response time metrics.
 * `print(message)`: Logs a message to stdout and the worker logs file.
 * `open(path)`: Reads a file from the local filesystem and returns its content as a string. Useful for loading data files (e.g., JSON or CSV). Only available during initialization, not inside the default function.
 
@@ -958,6 +958,16 @@ Fusillade automatically collects the following metrics:
 * **Execution:**
   * `vus`: Number of active virtual users.
   * `iterations`: Number of completed script iterations.
+
+* **Iteration Timing:**
+  * `iteration`: Duration of each iteration **excluding** sleep time. This represents the actual "active" work time (HTTP requests, computation, etc.) and is the primary metric for measuring test performance.
+  * `iteration_total`: Duration of each iteration **including** sleep time. This represents the total wall-clock time per iteration and is useful for throughput/pacing analysis.
+
+  **Example:** If an iteration makes two 50ms requests with a 500ms sleep between them:
+  * `iteration` will report ~100ms (actual work time)
+  * `iteration_total` will report ~600ms (work + sleep)
+
+  This separation allows you to accurately measure response times without think-time/pacing skewing your metrics.
 
 ### Custom Metrics
 

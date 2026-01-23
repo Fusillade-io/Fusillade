@@ -20,12 +20,34 @@ pub mod replay;
 
 use rquickjs::{Ctx, Function, Result};
 use std::time::Duration;
+use std::cell::RefCell;
 use crossbeam_channel::Sender;
 use rand::Rng;
 use crate::stats::{Metric, SharedAggregator};
 use crate::engine::http_client::HttpClient;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
+
+// Thread-local sleep tracker for accurate iteration timing
+// This tracks cumulative sleep time during an iteration so it can be excluded from response time metrics
+thread_local! {
+    static SLEEP_ACCUMULATED: RefCell<Duration> = const { RefCell::new(Duration::ZERO) };
+}
+
+/// Reset the sleep tracker at the start of each iteration
+pub fn reset_sleep_tracker() {
+    SLEEP_ACCUMULATED.with(|s| *s.borrow_mut() = Duration::ZERO);
+}
+
+/// Get the accumulated sleep time for the current iteration
+pub fn get_sleep_accumulated() -> Duration {
+    SLEEP_ACCUMULATED.with(|s| *s.borrow())
+}
+
+/// Track sleep duration (called internally by sleep functions)
+fn track_sleep(duration: Duration) {
+    SLEEP_ACCUMULATED.with(|s| *s.borrow_mut() += duration);
+}
 
 fn print(tx: Sender<Metric>, msg: String) {
     // Print to stdout for user visibility
@@ -52,7 +74,9 @@ pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: Ht
     }))?;
 
     globals.set("sleep", Function::new(ctx.clone(), move |secs: f64| {
-        std::thread::sleep(Duration::from_secs_f64(secs));
+        let dur = Duration::from_secs_f64(secs);
+        track_sleep(dur);
+        std::thread::sleep(dur);
     }))?;
 
     globals.set("sleepRandom", Function::new(ctx.clone(), move |min: f64, max: f64| {
@@ -61,7 +85,9 @@ pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: Ht
         } else {
             min + rand::thread_rng().gen::<f64>() * (max - min)
         };
-        std::thread::sleep(Duration::from_secs_f64(duration));
+        let dur = Duration::from_secs_f64(duration);
+        track_sleep(dur);
+        std::thread::sleep(dur);
     }))?;
 
     globals.set("__WORKER_ID", worker_id)?;
@@ -101,7 +127,9 @@ pub fn register_globals_sync_fast<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, share
 
     globals.set("sleep", Function::new(ctx.clone(), move |secs: f64| {
         // Use may::coroutine::sleep for green thread compatibility
-        may::coroutine::sleep(Duration::from_secs_f64(secs));
+        let dur = Duration::from_secs_f64(secs);
+        track_sleep(dur);
+        may::coroutine::sleep(dur);
     }))?;
 
     globals.set("sleepRandom", Function::new(ctx.clone(), move |min: f64, max: f64| {
@@ -111,7 +139,9 @@ pub fn register_globals_sync_fast<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, share
             min + rand::thread_rng().gen::<f64>() * (max - min)
         };
         // Use may::coroutine::sleep for green thread compatibility
-        may::coroutine::sleep(Duration::from_secs_f64(duration));
+        let dur = Duration::from_secs_f64(duration);
+        track_sleep(dur);
+        may::coroutine::sleep(dur);
     }))?;
 
     globals.set("__WORKER_ID", worker_id)?;
