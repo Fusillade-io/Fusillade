@@ -58,6 +58,7 @@ pub mod distributed;
 pub mod http_client;
 pub mod control;
 pub mod io_bridge;
+pub mod memory;
 
 impl Engine {
     pub fn new() -> Result<Self> {

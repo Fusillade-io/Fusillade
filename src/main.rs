@@ -162,6 +162,12 @@ enum Commands {
         /// Watch script for changes and re-run automatically (development mode)
         #[arg(long)]
         watch: bool,
+        /// Disable pre-flight memory capacity check
+        #[arg(long)]
+        no_memory_check: bool,
+        /// Enable memory-safe mode: throttle worker spawning if memory usage is high
+        #[arg(long)]
+        memory_safe: bool,
     },
     /// Initialize a new test script with starter template
     Init {
@@ -257,7 +263,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region, no_endpoint_tracking, watch } => {
+        Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region, no_endpoint_tracking, watch, no_memory_check, memory_safe } => {
             // Load .env file if present (check script directory, then current directory)
             let script_dir = scenario.parent().unwrap_or(std::path::Path::new("."));
             let env_paths = [
@@ -355,6 +361,30 @@ fn main() -> Result<()> {
             if let Some(j) = jitter { final_config.jitter = Some(j); }
             if let Some(p) = drop { final_config.drop = Some(p); }
             if no_endpoint_tracking { final_config.no_endpoint_tracking = Some(true); }
+
+            // Pre-flight memory check (unless disabled)
+            if !no_memory_check {
+                let requested_workers = final_config.workers.unwrap_or(1);
+                let preflight = fusillade::engine::memory::preflight_check(requested_workers);
+                
+                if !preflight.safe {
+                    eprintln!("╭────────────────────────────────────────────────────────────╮");
+                    eprintln!("│ ⚠️  MEMORY WARNING                                          │");
+                    eprintln!("├────────────────────────────────────────────────────────────┤");
+                    eprintln!("│ Requested workers: {:>8}                                │", preflight.requested);
+                    eprintln!("│ Estimated max:     {:>8} (based on available RAM)       │", preflight.estimated_max);
+                    eprintln!("│ Available RAM:     {:>8}                                │", fusillade::engine::memory::format_bytes(preflight.available_bytes));
+                    eprintln!("│ Estimated needed:  {:>8}                                │", fusillade::engine::memory::format_bytes(preflight.estimated_needed));
+                    eprintln!("├────────────────────────────────────────────────────────────┤");
+                    eprintln!("│ The test may run out of memory and crash.                  │");
+                    eprintln!("│ Use --no-memory-check to suppress this warning.            │");
+                    if memory_safe {
+                        eprintln!("│ Memory-safe mode enabled: will throttle if needed.         │");
+                    }
+                    eprintln!("╰────────────────────────────────────────────────────────────╯");
+                    eprintln!();
+                }
+            }
 
             // Headless mode: either --headless or --json enables non-TUI mode
             let headless_mode = headless || json;
