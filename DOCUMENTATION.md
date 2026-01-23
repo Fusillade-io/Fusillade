@@ -1441,7 +1441,7 @@ Proceed? [y/N]
 For tests estimated to cost over $10, a **warning** is displayed instead:
 
 ```
-⚠️  WARNING: High Bandwidth Estimate
+WARNING: High Bandwidth Estimate
 ------------------------------------
 Est. Requests:      ~500000
 Est. Data Transfer: 125.50 GB
@@ -1620,7 +1620,7 @@ Before starting a test, Fusillade estimates whether the requested worker count c
 
 ```
 ╭────────────────────────────────────────────────────────────╮
-│ ⚠️  MEMORY WARNING                                          │
+│ MEMORY WARNING                                              │
 ├────────────────────────────────────────────────────────────┤
 │ Requested workers:  500000                                 │
 │ Estimated max:      350000 (based on available RAM)        │

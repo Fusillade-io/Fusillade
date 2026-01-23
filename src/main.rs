@@ -369,7 +369,7 @@ fn main() -> Result<()> {
                 
                 if !preflight.safe {
                     eprintln!("╭────────────────────────────────────────────────────────────╮");
-                    eprintln!("│ ⚠️  MEMORY WARNING                                          │");
+                    eprintln!("│ MEMORY WARNING                                              │");
                     eprintln!("├────────────────────────────────────────────────────────────┤");
                     eprintln!("│ Requested workers: {:>8}                                │", preflight.requested);
                     eprintln!("│ Estimated max:     {:>8} (based on available RAM)       │", preflight.estimated_max);
