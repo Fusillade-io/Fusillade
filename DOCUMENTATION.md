@@ -1608,3 +1608,97 @@ export default function() {
 }
 ```
 
+---
+
+## Memory-Aware Scaling
+
+Fusillade provides memory-aware features to prevent OOM crashes and help with capacity planning.
+
+### Pre-flight Memory Check
+
+Before starting a test, Fusillade estimates whether the requested worker count can fit in available memory. If it exceeds the estimated capacity, a warning is displayed:
+
+```
+╭────────────────────────────────────────────────────────────╮
+│ ⚠️  MEMORY WARNING                                          │
+├────────────────────────────────────────────────────────────┤
+│ Requested workers:  500000                                 │
+│ Estimated max:      350000 (based on available RAM)        │
+│ Available RAM:      4.2 GB                                 │
+│ Estimated needed:   6.0 GB                                 │
+├────────────────────────────────────────────────────────────┤
+│ The test may run out of memory and crash.                  │
+│ Use --no-memory-check to suppress this warning.            │
+╰────────────────────────────────────────────────────────────╯
+```
+
+The test will still run, but you may encounter OOM errors.
+
+### Memory Estimation
+
+Based on production benchmarks:
+
+| Memory | Estimated Max Workers |
+|--------|----------------------|
+| 1 GB   | ~84,000              |
+| 4 GB   | ~340,000             |
+| 8 GB   | ~680,000             |
+| 16 GB  | ~1,360,000           |
+| 32 GB  | ~2,700,000           |
+
+**Formula:**
+- **Base overhead:** ~30 MB (engine, runtime, connections)
+- **Per-worker:** ~12 KB (thread stack, JS context, state)
+- `max_workers = (available_ram - 30MB) / 12KB`
+
+### CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--no-memory-check` | Disable the pre-flight memory warning |
+| `--memory-safe` | Enable memory-safe mode (throttle spawning if memory is high) |
+
+**Examples:**
+
+```bash
+# Normal run (warning shows if needed)
+fusillade run script.js -w 500000 -d 30s
+
+# Suppress warning (you know what you're doing)
+fusillade run script.js -w 500000 -d 30s --no-memory-check
+
+# Memory-safe mode (throttle if memory gets high)
+fusillade run script.js -w 100000 -d 5m --memory-safe
+```
+
+### Reducing Memory Usage
+
+If you're hitting memory limits, consider:
+
+1. **Enable response sink mode:** Discard response bodies to save memory
+   ```javascript
+   export const options = {
+       workers: 10000,
+       duration: '1m',
+       response_sink: true,  // Don't store response bodies
+   };
+   ```
+
+2. **Reduce stack size:** Default is 256KB per worker
+   ```javascript
+   export const options = {
+       workers: 50000,
+       duration: '1m',
+       stack_size: 131072,  // 128KB per worker
+   };
+   ```
+
+3. **Use distributed mode:** Spread workers across multiple machines
+   ```bash
+   # On worker nodes
+   fusillade worker --listen 0.0.0.0:8080
+   
+   # On controller
+   fusillade run script.js --execution distributed --workers node1:8080,node2:8080
+   ```
+
