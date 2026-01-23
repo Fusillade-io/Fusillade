@@ -217,7 +217,7 @@ Fusillade is configured via the `export const options` object in your script.
 | `warmup` | String | URL to hit for connection pool warmup before test starts. | `'https://api.example.com'` |
 | `min_iteration_duration` | String | Minimum time each iteration must take. If an iteration finishes faster, it waits before starting the next. Useful for rate limiting. | `'1s'` |
 | `scenarios` | Object | Multiple named scenarios with independent configs (see below). | `{ fast: {...}, slow: {...} }` |
-| `stack_size` | Number | Worker thread stack size in bytes. Default: `262144` (256KB). Increase if encountering stack overflows with complex scripts. | `524288` |
+| `stack_size` | Number | Worker thread stack size in bytes. Default: `32768` (32KB). Increase if encountering stack overflows with complex scripts. | `65536` |
 | `response_sink` | Boolean | Sink (discard) response bodies to save memory. See [Response Sink Mode](#response-sink-mode) below. | `true` |
 | `abort_on_fail` | Boolean | Abort the test immediately if any threshold is breached. Useful for CI/CD to fail fast. When enabled, the test exits with a non-zero status code on threshold failure. | `true` |
 
@@ -255,7 +255,7 @@ export function checkoutFlow() { /* checkout logic */ }
 | `exec` | String | Function name to call (default: `"default"`) |
 | `startTime` | String | Delay before starting (e.g., `"30s"`) |
 | `thresholds` | Object | Per-scenario pass/fail criteria |
-| `stack_size` | Number | Worker stack size in bytes (default: 256KB) |
+| `stack_size` | Number | Worker stack size in bytes (default: 32KB) |
 | `response_sink` | Boolean | Discard response bodies for this scenario |
 
 ### Response Sink Mode
@@ -1684,12 +1684,12 @@ If you're hitting memory limits, consider:
    };
    ```
 
-2. **Reduce stack size:** Default is 256KB per worker
+2. **Increase stack size if needed:** Default is 32KB per worker. Increase for complex scripts:
    ```javascript
    export const options = {
-       workers: 50000,
+       workers: 10000,
        duration: '1m',
-       stack_size: 131072,  // 128KB per worker
+       stack_size: 65536,  // 64KB per worker for complex scripts
    };
    ```
 
