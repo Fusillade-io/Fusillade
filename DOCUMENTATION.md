@@ -39,6 +39,14 @@
 cargo install --path .
 ```
 
+### Quick Start
+
+Initialize a new project with a sample script and configuration:
+
+```bash
+fusillade init -o my-test.js --config
+```
+
 ### Running a Test
 
 To run a load test, you need a flow script. Configuration is extracted from the `export const options` in the script.
@@ -1085,6 +1093,9 @@ Executes a load test script.
 * `--drop <PROBABILITY>`: Chaos: Drop requests with probability 0.0-1.0 (e.g., `0.05`).
 * `--estimate-cost [THRESHOLD]`: Run a dry-run to estimate bandwidth costs. Optional threshold in dollars (default: $10).
 * `--watch`: Watch script for changes and re-run automatically (development mode). Uses 1 worker and 5s duration by default unless overridden.
+* `--no-endpoint-tracking`: Disable per-endpoint (per-URL) metrics tracking. Useful to reduce cardinality when testing URLs with unique IDs.
+* `--no-memory-check`: Disable pre-flight memory capacity check (warning only).
+* `--memory-safe`: Enable memory-safe mode: throttle worker spawning if memory usage is high.
 
 ### `fusillade compare`
 Compare two test run summaries to identify performance regressions or improvements.
