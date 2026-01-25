@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run unit tests
+        run: cargo test --release
+
+  scenario-tests:
+    name: Scenario Tests
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Fusillade
+        run: cargo build --release
+
+      - name: Run scenario tests
+        run: |
+          # Unit tests (no HTTP required)
+          ./target/release/fusillade run scenarios/unit_test.js --headless
+          ./target/release/fusillade run scenarios/utils_test.js --headless
+          ./target/release/fusillade run scenarios/group_test.js --headless
+          ./target/release/fusillade run scenarios/data_test.js --headless
+
+          # Config and lifecycle tests
+          ./target/release/fusillade run scenarios/config_test.js --headless
+          ./target/release/fusillade run scenarios/iterations_test.js --headless
+          ./target/release/fusillade run scenarios/lifecycle-test.js --headless
+
+          # HTTP tests (uses httpbin.org)
+          ./target/release/fusillade run scenarios/check_test.js --headless
+          ./target/release/fusillade run scenarios/http_test.js --headless
+          ./target/release/fusillade run scenarios/timeout_test.js --headless
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --release -- -D warnings

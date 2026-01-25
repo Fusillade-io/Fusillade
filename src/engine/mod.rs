@@ -266,9 +266,7 @@ impl Engine {
                 .map(|p| p.get())
                 .unwrap_or(8);
 
-            // Scale Tokio threads more aggressively for better latency at high concurrency
-            // Target: ~75 workers per Tokio thread (vs old ~150)
-            // At 10k workers: 128 threads for lower task queue latency
+            // Scale Tokio threads for high concurrency
             let tokio_threads = if total_workers > 5000 {
                 (total_workers / 75).clamp(base_parallelism * 2, 128)
             } else if total_workers > 1000 {
@@ -285,7 +283,6 @@ impl Engine {
                     .expect("Failed to create shared Tokio runtime")
             );
             // Scale connection pool with workers: target ~1 idle connection per 5 workers
-            // At 10k workers: 2000 idle connections per host (reduced from 3333)
             let pool_size = (total_workers / 5).clamp(500, 2000);
             let shared_http_client = {
                 let _guard = shared_tokio_rt.enter();
@@ -295,8 +292,12 @@ impl Engine {
             // Configure may green thread scheduler with fixed stack size
             // 32KB works for 50K+ workers and complex scripts. Override via options.stack_size if needed.
             let may_stack_size = 32 * 1024;
+            // Scale May workers proportionally to total workers
+            // Each May thread can block on HTTP I/O, so we need many threads for high concurrency
+            // Formula: 1 May worker per ~200 Fusillade workers, minimum of CPU count, max 128
+            let may_workers = (total_workers / 200).clamp(num_cpus::get(), 128);
             may::config()
-                .set_workers(num_cpus::get())
+                .set_workers(may_workers)
                 .set_stack_size(may_stack_size);
 
             // Create I/O bridge for may coroutines to access Tokio HTTP
