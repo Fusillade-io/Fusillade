@@ -170,6 +170,7 @@ impl SharedCSV {
             ));
         };
 
+        #[allow(clippy::type_complexity)]
         let mut data_opt: Option<Arc<(Vec<String>, Vec<Vec<String>>)>> = None;
 
         // 1. Try Read

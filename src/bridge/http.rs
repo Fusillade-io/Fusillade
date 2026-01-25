@@ -1842,18 +1842,16 @@ pub fn register_sync(
         "formEncode",
         Function::new(ctx.clone(), move |obj: Object| -> Result<String> {
             let mut pairs: Vec<String> = Vec::new();
-            for key in obj.keys::<String>() {
-                if let Ok(k) = key {
-                    let encoded_key = urlencoding::encode(&k);
-                    if let Ok(v) = obj.get::<_, String>(&k) {
-                        pairs.push(format!("{}={}", encoded_key, urlencoding::encode(&v)));
-                    } else if let Ok(v) = obj.get::<_, i64>(&k) {
-                        pairs.push(format!("{}={}", encoded_key, v));
-                    } else if let Ok(v) = obj.get::<_, f64>(&k) {
-                        pairs.push(format!("{}={}", encoded_key, v));
-                    } else if let Ok(v) = obj.get::<_, bool>(&k) {
-                        pairs.push(format!("{}={}", encoded_key, v));
-                    }
+            for k in obj.keys::<String>().flatten() {
+                let encoded_key = urlencoding::encode(&k);
+                if let Ok(v) = obj.get::<_, String>(&k) {
+                    pairs.push(format!("{}={}", encoded_key, urlencoding::encode(&v)));
+                } else if let Ok(v) = obj.get::<_, i64>(&k) {
+                    pairs.push(format!("{}={}", encoded_key, v));
+                } else if let Ok(v) = obj.get::<_, f64>(&k) {
+                    pairs.push(format!("{}={}", encoded_key, v));
+                } else if let Ok(v) = obj.get::<_, bool>(&k) {
+                    pairs.push(format!("{}={}", encoded_key, v));
                 }
             }
             Ok(pairs.join("&"))
@@ -1869,17 +1867,15 @@ pub fn register_sync(
                 if let Some(p) = params {
                     let mut url = Url::parse(&base_url)
                         .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
-                    for key in p.keys::<String>() {
-                        if let Ok(k) = key {
-                            if let Ok(v) = p.get::<_, String>(&k) {
-                                url.query_pairs_mut().append_pair(&k, &v);
-                            } else if let Ok(v) = p.get::<_, i64>(&k) {
-                                url.query_pairs_mut().append_pair(&k, &v.to_string());
-                            } else if let Ok(v) = p.get::<_, f64>(&k) {
-                                url.query_pairs_mut().append_pair(&k, &v.to_string());
-                            } else if let Ok(v) = p.get::<_, bool>(&k) {
-                                url.query_pairs_mut().append_pair(&k, &v.to_string());
-                            }
+                    for k in p.keys::<String>().flatten() {
+                        if let Ok(v) = p.get::<_, String>(&k) {
+                            url.query_pairs_mut().append_pair(&k, &v);
+                        } else if let Ok(v) = p.get::<_, i64>(&k) {
+                            url.query_pairs_mut().append_pair(&k, &v.to_string());
+                        } else if let Ok(v) = p.get::<_, f64>(&k) {
+                            url.query_pairs_mut().append_pair(&k, &v.to_string());
+                        } else if let Ok(v) = p.get::<_, bool>(&k) {
+                            url.query_pairs_mut().append_pair(&k, &v.to_string());
                         }
                     }
                     Ok(url.to_string())
@@ -1927,11 +1923,9 @@ pub fn register_sync(
 
             // Parse headers
             if let Ok(headers) = opts.get::<_, Object>("headers") {
-                for key in headers.keys::<String>() {
-                    if let Ok(k) = key {
-                        if let Ok(v) = headers.get::<_, String>(&k) {
-                            d.headers.insert(k, v);
-                        }
+                for k in headers.keys::<String>().flatten() {
+                    if let Ok(v) = headers.get::<_, String>(&k) {
+                        d.headers.insert(k, v);
                     }
                 }
             }
@@ -1954,6 +1948,7 @@ pub fn register_sync(
         let response_sink = sink_batch;
 
         // Collect request specs
+        #[allow(clippy::type_complexity)]
         let mut request_specs: Vec<(String, String, Option<String>, Option<HashMap<String, String>>, Option<String>, HashMap<String, String>, Option<Duration>)> = Vec::new();
 
         for item in requests.iter::<Object>() {
