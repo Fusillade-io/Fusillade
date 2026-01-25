@@ -1,7 +1,7 @@
-use rquickjs::{Ctx, Function, Object, Result, JsLifetime, Value, IntoJs, class::Trace};
-use tungstenite::{connect, Message, stream::MaybeTlsStream};
-use std::net::TcpStream;
+use rquickjs::{class::Trace, Ctx, Function, IntoJs, JsLifetime, Object, Result, Value};
 use std::cell::RefCell;
+use std::net::TcpStream;
+use tungstenite::{connect, stream::MaybeTlsStream, Message};
 
 type InnerWebSocket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -35,21 +35,19 @@ impl JsWebSocket {
         let mut borrow = self.inner.borrow_mut();
         if let Some(ws) = borrow.as_mut() {
             match ws.read() {
-                Ok(msg) => {
-                    match msg {
-                        Message::Text(s) => s.to_string().into_js(&ctx),
-                        Message::Binary(b) => String::from_utf8_lossy(&b).to_string().into_js(&ctx),
-                        Message::Close(_) => {
-                            *borrow = None;
-                            Ok(Value::new_null(ctx))
-                        },
-                        _ => Ok(Value::new_undefined(ctx)),
+                Ok(msg) => match msg {
+                    Message::Text(s) => s.to_string().into_js(&ctx),
+                    Message::Binary(b) => String::from_utf8_lossy(&b).to_string().into_js(&ctx),
+                    Message::Close(_) => {
+                        *borrow = None;
+                        Ok(Value::new_null(ctx))
                     }
+                    _ => Ok(Value::new_undefined(ctx)),
                 },
                 Err(e) => {
                     eprintln!("WS Recv Error: {}", e);
                     Err(rquickjs::Error::Exception)
-                },
+                }
             }
         } else {
             Ok(Value::new_null(ctx))
@@ -73,7 +71,7 @@ fn ws_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
             };
             let instance = rquickjs::Class::<JsWebSocket>::instance(ctx.clone(), ws)?;
             Ok(instance.into_value())
-        },
+        }
         Err(e) => {
             let msg = format!("WebSocket connection failed: {}", e);
             let err_val = msg.into_js(&ctx)?;

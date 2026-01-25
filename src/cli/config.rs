@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
@@ -58,7 +58,7 @@ pub struct Config {
     /// Time unit for rate (e.g., "1s", "1m")
     pub time_unit: Option<String>,
     /// Pass/Fail criteria (thresholds)
-    pub criteria: Option<HashMap<String, Vec<String>>>, 
+    pub criteria: Option<HashMap<String, Vec<String>>>,
     /// Minimum time per iteration
     pub min_iteration_duration: Option<String>,
     /// Target URL to warmup connections before starting
@@ -97,8 +97,7 @@ pub struct Config {
     pub memory_safe: Option<bool>,
 }
 
-impl Config {
-}
+impl Config {}
 
 #[cfg(test)]
 mod tests {

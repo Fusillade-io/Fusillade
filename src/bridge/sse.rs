@@ -2,7 +2,7 @@
 //!
 //! Exposes SSE client functionality to JavaScript for load testing SSE endpoints.
 
-use rquickjs::{Ctx, Function, Object, Result, JsLifetime, Value, IntoJs, class::Trace};
+use rquickjs::{class::Trace, Ctx, Function, IntoJs, JsLifetime, Object, Result, Value};
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader};
 
@@ -38,20 +38,23 @@ impl JsSseClient {
                     if let Some(id) = &sse_event.id {
                         stream.last_event_id = Some(id.clone());
                     }
-                    
+
                     let obj = Object::new(ctx.clone())?;
-                    obj.set("event", sse_event.event.unwrap_or_else(|| "message".to_string()))?;
+                    obj.set(
+                        "event",
+                        sse_event.event.unwrap_or_else(|| "message".to_string()),
+                    )?;
                     obj.set("data", sse_event.data)?;
                     if let Some(id) = sse_event.id {
                         obj.set("id", id)?;
                     }
                     Ok(obj.into_value())
-                },
+                }
                 Ok(None) => {
                     // Stream ended
                     *borrow = None;
                     Ok(Value::new_null(ctx))
-                },
+                }
                 Err(e) => {
                     eprintln!("SSE Read Error: {}", e);
                     *borrow = None;
@@ -90,11 +93,11 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
     let mut data_lines: Vec<String> = Vec::new();
     let mut id: Option<String> = None;
     let mut has_content = false;
-    
+
     loop {
         let mut line = String::new();
         let bytes_read = reader.read_line(&mut line)?;
-        
+
         if bytes_read == 0 {
             // EOF
             if has_content {
@@ -106,9 +109,9 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
             }
             return Ok(None);
         }
-        
+
         let line = line.trim_end_matches(['\r', '\n'].as_ref());
-        
+
         if line.is_empty() {
             // Empty line = end of event
             if has_content {
@@ -120,14 +123,14 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
             }
             continue;
         }
-        
+
         // Skip comment lines
         if line.starts_with(':') {
             continue;
         }
-        
+
         has_content = true;
-        
+
         if let Some(value) = line.strip_prefix("event:") {
             event_type = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("data:") {
@@ -142,13 +145,13 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
 /// Connect to an SSE endpoint
 fn sse_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
     let client = reqwest::blocking::Client::new();
-    
+
     let response = client
         .get(&url)
         .header("Accept", "text/event-stream")
         .header("Cache-Control", "no-cache")
         .send();
-    
+
     match response {
         Ok(resp) => {
             if !resp.status().is_success() {
@@ -156,20 +159,20 @@ fn sse_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
                 let err_val = msg.into_js(&ctx)?;
                 return Err(ctx.throw(err_val));
             }
-            
+
             let stream = SseStream {
                 reader: BufReader::new(resp),
                 last_event_id: None,
             };
-            
+
             let client = JsSseClient {
                 inner: RefCell::new(Some(stream)),
                 url: url.clone(),
             };
-            
+
             let instance = rquickjs::Class::<JsSseClient>::instance(ctx.clone(), client)?;
             Ok(instance.into_value())
-        },
+        }
         Err(e) => {
             let msg = format!("SSE connection failed: {}", e);
             let err_val = msg.into_js(&ctx)?;
@@ -197,10 +200,10 @@ mod tests {
         let data = b"event: message\ndata: hello world\nid: 1\n\n";
         let response = MockResponse(data.to_vec());
         let mut reader = BufReader::new(response);
-        
+
         let event = read_sse_event(&mut reader).unwrap();
         assert!(event.is_some());
-        
+
         let event = event.unwrap();
         assert_eq!(event.event, Some("message".to_string()));
         assert_eq!(event.data, "hello world");
@@ -212,10 +215,10 @@ mod tests {
         let data = b"data: just data\n\n";
         let response = MockResponse(data.to_vec());
         let mut reader = BufReader::new(response);
-        
+
         let event = read_sse_event(&mut reader).unwrap();
         assert!(event.is_some());
-        
+
         let event = event.unwrap();
         assert!(event.event.is_none());
         assert_eq!(event.data, "just data");
@@ -226,10 +229,10 @@ mod tests {
         let data = b"data: line1\ndata: line2\ndata: line3\n\n";
         let response = MockResponse(data.to_vec());
         let mut reader = BufReader::new(response);
-        
+
         let event = read_sse_event(&mut reader).unwrap();
         assert!(event.is_some());
-        
+
         let event = event.unwrap();
         assert_eq!(event.data, "line1\nline2\nline3");
     }
@@ -239,10 +242,10 @@ mod tests {
         let data = b": this is a comment\ndata: actual data\n\n";
         let response = MockResponse(data.to_vec());
         let mut reader = BufReader::new(response);
-        
+
         let event = read_sse_event(&mut reader).unwrap();
         assert!(event.is_some());
-        
+
         let event = event.unwrap();
         assert_eq!(event.data, "actual data");
     }
@@ -252,14 +255,14 @@ mod tests {
         let data = b"";
         let response = MockResponse(data.to_vec());
         let mut reader = BufReader::new(response);
-        
+
         let event = read_sse_event(&mut reader).unwrap();
         assert!(event.is_none());
     }
 
     // Mock response for testing
     struct MockResponse(Vec<u8>);
-    
+
     impl std::io::Read for MockResponse {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             let len = std::cmp::min(buf.len(), self.0.len());
@@ -269,4 +272,3 @@ mod tests {
         }
     }
 }
-

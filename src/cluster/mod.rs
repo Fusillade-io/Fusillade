@@ -2,16 +2,19 @@ pub mod proto {
     tonic::include_proto!("cluster");
 }
 
-use proto::cluster_server::Cluster;
-use proto::{WorkerMessage, ControllerCommand, MetricBatch, Empty, controller_command, StartTest, worker_message};
-use tonic::{Request, Response, Status, Streaming};
-use tokio::sync::mpsc;
+use crate::stats::{Metric as InternalMetric, SharedAggregator};
 use futures::Stream;
+use proto::cluster_server::Cluster;
+use proto::{
+    controller_command, worker_message, ControllerCommand, Empty, MetricBatch, StartTest,
+    WorkerMessage,
+};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
-use std::collections::HashMap;
-use crate::stats::{Metric as InternalMetric, SharedAggregator};
+use tokio::sync::mpsc;
 use tokio::time::Duration;
+use tonic::{Request, Response, Status, Streaming};
 
 /// Information about a connected worker
 #[derive(Clone)]
@@ -39,7 +42,10 @@ impl ClusterService {
     }
 
     pub fn new_with_registry(aggregator: SharedAggregator, workers: WorkerRegistry) -> Self {
-        Self { aggregator, workers }
+        Self {
+            aggregator,
+            workers,
+        }
     }
 
     pub fn workers(&self) -> WorkerRegistry {
@@ -124,7 +130,10 @@ impl Cluster for ClusterService {
                         sender: tx.clone(),
                     };
 
-                    println!("Worker registered: {} (CPUs: {})", reg.id, reg.available_cpus);
+                    println!(
+                        "Worker registered: {} (CPUs: {})",
+                        reg.id, reg.available_cpus
+                    );
 
                     // Store worker in registry
                     if let Ok(mut guard) = workers.write() {
@@ -161,7 +170,9 @@ impl Cluster for ClusterService {
 
         // Return immediately with the output stream
         let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(output_stream) as Self::RegisterStream))
+        Ok(Response::new(
+            Box::pin(output_stream) as Self::RegisterStream
+        ))
     }
 
     async fn report_metrics(
@@ -174,7 +185,10 @@ impl Cluster for ClusterService {
                 for metric in batch.metrics {
                     let m = InternalMetric::Request {
                         name: metric.name,
-                        timings: crate::stats::RequestTimings { duration: Duration::from_nanos(metric.duration_ns), ..Default::default() },
+                        timings: crate::stats::RequestTimings {
+                            duration: Duration::from_nanos(metric.duration_ns),
+                            ..Default::default()
+                        },
                         status: metric.status as u16,
                         error: metric.error,
                         tags: std::collections::HashMap::new(),

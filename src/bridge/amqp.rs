@@ -1,5 +1,8 @@
-use rquickjs::{Ctx, Result, class::{Trace, Tracer}, JsLifetime};
-use lapin::{Connection, ConnectionProperties, options::*, BasicProperties};
+use lapin::{options::*, BasicProperties, Connection, ConnectionProperties};
+use rquickjs::{
+    class::{Trace, Tracer},
+    Ctx, JsLifetime, Result,
+};
 use tokio::runtime::Runtime;
 
 #[rquickjs::class]
@@ -32,34 +35,47 @@ impl JsAmqpClient {
 
     pub fn connect(&mut self, url: String) -> Result<()> {
         let rt = self.runtime.clone();
-        let connection = rt.block_on(async {
-            Connection::connect(&url, ConnectionProperties::default()).await
-        }).map_err(|_e| rquickjs::Error::new_from_js("AMQP Connect failed", "NetworkError"))?;
+        let connection = rt
+            .block_on(async { Connection::connect(&url, ConnectionProperties::default()).await })
+            .map_err(|_e| rquickjs::Error::new_from_js("AMQP Connect failed", "NetworkError"))?;
 
-        let channel = rt.block_on(async {
-            connection.create_channel().await
-        }).map_err(|_e| rquickjs::Error::new_from_js("AMQP Channel creation failed", "NetworkError"))?;
+        let channel = rt
+            .block_on(async { connection.create_channel().await })
+            .map_err(|_e| {
+                rquickjs::Error::new_from_js("AMQP Channel creation failed", "NetworkError")
+            })?;
 
         self.connection = Some(connection);
         self.channel = Some(channel);
         Ok(())
     }
 
-    pub fn publish(&mut self, exchange: String, routing_key: String, payload: String) -> Result<()> {
+    pub fn publish(
+        &mut self,
+        exchange: String,
+        routing_key: String,
+        payload: String,
+    ) -> Result<()> {
         if let Some(ref channel) = self.channel {
             let rt = self.runtime.clone();
             rt.block_on(async {
-                channel.basic_publish(
-                    &exchange,
-                    &routing_key,
-                    BasicPublishOptions::default(),
-                    payload.as_bytes(),
-                    BasicProperties::default(),
-                ).await
-            }).map_err(|_| rquickjs::Error::new_from_js("AMQP Publish failed", "NetworkError"))?;
+                channel
+                    .basic_publish(
+                        &exchange,
+                        &routing_key,
+                        BasicPublishOptions::default(),
+                        payload.as_bytes(),
+                        BasicProperties::default(),
+                    )
+                    .await
+            })
+            .map_err(|_| rquickjs::Error::new_from_js("AMQP Publish failed", "NetworkError"))?;
             Ok(())
         } else {
-            Err(rquickjs::Error::new_from_js("AMQP Client not connected", "StateError"))
+            Err(rquickjs::Error::new_from_js(
+                "AMQP Client not connected",
+                "StateError",
+            ))
         }
     }
 

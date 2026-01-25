@@ -1,31 +1,31 @@
+mod amqp;
+mod browser;
+mod check;
+mod crypto;
+pub mod data; // Make public so Engine can see SharedData type
+mod encoding;
+mod file;
+mod group;
+mod grpc;
 mod http;
 mod http_sync;
-mod check;
-mod group;
-mod file;
+pub mod metrics;
+mod mqtt;
+pub mod replay;
+mod sse;
+mod stats;
+mod test;
 mod utils;
 mod ws;
-mod grpc;
-mod stats;
-mod encoding;
-mod crypto;
-mod mqtt;
-mod amqp;
-mod test;
-mod browser;
-mod sse;
-pub mod data; // Make public so Engine can see SharedData type
-pub mod metrics;
-pub mod replay;
 
-use rquickjs::{Ctx, Function, Result};
-use std::time::Duration;
-use std::cell::RefCell;
+use crate::engine::http_client::HttpClient;
+use crate::stats::{Metric, SharedAggregator};
 use crossbeam_channel::Sender;
 use rand::Rng;
-use crate::stats::{Metric, SharedAggregator};
-use crate::engine::http_client::HttpClient;
+use rquickjs::{Ctx, Function, Result};
+use std::cell::RefCell;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 
 // Thread-local sleep tracker for accurate iteration timing
@@ -66,34 +66,62 @@ pub fn register_env(ctx: &Ctx) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: HttpClient, shared_data: data::SharedData, worker_id: usize, aggregator: SharedAggregator, runtime: Arc<Runtime>, jitter: Option<String>, drop: Option<f64>, response_sink: bool) -> Result<()> {
+pub fn register_globals_sync<'js>(
+    ctx: &Ctx<'js>,
+    tx: Sender<Metric>,
+    client: HttpClient,
+    shared_data: data::SharedData,
+    worker_id: usize,
+    aggregator: SharedAggregator,
+    runtime: Arc<Runtime>,
+    jitter: Option<String>,
+    drop: Option<f64>,
+    response_sink: bool,
+) -> Result<()> {
     let globals = ctx.globals();
     let tx_print = tx.clone();
-    globals.set("print", Function::new(ctx.clone(), move |msg: String| {
-        print(tx_print.clone(), msg);
-    }))?;
+    globals.set(
+        "print",
+        Function::new(ctx.clone(), move |msg: String| {
+            print(tx_print.clone(), msg);
+        }),
+    )?;
 
-    globals.set("sleep", Function::new(ctx.clone(), move |secs: f64| {
-        let dur = Duration::from_secs_f64(secs);
-        track_sleep(dur);
-        std::thread::sleep(dur);
-    }))?;
+    globals.set(
+        "sleep",
+        Function::new(ctx.clone(), move |secs: f64| {
+            let dur = Duration::from_secs_f64(secs);
+            track_sleep(dur);
+            std::thread::sleep(dur);
+        }),
+    )?;
 
-    globals.set("sleepRandom", Function::new(ctx.clone(), move |min: f64, max: f64| {
-        let duration = if min >= max {
-            min
-        } else {
-            min + rand::thread_rng().gen::<f64>() * (max - min)
-        };
-        let dur = Duration::from_secs_f64(duration);
-        track_sleep(dur);
-        std::thread::sleep(dur);
-    }))?;
+    globals.set(
+        "sleepRandom",
+        Function::new(ctx.clone(), move |min: f64, max: f64| {
+            let duration = if min >= max {
+                min
+            } else {
+                min + rand::thread_rng().gen::<f64>() * (max - min)
+            };
+            let dur = Duration::from_secs_f64(duration);
+            track_sleep(dur);
+            std::thread::sleep(dur);
+        }),
+    )?;
 
     globals.set("__WORKER_ID", worker_id)?;
 
     // Register internal modules
-    http::register_sync(ctx, tx.clone(), client, runtime, jitter, drop, response_sink)?;
+    http::register_sync(
+        ctx,
+        tx.clone(),
+        client,
+        runtime,
+        jitter,
+        drop,
+        response_sink,
+    )?;
     check::register_sync(ctx, tx.clone())?;
     group::register_sync(ctx)?;
     file::register_sync(ctx)?;
@@ -118,31 +146,47 @@ pub fn register_globals_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, client: Ht
 /// Fast sync registration using ureq - bypasses Tokio for lower latency
 /// Use this for May green thread workers
 #[allow(clippy::too_many_arguments)]
-pub fn register_globals_sync_fast<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>, shared_data: data::SharedData, worker_id: usize, aggregator: SharedAggregator, response_sink: bool) -> Result<()> {
+pub fn register_globals_sync_fast<'js>(
+    ctx: &Ctx<'js>,
+    tx: Sender<Metric>,
+    shared_data: data::SharedData,
+    worker_id: usize,
+    aggregator: SharedAggregator,
+    response_sink: bool,
+) -> Result<()> {
     let globals = ctx.globals();
     let tx_print = tx.clone();
-    globals.set("print", Function::new(ctx.clone(), move |msg: String| {
-        print(tx_print.clone(), msg);
-    }))?;
+    globals.set(
+        "print",
+        Function::new(ctx.clone(), move |msg: String| {
+            print(tx_print.clone(), msg);
+        }),
+    )?;
 
-    globals.set("sleep", Function::new(ctx.clone(), move |secs: f64| {
-        // Use may::coroutine::sleep for green thread compatibility
-        let dur = Duration::from_secs_f64(secs);
-        track_sleep(dur);
-        may::coroutine::sleep(dur);
-    }))?;
+    globals.set(
+        "sleep",
+        Function::new(ctx.clone(), move |secs: f64| {
+            // Use may::coroutine::sleep for green thread compatibility
+            let dur = Duration::from_secs_f64(secs);
+            track_sleep(dur);
+            may::coroutine::sleep(dur);
+        }),
+    )?;
 
-    globals.set("sleepRandom", Function::new(ctx.clone(), move |min: f64, max: f64| {
-        let duration = if min >= max {
-            min
-        } else {
-            min + rand::thread_rng().gen::<f64>() * (max - min)
-        };
-        // Use may::coroutine::sleep for green thread compatibility
-        let dur = Duration::from_secs_f64(duration);
-        track_sleep(dur);
-        may::coroutine::sleep(dur);
-    }))?;
+    globals.set(
+        "sleepRandom",
+        Function::new(ctx.clone(), move |min: f64, max: f64| {
+            let duration = if min >= max {
+                min
+            } else {
+                min + rand::thread_rng().gen::<f64>() * (max - min)
+            };
+            // Use may::coroutine::sleep for green thread compatibility
+            let dur = Duration::from_secs_f64(duration);
+            track_sleep(dur);
+            may::coroutine::sleep(dur);
+        }),
+    )?;
 
     globals.set("__WORKER_ID", worker_id)?;
 

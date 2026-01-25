@@ -1,5 +1,8 @@
-use rquickjs::{Ctx, Object, Result, Value, Function, Class, JsLifetime, IntoJs, class::{Trace, Tracer}};
 use headless_chrome::{Browser, LaunchOptions, Tab};
+use rquickjs::{
+    class::{Trace, Tracer},
+    Class, Ctx, Function, IntoJs, JsLifetime, Object, Result, Value,
+};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -31,7 +34,7 @@ impl JsBrowser {
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
             rquickjs::Error::Exception
         })?;
-        
+
         if let Some(cp) = ctx.userdata::<CurrentPage>() {
             let mut guard = cp.0.lock().unwrap();
             *guard = Some(tab.clone());
@@ -93,7 +96,7 @@ impl<'js> JsPage {
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
             rquickjs::Error::Exception
         })?;
-        
+
         el.click().map_err(|e| {
             let msg = format!("Click failed: {}", e);
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
@@ -109,7 +112,7 @@ impl<'js> JsPage {
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
             rquickjs::Error::Exception
         })?;
-        
+
         el.type_into(&text).map_err(|e| {
             let msg = format!("Type failed: {}", e);
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
@@ -124,7 +127,7 @@ impl<'js> JsPage {
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
             rquickjs::Error::Exception
         })?;
-        
+
         let json_str = serde_json::to_string(&result.value).unwrap_or("null".to_string());
         let json_obj: Object = ctx.globals().get("JSON")?;
         let parse: Function = json_obj.get("parse")?;
@@ -147,7 +150,8 @@ impl<'js> JsPage {
 
     pub fn screenshot(&self, ctx: Ctx<'_>) -> Result<Vec<u8>> {
         use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption;
-        self.inner.capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, true)
+        self.inner
+            .capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, true)
             .map_err(|e| {
                 let msg = format!("Screenshot failed: {}", e);
                 let _ = ctx.throw(msg.into_js(&ctx).unwrap());
@@ -163,8 +167,10 @@ fn launch_browser<'js>(ctx: Ctx<'js>) -> Result<Class<'js, JsBrowser>> {
         let _ = ctx.throw(msg.into_js(&ctx).unwrap());
         rquickjs::Error::Exception
     })?;
-    
-    let js_browser = JsBrowser { inner: Arc::new(browser) };
+
+    let js_browser = JsBrowser {
+        inner: Arc::new(browser),
+    };
     Class::<JsBrowser>::instance(ctx, js_browser)
 }
 

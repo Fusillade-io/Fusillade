@@ -1,4 +1,7 @@
-use rquickjs::{Ctx, Function, Result, Value, Object, class::{Trace, Tracer}, JsLifetime, Class, IntoJs};
+use rquickjs::{
+    class::{Trace, Tracer},
+    Class, Ctx, Function, IntoJs, JsLifetime, Object, Result, Value,
+};
 
 #[rquickjs::class]
 #[derive(Clone)]
@@ -23,9 +26,9 @@ impl<'js> JsExpectation<'js> {
         if self.actual == expected {
             Ok(())
         } else {
-             let msg = "AssertionError: Expected values to be strictly equal";
-             let err = msg.into_js(&ctx)?;
-             Err(ctx.throw(err))
+            let msg = "AssertionError: Expected values to be strictly equal";
+            let err = msg.into_js(&ctx)?;
+            Err(ctx.throw(err))
         }
     }
 
@@ -35,24 +38,24 @@ impl<'js> JsExpectation<'js> {
         let stringify: Function = json.get("stringify")?;
         let s1: String = stringify.call((self.actual.clone(),))?;
         let s2: String = stringify.call((expected,))?;
-        
+
         if s1 == s2 {
             Ok(())
         } else {
-             let msg = format!("AssertionError: Expected {} to equal {}", s1, s2);
-             let err = msg.into_js(&ctx)?;
-             Err(ctx.throw(err))
+            let msg = format!("AssertionError: Expected {} to equal {}", s1, s2);
+            let err = msg.into_js(&ctx)?;
+            Err(ctx.throw(err))
         }
     }
 
     #[qjs(rename = "toBeTruthy")]
     pub fn to_be_truthy(&self, ctx: Ctx<'js>) -> Result<()> {
         if self.actual.as_bool().unwrap_or(false) {
-             Ok(())
+            Ok(())
         } else {
-             let msg = "AssertionError: Expected value to be truthy";
-             let err = msg.into_js(&ctx)?;
-             Err(ctx.throw(err))
+            let msg = "AssertionError: Expected value to be truthy";
+            let err = msg.into_js(&ctx)?;
+            Err(ctx.throw(err))
         }
     }
 }
@@ -66,25 +69,37 @@ pub fn register_sync(ctx: &Ctx) -> Result<()> {
 
     rquickjs::Class::<JsExpectation>::define(&globals)?;
 
-    globals.set("describe", Function::new(ctx.clone(), move |name: String, func: Function| -> Result<()> {
-        println!("describe: {}", name);
-        func.call::<_, ()>(())?;
-        Ok(())
-    }))?;
-
-    globals.set("test", Function::new(ctx.clone(), move |name: String, func: Function| -> Result<()> {
-        match func.call::<_, ()>(()) {
-            Ok(_) => {
-                println!("  ✓ {}", name);
+    globals.set(
+        "describe",
+        Function::new(
+            ctx.clone(),
+            move |name: String, func: Function| -> Result<()> {
+                println!("describe: {}", name);
+                func.call::<_, ()>(())?;
                 Ok(())
             },
-            Err(e) => {
-                println!("  ✗ {}", name);
-                println!("    Error: {}", e);
-                Ok(())
-            }
-        }
-    }))?;
+        ),
+    )?;
+
+    globals.set(
+        "test",
+        Function::new(
+            ctx.clone(),
+            move |name: String, func: Function| -> Result<()> {
+                match func.call::<_, ()>(()) {
+                    Ok(_) => {
+                        println!("  ✓ {}", name);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        println!("  ✗ {}", name);
+                        println!("    Error: {}", e);
+                        Ok(())
+                    }
+                }
+            },
+        ),
+    )?;
 
     globals.set("expect", Function::new(ctx.clone(), expect_impl))?;
 

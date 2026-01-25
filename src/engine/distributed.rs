@@ -1,18 +1,21 @@
+use crate::cli::config::Config;
+use crate::cluster::proto::cluster_client::ClusterClient;
+use crate::cluster::proto::{
+    controller_command, worker_message, RegisterRequest, TestFinished, WorkerMessage,
+};
+use crate::engine::Engine;
+use crate::stats::db::HistoryDb;
+use crate::stats::{Metric, ReportStats, SharedAggregator};
 use anyhow::Result;
 use axum::{
-    routing::{post, get},
-    Json, Router, extract::State,
+    extract::State,
     response::Html,
+    routing::{get, post},
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use crate::engine::Engine;
-use crate::cli::config::Config;
-use crate::stats::{Metric, SharedAggregator, ReportStats};
 use std::path::PathBuf;
-use crate::cluster::proto::cluster_client::ClusterClient;
-use crate::cluster::proto::{WorkerMessage, RegisterRequest, worker_message, controller_command, TestFinished};
-use crate::stats::db::HistoryDb;
+use std::sync::Arc;
 use tower_http::services::ServeDir;
 
 #[derive(Deserialize, Serialize)]
@@ -81,7 +84,9 @@ impl WorkerServer {
             msg: Some(worker_message::Msg::Register(RegisterRequest {
                 id: worker_id.clone(),
                 address: "unknown".to_string(),
-                available_cpus: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as u32,
+                available_cpus: std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1) as u32,
             })),
         };
         tx.send(reg).await?;
@@ -98,8 +103,8 @@ impl WorkerServer {
                     println!("Received StartTest command");
 
                     // Parse config from JSON
-                    let config: Config = serde_json::from_str(&start_test.config_json)
-                        .unwrap_or_default();
+                    let config: Config =
+                        serde_json::from_str(&start_test.config_json).unwrap_or_default();
 
                     // Save assets to local disk before running
                     for (path, content) in &start_test.assets {
@@ -123,18 +128,20 @@ impl WorkerServer {
                             script_path,
                             script_content,
                             config,
-                            true,  // json output
-                            None,  // export_json
-                            None,  // export_html
-                            None,  // metrics_url (TODO: stream to controller)
-                            None,  // metrics_auth
-                            None,  // control_rx
+                            true, // json output
+                            None, // export_json
+                            None, // export_html
+                            None, // metrics_url (TODO: stream to controller)
+                            None, // metrics_auth
+                            None, // control_rx
                         );
 
                         match result {
                             Ok(report) => {
-                                println!("Test completed: {} requests, avg {}ms",
-                                    report.total_requests, report.avg_latency_ms);
+                                println!(
+                                    "Test completed: {} requests, avg {}ms",
+                                    report.total_requests, report.avg_latency_ms
+                                );
                             }
                             Err(e) => {
                                 eprintln!("Test failed: {}", e);
@@ -165,7 +172,9 @@ impl WorkerServer {
 }
 
 async fn handle_status() -> Json<WorkerStatus> {
-    Json(WorkerStatus { status: "ready".to_string() })
+    Json(WorkerStatus {
+        status: "ready".to_string(),
+    })
 }
 
 async fn handle_start(
@@ -191,15 +200,27 @@ async fn handle_start(
     // Spawn the test in a background task
     tokio::spawn(async move {
         // Run load test. If metrics_url is present, we need to stream metrics there.
-        let _ = engine.run_load_test(script_path, script_content, config, true, None, None, metrics_url, None, None);
+        let _ = engine.run_load_test(
+            script_path,
+            script_content,
+            config,
+            true,
+            None,
+            None,
+            metrics_url,
+            None,
+            None,
+        );
     });
 
-    Json(WorkerStatus { status: "started".to_string() })
+    Json(WorkerStatus {
+        status: "started".to_string(),
+    })
 }
 
 // --- Controller Side Logic ---
 
-use crate::cluster::{WorkerRegistry, dispatch_test_to_workers};
+use crate::cluster::{dispatch_test_to_workers, WorkerRegistry};
 
 /// Shared state for the controller HTTP API
 #[derive(Clone)]
@@ -219,7 +240,8 @@ impl ControllerServer {
 
     pub async fn run(self, addr: String) -> Result<()> {
         // Create shared worker registry
-        let workers: WorkerRegistry = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let workers: WorkerRegistry =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
 
         // Start gRPC server on port + 1
         let grpc_addr = addr.parse::<std::net::SocketAddr>()?;
@@ -276,10 +298,7 @@ async fn handle_dashboard() -> Html<String> {
     Html(include_str!("../../src/tui/dashboard.html").to_string())
 }
 
-async fn handle_metrics(
-    State(state): State<ControllerState>,
-    Json(batch): Json<MetricBatch>,
-) {
+async fn handle_metrics(State(state): State<ControllerState>, Json(batch): Json<MetricBatch>) {
     if let Ok(mut guard) = state.aggregator.write() {
         for metric in batch.metrics {
             guard.add(metric);
@@ -287,9 +306,7 @@ async fn handle_metrics(
     }
 }
 
-async fn handle_api_stats(
-    State(state): State<ControllerState>,
-) -> Json<ReportStats> {
+async fn handle_api_stats(State(state): State<ControllerState>) -> Json<ReportStats> {
     let guard = state.aggregator.read().unwrap();
     Json(guard.to_report())
 }
@@ -329,9 +346,7 @@ pub struct WorkerInfoResponse {
     pub available_cpus: u32,
 }
 
-async fn handle_api_workers(
-    State(state): State<ControllerState>,
-) -> Json<WorkerListResponse> {
+async fn handle_api_workers(State(state): State<ControllerState>) -> Json<WorkerListResponse> {
     let workers = match state.workers.read() {
         Ok(guard) => guard
             .values()
@@ -383,7 +398,9 @@ async fn handle_api_dispatch(
         payload.script_content,
         config_json,
         payload.assets,
-    ).await {
+    )
+    .await
+    {
         Ok(count) => Json(DispatchTestResponse {
             success: true,
             workers_dispatched: count,
@@ -414,14 +431,19 @@ mod tests {
 
         let json = serde_json::to_string(&req).unwrap();
         let deserialized: StartTestRequest = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.script_name, "test.js");
-        assert_eq!(deserialized.controller_metrics_url, Some("http://localhost:9000".to_string()));
+        assert_eq!(
+            deserialized.controller_metrics_url,
+            Some("http://localhost:9000".to_string())
+        );
     }
 
     #[test]
     fn test_worker_status_serialization() {
-        let status = WorkerStatus { status: "ready".to_string() };
+        let status = WorkerStatus {
+            status: "ready".to_string(),
+        };
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#"{"status":"ready"}"#);
     }

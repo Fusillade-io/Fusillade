@@ -7,10 +7,10 @@ use axum::{
     routing::any,
     Router,
 };
-use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
-use tokio::net::TcpListener;
 use reqwest::Client;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tokio::net::TcpListener;
 
 struct RecordedRequest {
     method: String,
@@ -42,7 +42,7 @@ pub async fn run_recorder(output: PathBuf, port: u16) -> Result<()> {
     println!("Press Ctrl+C to stop and save the flow.");
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    
+
     let server_task = axum::serve(listener, app);
 
     tokio::select! {
@@ -58,22 +58,21 @@ pub async fn run_recorder(output: PathBuf, port: u16) -> Result<()> {
     Ok(())
 }
 
-async fn handle_proxy(
-    State(state): State<RecorderState>,
-    req: Request,
-) -> Response {
+async fn handle_proxy(State(state): State<RecorderState>, req: Request) -> Response {
     let method = req.method().clone();
     let url_str = req.uri().to_string();
-    
+
     let mut captured_body = None;
     let (parts, body) = req.into_parts();
-    
+
     let mut headers = std::collections::HashMap::new();
     for (name, value) in &parts.headers {
         headers.insert(name.to_string(), value.to_str().unwrap_or("").to_string());
     }
 
-    let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024).await.unwrap_or_default();
+    let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
     if !body_bytes.is_empty() {
         captured_body = Some(String::from_utf8_lossy(&body_bytes).to_string());
     }
@@ -93,7 +92,9 @@ async fn handle_proxy(
     } else {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
-            .body(Body::from("Recorder requires absolute URLs (configure as Forward Proxy)"))
+            .body(Body::from(
+                "Recorder requires absolute URLs (configure as Forward Proxy)",
+            ))
             .unwrap();
     };
 
@@ -117,12 +118,10 @@ async fn handle_proxy(
             let bytes = resp.bytes().await.unwrap_or_default();
             res_builder.body(Body::from(bytes)).unwrap()
         }
-        Err(e) => {
-            Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from(format!("Proxy Error: {}", e)))
-                .unwrap()
-        }
+        Err(e) => Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(Body::from(format!("Proxy Error: {}", e)))
+            .unwrap(),
     }
 }
 
@@ -141,7 +140,10 @@ fn save_flow(output: &PathBuf, requests: &[RecordedRequest]) -> Result<()> {
         js.push_str(&format!("        method: '{}',\n", req.method));
         js.push_str(&format!("        url: '{}',\n", req.url));
         if let Some(body) = &req.body {
-            js.push_str(&format!("        body: {},\n", serde_json::to_string(body).unwrap()));
+            js.push_str(&format!(
+                "        body: {},\n",
+                serde_json::to_string(body).unwrap()
+            ));
         }
         if !req.headers.is_empty() {
             js.push_str("        headers: {\n");

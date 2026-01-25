@@ -1,5 +1,5 @@
-use std::path::Path;
 use anyhow::Result;
+use std::path::Path;
 
 use crate::engine::Engine;
 
@@ -10,20 +10,20 @@ use crate::engine::Engine;
 /// - Import resolution
 pub fn run_validate(scenario: &Path, config_path: Option<&Path>) -> Result<()> {
     println!("Validating {}...", scenario.display());
-    
+
     // Read script content
     let script_content = std::fs::read_to_string(scenario)
         .map_err(|e| anyhow::anyhow!("Failed to read script: {}", e))?;
-    
+
     // Create engine to validate
     let engine = Engine::new()?;
-    
+
     // Extract and validate config
     match engine.extract_config(scenario.to_path_buf(), script_content.clone()) {
         Ok(Some(config)) => {
             println!("  ✓ Script syntax OK");
             println!("  ✓ Configuration parsed");
-            
+
             // Report key config values
             if let Some(w) = config.workers {
                 println!("    workers: {}", w);
@@ -47,12 +47,12 @@ pub fn run_validate(scenario: &Path, config_path: Option<&Path>) -> Result<()> {
             return Err(e);
         }
     }
-    
+
     // Validate external config if provided
     if let Some(cfg_path) = config_path {
         let cfg_content = std::fs::read_to_string(cfg_path)
             .map_err(|e| anyhow::anyhow!("Failed to read config file: {}", e))?;
-        
+
         // Try YAML first, then JSON
         let ext = cfg_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let result: Result<crate::cli::config::Config, _> = if ext == "json" {
@@ -60,7 +60,7 @@ pub fn run_validate(scenario: &Path, config_path: Option<&Path>) -> Result<()> {
         } else {
             serde_yaml::from_str(&cfg_content).map_err(|e| e.to_string())
         };
-        
+
         match result {
             Ok(_) => println!("  ✓ Config file valid: {}", cfg_path.display()),
             Err(e) => {
@@ -69,15 +69,15 @@ pub fn run_validate(scenario: &Path, config_path: Option<&Path>) -> Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     const VALID_SCRIPT: &str = r#"
 export const options = {
@@ -101,7 +101,7 @@ export default function() {
         let temp_dir = TempDir::new().unwrap();
         let script_path = temp_dir.path().join("valid.js");
         fs::write(&script_path, VALID_SCRIPT).unwrap();
-        
+
         let result = run_validate(&script_path, None);
         assert!(result.is_ok());
     }
@@ -111,7 +111,7 @@ export default function() {
         let temp_dir = TempDir::new().unwrap();
         let script_path = temp_dir.path().join("no_options.js");
         fs::write(&script_path, SCRIPT_NO_OPTIONS).unwrap();
-        
+
         // Should still pass - options are optional
         let result = run_validate(&script_path, None);
         assert!(result.is_ok());
@@ -129,10 +129,10 @@ export default function() {
         let temp_dir = TempDir::new().unwrap();
         let script_path = temp_dir.path().join("test.js");
         let config_path = temp_dir.path().join("config.yaml");
-        
+
         fs::write(&script_path, VALID_SCRIPT).unwrap();
         fs::write(&config_path, "workers: 10\nduration: 30s\n").unwrap();
-        
+
         let result = run_validate(&script_path, Some(&config_path));
         assert!(result.is_ok());
     }
@@ -142,10 +142,10 @@ export default function() {
         let temp_dir = TempDir::new().unwrap();
         let script_path = temp_dir.path().join("test.js");
         let config_path = temp_dir.path().join("config.yaml");
-        
+
         fs::write(&script_path, VALID_SCRIPT).unwrap();
         fs::write(&config_path, "invalid: [yaml: content").unwrap();
-        
+
         let result = run_validate(&script_path, Some(&config_path));
         assert!(result.is_err());
     }

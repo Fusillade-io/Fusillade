@@ -1,7 +1,7 @@
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use arc_swap::ArcSwap;
 
 /// Commands that can be sent to control a running load test
 #[derive(Debug, Clone)]
@@ -97,15 +97,17 @@ impl Default for ControlState {
 pub fn parse_control_command(input: &str) -> Option<ControlCommand> {
     let input = input.trim();
     let parts: Vec<&str> = input.split_whitespace().collect();
-    
+
     if parts.is_empty() {
         return None;
     }
 
     match parts[0].to_lowercase().as_str() {
-        "ramp" | "scale" => {
-            parts.get(1)?.parse::<usize>().ok().map(ControlCommand::Ramp)
-        }
+        "ramp" | "scale" => parts
+            .get(1)?
+            .parse::<usize>()
+            .ok()
+            .map(ControlCommand::Ramp),
         "pause" => Some(ControlCommand::Pause),
         "resume" | "unpause" => Some(ControlCommand::Resume),
         "tag" => {
@@ -125,15 +127,30 @@ mod tests {
 
     #[test]
     fn test_parse_ramp() {
-        assert!(matches!(parse_control_command("ramp 50"), Some(ControlCommand::Ramp(50))));
-        assert!(matches!(parse_control_command("scale 100"), Some(ControlCommand::Ramp(100))));
+        assert!(matches!(
+            parse_control_command("ramp 50"),
+            Some(ControlCommand::Ramp(50))
+        ));
+        assert!(matches!(
+            parse_control_command("scale 100"),
+            Some(ControlCommand::Ramp(100))
+        ));
     }
 
     #[test]
     fn test_parse_pause_resume() {
-        assert!(matches!(parse_control_command("pause"), Some(ControlCommand::Pause)));
-        assert!(matches!(parse_control_command("resume"), Some(ControlCommand::Resume)));
-        assert!(matches!(parse_control_command("unpause"), Some(ControlCommand::Resume)));
+        assert!(matches!(
+            parse_control_command("pause"),
+            Some(ControlCommand::Pause)
+        ));
+        assert!(matches!(
+            parse_control_command("resume"),
+            Some(ControlCommand::Resume)
+        ));
+        assert!(matches!(
+            parse_control_command("unpause"),
+            Some(ControlCommand::Resume)
+        ));
     }
 
     #[test]
@@ -149,25 +166,34 @@ mod tests {
 
     #[test]
     fn test_parse_stop() {
-        assert!(matches!(parse_control_command("stop"), Some(ControlCommand::Stop)));
-        assert!(matches!(parse_control_command("quit"), Some(ControlCommand::Stop)));
-        assert!(matches!(parse_control_command("exit"), Some(ControlCommand::Stop)));
+        assert!(matches!(
+            parse_control_command("stop"),
+            Some(ControlCommand::Stop)
+        ));
+        assert!(matches!(
+            parse_control_command("quit"),
+            Some(ControlCommand::Stop)
+        ));
+        assert!(matches!(
+            parse_control_command("exit"),
+            Some(ControlCommand::Stop)
+        ));
     }
 
     #[test]
     fn test_control_state() {
         let state = ControlState::new(10);
-        
+
         assert!(!state.is_paused());
         state.pause();
         assert!(state.is_paused());
         state.resume();
         assert!(!state.is_paused());
-        
+
         assert_eq!(state.get_target_workers(), 10);
         state.set_target_workers(50);
         assert_eq!(state.get_target_workers(), 50);
-        
+
         state.add_tag("env".to_string(), "prod".to_string());
         let tags = state.get_tags();
         assert_eq!(tags.get("env"), Some(&"prod".to_string()));

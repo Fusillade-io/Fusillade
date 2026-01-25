@@ -5,19 +5,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-
-
+use fusillade::engine::distributed::{ControllerServer, WorkerServer};
 use fusillade::engine::Engine;
-use fusillade::engine::distributed::{WorkerServer, ControllerServer};
 use std::time::Duration;
 
 fn parse_duration_str(s: &str) -> Option<Duration> {
     if s.ends_with("ms") {
-        s.trim_end_matches("ms").parse::<u64>().ok().map(Duration::from_millis)
+        s.trim_end_matches("ms")
+            .parse::<u64>()
+            .ok()
+            .map(Duration::from_millis)
     } else if s.ends_with('s') {
-        s.trim_end_matches('s').parse::<u64>().ok().map(Duration::from_secs)
+        s.trim_end_matches('s')
+            .parse::<u64>()
+            .ok()
+            .map(Duration::from_secs)
     } else if s.ends_with('m') {
-        s.trim_end_matches('m').parse::<u64>().ok().map(|m| Duration::from_secs(m * 60))
+        s.trim_end_matches('m')
+            .parse::<u64>()
+            .ok()
+            .map(|m| Duration::from_secs(m * 60))
     } else {
         s.parse::<u64>().ok().map(Duration::from_millis)
     }
@@ -40,52 +47,60 @@ fn run_cloud_test(
             return Ok(());
         }
     };
-    
+
     // Read script content
     let script_content = std::fs::read_to_string(&scenario)
         .map_err(|e| anyhow::anyhow!("Failed to read script: {}", e))?;
-    
-    let script_name = scenario.file_name()
+
+    let script_name = scenario
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("script.js")
         .to_string();
-    
+
     println!("Uploading test to Fusillade Cloud...");
     println!("  Script: {}", script_name);
     println!("  Workers: {}", workers.unwrap_or(10));
     println!("  Duration: {}", duration.as_deref().unwrap_or("60s"));
     println!("  Region: {}", region);
-    
+
     // Build request
     let api_url = fusillade::cli::cloud::get_api_url();
     let client = reqwest::blocking::Client::new();
-    
+
     let form = reqwest::blocking::multipart::Form::new()
         .text("name", script_name.clone())
         .text("vus", workers.unwrap_or(10).to_string())
-        .text("duration", parse_duration_str(duration.as_deref().unwrap_or("60s"))
-            .map(|d| d.as_secs().to_string())
-            .unwrap_or_else(|| "60".to_string()))
+        .text(
+            "duration",
+            parse_duration_str(duration.as_deref().unwrap_or("60s"))
+                .map(|d| d.as_secs().to_string())
+                .unwrap_or_else(|| "60".to_string()),
+        )
         .text("region", region)
         .text("script", script_content);
-    
+
     let response = client
         .post(format!("{}/api/v1/tests", api_url))
         .header("Authorization", format!("Bearer {}", auth.token))
         .multipart(form)
         .send();
-    
+
     match response {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp.json().unwrap_or_default();
-            let test_id = body.get("test_id")
+            let test_id = body
+                .get("test_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            
+
             println!("\n✓ Test submitted successfully!");
             println!("  Test ID: {}", test_id);
             println!("  Status: pending");
-            println!("\nView results at: https://fusillade.io/dashboard/runs/{}", test_id);
+            println!(
+                "\nView results at: https://fusillade.io/dashboard/runs/{}",
+                test_id
+            );
         }
         Ok(resp) => {
             let status = resp.status();
@@ -99,7 +114,7 @@ fn run_cloud_test(
             eprintln!("\nIs the control plane running? Check https://status.fusillade.io");
         }
     }
-    
+
     Ok(())
 }
 
@@ -263,19 +278,39 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { scenario, workers, duration, headless, json, export_json, export_html, out, metrics_url, metrics_auth, jitter, drop, estimate_cost, interactive, cloud, region, no_endpoint_tracking, watch, no_memory_check, memory_safe } => {
+        Commands::Run {
+            scenario,
+            workers,
+            duration,
+            headless,
+            json,
+            export_json,
+            export_html,
+            out,
+            metrics_url,
+            metrics_auth,
+            jitter,
+            drop,
+            estimate_cost,
+            interactive,
+            cloud,
+            region,
+            no_endpoint_tracking,
+            watch,
+            no_memory_check,
+            memory_safe,
+        } => {
             // Load .env file if present (check script directory, then current directory)
             let script_dir = scenario.parent().unwrap_or(std::path::Path::new("."));
-            let env_paths = [
-                script_dir.join(".env"),
-                PathBuf::from(".env"),
-            ];
+            let env_paths = [script_dir.join(".env"), PathBuf::from(".env")];
             for env_path in &env_paths {
                 if env_path.exists() {
                     if let Ok(contents) = std::fs::read_to_string(env_path) {
                         for line in contents.lines() {
                             let line = line.trim();
-                            if line.is_empty() || line.starts_with('#') { continue; }
+                            if line.is_empty() || line.starts_with('#') {
+                                continue;
+                            }
                             if let Some((key, value)) = line.split_once('=') {
                                 let key = key.trim();
                                 let value = value.trim().trim_matches('"').trim_matches('\'');
@@ -299,30 +334,46 @@ fn main() -> Result<()> {
                 println!("Watch mode: monitoring {} for changes", scenario.display());
                 println!("Press Ctrl+C to stop\n");
 
-                let mut last_modified = std::fs::metadata(&scenario)
-                    .and_then(|m| m.modified())
-                    .ok();
+                let mut last_modified =
+                    std::fs::metadata(&scenario).and_then(|m| m.modified()).ok();
 
                 loop {
                     // Run test with reduced settings for dev workflow
                     let engine = Engine::new()?;
                     let script_content = std::fs::read_to_string(&scenario).unwrap();
-                    let mut watch_config = engine.extract_config(scenario.clone(), script_content.clone()).unwrap().unwrap_or_default();
+                    let mut watch_config = engine
+                        .extract_config(scenario.clone(), script_content.clone())
+                        .unwrap()
+                        .unwrap_or_default();
 
                     // Use provided values or defaults for watch mode
-                    if let Some(w) = workers { watch_config.workers = Some(w); }
-                    else if watch_config.workers.is_none() { watch_config.workers = Some(1); }
+                    if let Some(w) = workers {
+                        watch_config.workers = Some(w);
+                    } else if watch_config.workers.is_none() {
+                        watch_config.workers = Some(1);
+                    }
 
-                    if let Some(d) = duration.clone() { watch_config.duration = Some(d); }
-                    else if watch_config.duration.is_none() { watch_config.duration = Some("5s".to_string()); }
+                    if let Some(d) = duration.clone() {
+                        watch_config.duration = Some(d);
+                    } else if watch_config.duration.is_none() {
+                        watch_config.duration = Some("5s".to_string());
+                    }
 
-                    if let Some(j) = jitter.clone() { watch_config.jitter = Some(j); }
-                    if let Some(p) = drop { watch_config.drop = Some(p); }
-                    if no_endpoint_tracking { watch_config.no_endpoint_tracking = Some(true); }
+                    if let Some(j) = jitter.clone() {
+                        watch_config.jitter = Some(j);
+                    }
+                    if let Some(p) = drop {
+                        watch_config.drop = Some(p);
+                    }
+                    if no_endpoint_tracking {
+                        watch_config.no_endpoint_tracking = Some(true);
+                    }
 
-                    println!("--- Running test (workers: {}, duration: {}) ---",
+                    println!(
+                        "--- Running test (workers: {}, duration: {}) ---",
                         watch_config.workers.unwrap_or(1),
-                        watch_config.duration.as_deref().unwrap_or("5s"));
+                        watch_config.duration.as_deref().unwrap_or("5s")
+                    );
 
                     let engine_arc = Arc::new(engine);
                     let _ = engine_arc.run_load_test(
@@ -330,7 +381,11 @@ fn main() -> Result<()> {
                         script_content,
                         watch_config,
                         true, // Always headless in watch mode
-                        None, None, None, None, None
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
                     );
 
                     println!("\n--- Waiting for changes to {} ---\n", scenario.display());
@@ -338,9 +393,8 @@ fn main() -> Result<()> {
                     // Poll for file changes
                     loop {
                         std::thread::sleep(Duration::from_millis(500));
-                        let current_modified = std::fs::metadata(&scenario)
-                            .and_then(|m| m.modified())
-                            .ok();
+                        let current_modified =
+                            std::fs::metadata(&scenario).and_then(|m| m.modified()).ok();
 
                         if current_modified != last_modified {
                             last_modified = current_modified;
@@ -354,28 +408,55 @@ fn main() -> Result<()> {
             // Local mode: Run test locally
             let engine = Engine::new()?;
             let script_content = std::fs::read_to_string(&scenario).unwrap();
-            let mut final_config = engine.extract_config(scenario.clone(), script_content.clone()).unwrap().unwrap_or_default();
+            let mut final_config = engine
+                .extract_config(scenario.clone(), script_content.clone())
+                .unwrap()
+                .unwrap_or_default();
 
-            if let Some(w) = workers { final_config.workers = Some(w); }
-            if let Some(d) = duration { final_config.duration = Some(d); }
-            if let Some(j) = jitter { final_config.jitter = Some(j); }
-            if let Some(p) = drop { final_config.drop = Some(p); }
-            if no_endpoint_tracking { final_config.no_endpoint_tracking = Some(true); }
-            if memory_safe { final_config.memory_safe = Some(true); }
+            if let Some(w) = workers {
+                final_config.workers = Some(w);
+            }
+            if let Some(d) = duration {
+                final_config.duration = Some(d);
+            }
+            if let Some(j) = jitter {
+                final_config.jitter = Some(j);
+            }
+            if let Some(p) = drop {
+                final_config.drop = Some(p);
+            }
+            if no_endpoint_tracking {
+                final_config.no_endpoint_tracking = Some(true);
+            }
+            if memory_safe {
+                final_config.memory_safe = Some(true);
+            }
 
             // Pre-flight memory check (unless disabled)
             if !no_memory_check {
                 let requested_workers = final_config.workers.unwrap_or(1);
                 let preflight = fusillade::engine::memory::preflight_check(requested_workers);
-                
+
                 if !preflight.safe {
                     eprintln!("╭────────────────────────────────────────────────────────────╮");
                     eprintln!("│ MEMORY WARNING                                              │");
                     eprintln!("├────────────────────────────────────────────────────────────┤");
-                    eprintln!("│ Requested workers: {:>8}                                │", preflight.requested);
-                    eprintln!("│ Estimated max:     {:>8} (based on available RAM)       │", preflight.estimated_max);
-                    eprintln!("│ Available RAM:     {:>8}                                │", fusillade::engine::memory::format_bytes(preflight.available_bytes));
-                    eprintln!("│ Estimated needed:  {:>8}                                │", fusillade::engine::memory::format_bytes(preflight.estimated_needed));
+                    eprintln!(
+                        "│ Requested workers: {:>8}                                │",
+                        preflight.requested
+                    );
+                    eprintln!(
+                        "│ Estimated max:     {:>8} (based on available RAM)       │",
+                        preflight.estimated_max
+                    );
+                    eprintln!(
+                        "│ Available RAM:     {:>8}                                │",
+                        fusillade::engine::memory::format_bytes(preflight.available_bytes)
+                    );
+                    eprintln!(
+                        "│ Estimated needed:  {:>8}                                │",
+                        fusillade::engine::memory::format_bytes(preflight.estimated_needed)
+                    );
                     eprintln!("├────────────────────────────────────────────────────────────┤");
                     eprintln!("│ The test may run out of memory and crash.                  │");
                     eprintln!("│ Use --no-memory-check to suppress this warning.            │");
@@ -389,7 +470,9 @@ fn main() -> Result<()> {
 
             // Headless mode: either --headless or --json enables non-TUI mode
             let headless_mode = headless || json;
-            if !headless_mode { println!("Running scenario..."); }
+            if !headless_mode {
+                println!("Running scenario...");
+            }
             let engine_arc = Arc::new(engine);
 
             // Cost estimation if requested
@@ -402,33 +485,56 @@ fn main() -> Result<()> {
                     iterations: Some(5),
                     ..final_config.clone()
                 };
-                let dry_report = engine_arc.clone().run_load_test(scenario.clone(), script_content.clone(), dry_config, true, None, None, None, None, None)?;
-                
+                let dry_report = engine_arc.clone().run_load_test(
+                    scenario.clone(),
+                    script_content.clone(),
+                    dry_config,
+                    true,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+
                 // Calculate estimates
                 let requests = dry_report.total_requests.max(1) as f64;
-                let avg_response_bytes: f64 = dry_report.grouped_requests.values()
+                let avg_response_bytes: f64 = dry_report
+                    .grouped_requests
+                    .values()
                     .map(|r| r.avg_receiving_ms * 1024.0) // Approximate: use receive time as proxy when size unavailable
-                    .sum::<f64>() / requests;
-                
+                    .sum::<f64>()
+                    / requests;
+
                 // Estimate based on requested config
                 let target_workers = final_config.workers.unwrap_or(1) as f64;
-                let target_duration_secs = parse_duration_str(final_config.duration.as_deref().unwrap_or("60s")).map(|d| d.as_secs_f64()).unwrap_or(60.0);
+                let target_duration_secs =
+                    parse_duration_str(final_config.duration.as_deref().unwrap_or("60s"))
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(60.0);
                 let avg_req_duration_secs = dry_report.avg_latency_ms / 1000.0;
                 let est_total_requests = if avg_req_duration_secs > 0.0 {
                     (target_workers * target_duration_secs / avg_req_duration_secs) as u64
                 } else {
                     (target_workers * target_duration_secs * 10.0) as u64 // Fallback: 10 req/s per worker
                 };
-                
+
                 // Assume ~10KB average response if we can't measure (conservative estimate)
-                let est_bytes_per_req = if avg_response_bytes > 0.0 { avg_response_bytes } else { 10_000.0 };
+                let est_bytes_per_req = if avg_response_bytes > 0.0 {
+                    avg_response_bytes
+                } else {
+                    10_000.0
+                };
                 let est_total_bytes = est_total_requests as f64 * est_bytes_per_req * 2.0; // *2 for request+response
                 let est_gb = est_total_bytes / 1_073_741_824.0;
                 let est_cost = est_gb * 0.09; // AWS standard egress cost
-                
+
                 // Only show warning if estimated cost exceeds user-defined threshold
                 if est_cost > cost_threshold {
-                    println!("\nWARNING: Estimated cost exceeds ${:.0} threshold", cost_threshold);
+                    println!(
+                        "\nWARNING: Estimated cost exceeds ${:.0} threshold",
+                        cost_threshold
+                    );
                 } else {
                     println!("\nCost Estimation");
                 }
@@ -437,7 +543,7 @@ fn main() -> Result<()> {
                 println!("Est. Data Transfer: {:.2} GB", est_gb);
                 println!("Est. AWS Cost:      ~${:.2} (at $0.09/GB)", est_cost);
                 println!("------------------------------------");
-                
+
                 // Only prompt if running interactively (TTY)
                 if atty::is(atty::Stream::Stdin) {
                     print!("Proceed? [y/N] ");
@@ -455,14 +561,16 @@ fn main() -> Result<()> {
 
             // Setup interactive control if requested
             let control_rx = if interactive {
-                use fusillade::engine::control::{ControlCommand, parse_control_command};
+                use fusillade::engine::control::{parse_control_command, ControlCommand};
                 use std::io::BufRead;
-                
+
                 let (tx, rx) = std::sync::mpsc::channel::<ControlCommand>();
-                
-                println!("Interactive mode enabled. Commands: ramp <N>, pause, resume, status, stop");
+
+                println!(
+                    "Interactive mode enabled. Commands: ramp <N>, pause, resume, status, stop"
+                );
                 println!("   Type commands and press Enter.\n");
-                
+
                 // Spawn input thread
                 std::thread::spawn(move || {
                     let stdin = std::io::stdin();
@@ -476,13 +584,23 @@ fn main() -> Result<()> {
                         }
                     }
                 });
-                
+
                 Some(rx)
             } else {
                 None
             };
-            
-            let report = engine_arc.run_load_test(scenario.clone(), script_content, final_config, headless_mode, export_json, export_html, metrics_url, metrics_auth, control_rx)?;
+
+            let report = engine_arc.run_load_test(
+                scenario.clone(),
+                script_content,
+                final_config,
+                headless_mode,
+                export_json,
+                export_html,
+                metrics_url,
+                metrics_auth,
+                control_rx,
+            )?;
 
             // Handle OTLP export if --out otlp=<url> is specified
             if let Some(out_config) = out {
@@ -538,10 +656,13 @@ fn main() -> Result<()> {
         Commands::Controller { listen } => {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
-                let aggregator = std::sync::Arc::new(std::sync::RwLock::new(fusillade::stats::StatsAggregator::new()));
+                let aggregator = std::sync::Arc::new(std::sync::RwLock::new(
+                    fusillade::stats::StatsAggregator::new(),
+                ));
                 let server = ControllerServer::new(aggregator);
                 server.run(listen).await
-            }).unwrap();
+            })
+            .unwrap();
             Ok(())
         }
         Commands::Convert { input, output } => {
@@ -580,22 +701,29 @@ fn main() -> Result<()> {
         }
         Commands::Replay { input, parallel } => {
             use fusillade::bridge::replay::load_captured_requests;
-            
-            let requests = load_captured_requests(input.to_str().unwrap_or("fusillade-errors.json"))
-                .map_err(|e| anyhow::anyhow!("Failed to load errors file: {}", e))?;
-            
+
+            let requests =
+                load_captured_requests(input.to_str().unwrap_or("fusillade-errors.json"))
+                    .map_err(|e| anyhow::anyhow!("Failed to load errors file: {}", e))?;
+
             if requests.is_empty() {
                 println!("No failed requests found in file.");
                 return Ok(());
             }
-            
+
             println!("Replaying {} failed requests...", requests.len());
-            
+
             let client = reqwest::blocking::Client::new();
-            
+
             for (i, req) in requests.iter().enumerate() {
-                println!("\n[{}/{}] {} {}", i + 1, requests.len(), req.method, req.url);
-                
+                println!(
+                    "\n[{}/{}] {} {}",
+                    i + 1,
+                    requests.len(),
+                    req.method,
+                    req.url
+                );
+
                 let mut builder = match req.method.as_str() {
                     "GET" => client.get(&req.url),
                     "POST" => client.post(&req.url),
@@ -604,15 +732,15 @@ fn main() -> Result<()> {
                     "PATCH" => client.patch(&req.url),
                     _ => client.get(&req.url),
                 };
-                
+
                 for (key, value) in &req.headers {
                     builder = builder.header(key, value);
                 }
-                
+
                 if let Some(body) = &req.body {
                     builder = builder.body(body.clone());
                 }
-                
+
                 match builder.send() {
                     Ok(response) => {
                         let status = response.status();
@@ -628,26 +756,31 @@ fn main() -> Result<()> {
                         println!("  Error: {}", e);
                     }
                 }
-                
+
                 if !parallel {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
-            
+
             println!("\nReplay complete.");
             Ok(())
         }
-        Commands::Export { input, format, output } => {
-            use fusillade::bridge::replay::{load_captured_requests, export_to_curl};
-            
-            let requests = load_captured_requests(input.to_str().unwrap_or("fusillade-errors.json"))
-                .map_err(|e| anyhow::anyhow!("Failed to load errors file: {}", e))?;
-            
+        Commands::Export {
+            input,
+            format,
+            output,
+        } => {
+            use fusillade::bridge::replay::{export_to_curl, load_captured_requests};
+
+            let requests =
+                load_captured_requests(input.to_str().unwrap_or("fusillade-errors.json"))
+                    .map_err(|e| anyhow::anyhow!("Failed to load errors file: {}", e))?;
+
             if requests.is_empty() {
                 println!("No failed requests found in file.");
                 return Ok(());
             }
-            
+
             let exported = match format.as_str() {
                 "curl" => export_to_curl(&requests),
                 _ => {
@@ -655,31 +788,31 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
             };
-            
+
             if let Some(out_path) = output {
                 std::fs::write(&out_path, &exported)?;
                 println!("Exported {} requests to {:?}", requests.len(), out_path);
             } else {
                 println!("{}", exported);
             }
-            
+
             Ok(())
         }
         Commands::Login { token } => {
             println!("Authenticating with Fusillade Cloud...");
-            
+
             // Validate token format
             if !token.starts_with("fusi_") {
                 eprintln!("Error: Invalid token format. Token should start with 'fusi_'");
                 return Ok(());
             }
-            
+
             // Save token locally
             if let Err(e) = fusillade::cli::cloud::save_token(&token, None) {
                 eprintln!("Error saving token: {}", e);
                 return Ok(());
             }
-            
+
             println!("✓ Logged in successfully!");
             println!("  Token stored in ~/.fusillade/auth.json");
             println!("\nYou can now use 'fusillade run --cloud' to run tests on Fusillade Cloud.");
@@ -712,7 +845,11 @@ fn main() -> Result<()> {
             let current_json: serde_json::Value = serde_json::from_str(&current_content)
                 .map_err(|e| anyhow::anyhow!("Invalid current JSON: {}", e))?;
 
-            println!("Comparison: {} vs {}", baseline.display(), current.display());
+            println!(
+                "Comparison: {} vs {}",
+                baseline.display(),
+                current.display()
+            );
             println!("{}", "=".repeat(60));
 
             // Compare key metrics
@@ -725,7 +862,11 @@ fn main() -> Result<()> {
 
             fn format_change(baseline: f64, current: f64, lower_is_better: bool) -> String {
                 let diff = current - baseline;
-                let pct = if baseline > 0.0 { (diff / baseline) * 100.0 } else { 0.0 };
+                let pct = if baseline > 0.0 {
+                    (diff / baseline) * 100.0
+                } else {
+                    0.0
+                };
                 let arrow = if diff > 0.0 { "+" } else { "" };
                 let color = if (lower_is_better && diff < 0.0) || (!lower_is_better && diff > 0.0) {
                     "\x1b[32m" // Green - improvement
@@ -738,50 +879,79 @@ fn main() -> Result<()> {
             }
 
             // Total requests
-            if let (Some(b), Some(c)) = (get_u64(&baseline_json, "total_requests"), get_u64(&current_json, "total_requests")) {
+            if let (Some(b), Some(c)) = (
+                get_u64(&baseline_json, "total_requests"),
+                get_u64(&current_json, "total_requests"),
+            ) {
                 let pct = format_change(b as f64, c as f64, false);
                 println!("Total Requests:     {:>10} -> {:>10}  ({})", b, c, pct);
             }
 
             // Average latency
-            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "avg_latency_ms"), get_f64(&current_json, "avg_latency_ms")) {
+            if let (Some(b), Some(c)) = (
+                get_f64(&baseline_json, "avg_latency_ms"),
+                get_f64(&current_json, "avg_latency_ms"),
+            ) {
                 let pct = format_change(b, c, true);
                 println!("Avg Latency (ms):   {:>10.2} -> {:>10.2}  ({})", b, c, pct);
             }
 
             // P95 latency
-            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "p95_latency_ms"), get_f64(&current_json, "p95_latency_ms")) {
+            if let (Some(b), Some(c)) = (
+                get_f64(&baseline_json, "p95_latency_ms"),
+                get_f64(&current_json, "p95_latency_ms"),
+            ) {
                 let pct = format_change(b, c, true);
                 println!("P95 Latency (ms):   {:>10.2} -> {:>10.2}  ({})", b, c, pct);
             }
 
             // P99 latency
-            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "p99_latency_ms"), get_f64(&current_json, "p99_latency_ms")) {
+            if let (Some(b), Some(c)) = (
+                get_f64(&baseline_json, "p99_latency_ms"),
+                get_f64(&current_json, "p99_latency_ms"),
+            ) {
                 let pct = format_change(b, c, true);
                 println!("P99 Latency (ms):   {:>10.2} -> {:>10.2}  ({})", b, c, pct);
             }
 
             // Max latency
-            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "max_latency_ms"), get_f64(&current_json, "max_latency_ms")) {
+            if let (Some(b), Some(c)) = (
+                get_f64(&baseline_json, "max_latency_ms"),
+                get_f64(&current_json, "max_latency_ms"),
+            ) {
                 let pct = format_change(b, c, true);
                 println!("Max Latency (ms):   {:>10.2} -> {:>10.2}  ({})", b, c, pct);
             }
 
             // RPS
-            if let (Some(b), Some(c)) = (get_f64(&baseline_json, "rps"), get_f64(&current_json, "rps")) {
+            if let (Some(b), Some(c)) = (
+                get_f64(&baseline_json, "rps"),
+                get_f64(&current_json, "rps"),
+            ) {
                 let pct = format_change(b, c, false);
                 println!("RPS:                {:>10.2} -> {:>10.2}  ({})", b, c, pct);
             }
 
             // Error rate (if errors key exists)
-            let baseline_errors = baseline_json.get("errors").and_then(|e| e.as_object()).map(|e| e.values().filter_map(|v| v.as_u64()).sum::<u64>()).unwrap_or(0);
-            let current_errors = current_json.get("errors").and_then(|e| e.as_object()).map(|e| e.values().filter_map(|v| v.as_u64()).sum::<u64>()).unwrap_or(0);
+            let baseline_errors = baseline_json
+                .get("errors")
+                .and_then(|e| e.as_object())
+                .map(|e| e.values().filter_map(|v| v.as_u64()).sum::<u64>())
+                .unwrap_or(0);
+            let current_errors = current_json
+                .get("errors")
+                .and_then(|e| e.as_object())
+                .map(|e| e.values().filter_map(|v| v.as_u64()).sum::<u64>())
+                .unwrap_or(0);
             let baseline_total = get_u64(&baseline_json, "total_requests").unwrap_or(1);
             let current_total = get_u64(&current_json, "total_requests").unwrap_or(1);
             let baseline_error_rate = (baseline_errors as f64 / baseline_total as f64) * 100.0;
             let current_error_rate = (current_errors as f64 / current_total as f64) * 100.0;
             let pct = format_change(baseline_error_rate, current_error_rate, true);
-            println!("Error Rate (%):     {:>10.2} -> {:>10.2}  ({})", baseline_error_rate, current_error_rate, pct);
+            println!(
+                "Error Rate (%):     {:>10.2} -> {:>10.2}  ({})",
+                baseline_error_rate, current_error_rate, pct
+            );
 
             println!("{}", "=".repeat(60));
             println!("\x1b[32mGreen\x1b[0m = improvement, \x1b[31mRed\x1b[0m = regression");

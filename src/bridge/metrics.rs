@@ -1,22 +1,38 @@
-use rquickjs::{Ctx, Function, Object, Result};
-use crossbeam_channel::Sender;
 use crate::stats::Metric;
+use crossbeam_channel::Sender;
+use rquickjs::{Ctx, Function, Object, Result};
 use std::collections::HashMap;
 
 fn send_histogram(tx: &Sender<Metric>, name: String, value: f64) {
-    let _ = tx.send(Metric::Histogram { name, value, tags: HashMap::new() });
+    let _ = tx.send(Metric::Histogram {
+        name,
+        value,
+        tags: HashMap::new(),
+    });
 }
 
 fn send_counter(tx: &Sender<Metric>, name: String, value: f64) {
-    let _ = tx.send(Metric::Counter { name, value, tags: HashMap::new() });
+    let _ = tx.send(Metric::Counter {
+        name,
+        value,
+        tags: HashMap::new(),
+    });
 }
 
 fn send_gauge(tx: &Sender<Metric>, name: String, value: f64) {
-    let _ = tx.send(Metric::Gauge { name, value, tags: HashMap::new() });
+    let _ = tx.send(Metric::Gauge {
+        name,
+        value,
+        tags: HashMap::new(),
+    });
 }
 
 fn send_rate(tx: &Sender<Metric>, name: String, success: bool) {
-    let _ = tx.send(Metric::Rate { name, success, tags: HashMap::new() });
+    let _ = tx.send(Metric::Rate {
+        name,
+        success,
+        tags: HashMap::new(),
+    });
 }
 
 pub fn register_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>) -> Result<()> {
@@ -24,27 +40,39 @@ pub fn register_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>) -> Result<()> {
 
     // histogram.add(name, value) - Add a value to a named histogram
     let tx_hist = tx.clone();
-    metrics.set("histogramAdd", Function::new(ctx.clone(), move |name: String, value: f64| {
-        send_histogram(&tx_hist, name, value);
-    }))?;
+    metrics.set(
+        "histogramAdd",
+        Function::new(ctx.clone(), move |name: String, value: f64| {
+            send_histogram(&tx_hist, name, value);
+        }),
+    )?;
 
     // counter.add(name, value) - Add a value to a named counter
     let tx_counter = tx.clone();
-    metrics.set("counterAdd", Function::new(ctx.clone(), move |name: String, value: f64| {
-        send_counter(&tx_counter, name, value);
-    }))?;
+    metrics.set(
+        "counterAdd",
+        Function::new(ctx.clone(), move |name: String, value: f64| {
+            send_counter(&tx_counter, name, value);
+        }),
+    )?;
 
     // gauge.set(name, value) - Set the value of a named gauge
     let tx_gauge = tx.clone();
-    metrics.set("gaugeSet", Function::new(ctx.clone(), move |name: String, value: f64| {
-        send_gauge(&tx_gauge, name, value);
-    }))?;
+    metrics.set(
+        "gaugeSet",
+        Function::new(ctx.clone(), move |name: String, value: f64| {
+            send_gauge(&tx_gauge, name, value);
+        }),
+    )?;
 
     // rate.add(name, success) - Add an observation to a named rate
     let tx_rate = tx.clone();
-    metrics.set("rateAdd", Function::new(ctx.clone(), move |name: String, success: bool| {
-        send_rate(&tx_rate, name, success);
-    }))?;
+    metrics.set(
+        "rateAdd",
+        Function::new(ctx.clone(), move |name: String, success: bool| {
+            send_rate(&tx_rate, name, success);
+        }),
+    )?;
 
     ctx.globals().set("metrics", metrics)?;
     Ok(())
@@ -110,7 +138,11 @@ mod tests {
 
         let metric = rx.recv().unwrap();
         match metric {
-            Metric::Rate { name, success, tags } => {
+            Metric::Rate {
+                name,
+                success,
+                tags,
+            } => {
                 assert_eq!(name, "check_passed");
                 assert!(success);
                 assert!(tags.is_empty());
@@ -126,7 +158,11 @@ mod tests {
 
         let metric = rx.recv().unwrap();
         match metric {
-            Metric::Rate { name, success, tags } => {
+            Metric::Rate {
+                name,
+                success,
+                tags,
+            } => {
                 assert_eq!(name, "check_failed");
                 assert!(!success);
                 assert!(tags.is_empty());

@@ -3,8 +3,8 @@
 //! Exports load test metrics to an OTLP-compatible endpoint via HTTP/JSON.
 //! This is a simplified implementation that pushes metrics as JSON to an OTLP collector.
 
-use serde::Serialize;
 use crate::stats::ReportStats;
+use serde::Serialize;
 
 /// OTLP Exporter configuration
 pub struct OtlpExporter {
@@ -99,7 +99,7 @@ impl OtlpExporter {
             // Flatten histogram into multiple gauges
             let mut base_labels = std::collections::HashMap::new();
             base_labels.insert("metric_type".to_string(), "histogram".to_string());
-            
+
             let variants = vec![
                 ("p95", h.p95),
                 ("p99", h.p99),
@@ -161,11 +161,15 @@ impl OtlpExporter {
     }
 
     /// Export a report's metrics to OTLP endpoint
-    pub fn export(&self, report: &ReportStats) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn export(
+        &self,
+        report: &ReportStats,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let payload = Self::build_payload(report);
 
         // POST to OTLP endpoint
-        let response = self.client
+        let response = self
+            .client
             .post(&self.endpoint)
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -198,7 +202,7 @@ mod tests {
             value: 42.5,
             labels: None,
         };
-        
+
         let json = serde_json::to_string(&metric).unwrap();
         assert!(json.contains("\"name\":\"test.metric\""));
         assert!(json.contains("\"value\":42.5"));
@@ -209,13 +213,13 @@ mod tests {
     fn test_metric_data_with_labels() {
         let mut labels = HashMap::new();
         labels.insert("endpoint".to_string(), "/api/users".to_string());
-        
+
         let metric = MetricData {
             name: "test.metric".to_string(),
             value: 100.0,
             labels: Some(labels),
         };
-        
+
         let json = serde_json::to_string(&metric).unwrap();
         assert!(json.contains("\"labels\""));
         assert!(json.contains("/api/users"));
@@ -228,15 +232,13 @@ mod tests {
                 service_name: "fusillade".to_string(),
                 service_version: "0.1.0".to_string(),
             },
-            metrics: vec![
-                MetricData {
-                    name: "test".to_string(),
-                    value: 1.0,
-                    labels: None,
-                }
-            ],
+            metrics: vec![MetricData {
+                name: "test".to_string(),
+                value: 1.0,
+                labels: None,
+            }],
         };
-        
+
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("\"service_name\":\"fusillade\""));
         assert!(json.contains("\"metrics\""));
@@ -254,23 +256,25 @@ mod tests {
             grouped_requests: HashMap::new(),
             ..Default::default()
         };
-        
+
         let exporter = OtlpExporter::new("http://localhost:9999/test");
-        
+
         // We can't actually test the HTTP call without a server,
         // but we can verify the exporter is created correctly
         assert!(!exporter.endpoint.is_empty());
     }
 }
 
-    #[test]
-    fn test_export_custom_metrics() {
-        use crate::stats::{HistogramReport, RateReport};
-        
-        let mut report = ReportStats::default();
-        
-        // Add custom histogram
-        report.histograms.insert("my_hist".to_string(), HistogramReport {
+#[test]
+fn test_export_custom_metrics() {
+    use crate::stats::{HistogramReport, RateReport};
+
+    let mut report = ReportStats::default();
+
+    // Add custom histogram
+    report.histograms.insert(
+        "my_hist".to_string(),
+        HistogramReport {
             avg: 50.0,
             min: 10.0,
             max: 100.0,
@@ -278,38 +282,42 @@ mod tests {
             p95: 95.0,
             p99: 99.0,
             count: 10,
-        });
+        },
+    );
 
-        // Add custom counter
-        report.counters.insert("my_counter".to_string(), 42.0);
+    // Add custom counter
+    report.counters.insert("my_counter".to_string(), 42.0);
 
-        // Add custom gauge
-        report.gauges.insert("my_gauge".to_string(), 123.45);
-        
-        // Add custom rate
-        report.rates.insert("my_rate".to_string(), RateReport {
+    // Add custom gauge
+    report.gauges.insert("my_gauge".to_string(), 123.45);
+
+    // Add custom rate
+    report.rates.insert(
+        "my_rate".to_string(),
+        RateReport {
             total: 100,
             success: 99,
             rate: 0.99,
-        });
-        
-        let payload = OtlpExporter::build_payload(&report);
-        let json = serde_json::to_string(&payload).unwrap();
-        
-        // Verify Histogram expansion
-        assert!(json.contains("my_hist.p95"));
-        assert!(json.contains("my_hist.avg"));
-        assert!(json.contains("my_hist.count"));
-        
-        // Verify Counter
-        assert!(json.contains("my_counter"));
-        assert!(json.contains("\"value\":42.0"));
-        
-        // Verify Gauge
-        assert!(json.contains("my_gauge"));
-        assert!(json.contains("\"value\":123.45"));
-        
-        // Verify Rate
-        assert!(json.contains("my_rate"));
-        assert!(json.contains("\"value\":0.99"));
-    }
+        },
+    );
+
+    let payload = OtlpExporter::build_payload(&report);
+    let json = serde_json::to_string(&payload).unwrap();
+
+    // Verify Histogram expansion
+    assert!(json.contains("my_hist.p95"));
+    assert!(json.contains("my_hist.avg"));
+    assert!(json.contains("my_hist.count"));
+
+    // Verify Counter
+    assert!(json.contains("my_counter"));
+    assert!(json.contains("\"value\":42.0"));
+
+    // Verify Gauge
+    assert!(json.contains("my_gauge"));
+    assert!(json.contains("\"value\":123.45"));
+
+    // Verify Rate
+    assert!(json.contains("my_rate"));
+    assert!(json.contains("\"value\":0.99"));
+}

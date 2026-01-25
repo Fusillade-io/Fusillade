@@ -1,4 +1,7 @@
-use rquickjs::{Ctx, Result, class::{Trace, Tracer}, JsLifetime};
+use rquickjs::{
+    class::{Trace, Tracer},
+    Ctx, JsLifetime, Result,
+};
 use rumqttc::{Client, Connection, MqttOptions, QoS};
 use std::time::Duration;
 
@@ -38,11 +41,15 @@ impl JsMqttClient {
 
     pub fn publish(&mut self, topic: String, payload: String) -> Result<()> {
         if let Some(ref mut client) = self.client {
-            client.publish(topic, QoS::AtLeastOnce, false, payload.as_bytes())
+            client
+                .publish(topic, QoS::AtLeastOnce, false, payload.as_bytes())
                 .map_err(|_| rquickjs::Error::new_from_js("MQTT Publish failed", "NetworkError"))?;
             Ok(())
         } else {
-            Err(rquickjs::Error::new_from_js("MQTT Client not connected", "StateError"))
+            Err(rquickjs::Error::new_from_js(
+                "MQTT Client not connected",
+                "StateError",
+            ))
         }
     }
 

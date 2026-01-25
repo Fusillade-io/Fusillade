@@ -20,20 +20,20 @@ impl CapturedRequest {
     /// Convert to cURL command
     pub fn to_curl(&self) -> String {
         let mut parts = vec![format!("curl -X {}", self.method)];
-        
+
         for (key, value) in &self.headers {
             // Escape quotes in header values
             let escaped_val = value.replace('"', "\\\"");
             parts.push(format!("-H \"{}: {}\"", key, escaped_val));
         }
-        
+
         if let Some(body) = &self.body {
             if !body.is_empty() {
                 let escaped_body = body.replace('"', "\\\"").replace('\n', "\\n");
                 parts.push(format!("-d \"{}\"", escaped_body));
             }
         }
-        
+
         parts.push(format!("'{}'", self.url));
         parts.join(" \\\n  ")
     }
@@ -42,11 +42,7 @@ impl CapturedRequest {
 /// Append a captured request to the errors file
 #[allow(dead_code)]
 pub fn capture_failed_request(request: &CapturedRequest, file_path: &str) {
-    if let Ok(file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file_path)
-    {
+    if let Ok(file) = OpenOptions::new().create(true).append(true).open(file_path) {
         let mut writer = BufWriter::new(file);
         if let Ok(json) = serde_json::to_string(request) {
             let _ = writeln!(writer, "{}", json);
@@ -59,13 +55,13 @@ pub fn load_captured_requests(file_path: &str) -> Result<Vec<CapturedRequest>, s
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
     let mut requests = Vec::new();
-    
+
     for line in reader.lines().map_while(Result::ok) {
         if let Ok(req) = serde_json::from_str::<CapturedRequest>(&line) {
             requests.push(req);
         }
     }
-    
+
     Ok(requests)
 }
 
@@ -102,7 +98,9 @@ mod tests {
             headers: [
                 ("Content-Type".to_string(), "application/json".to_string()),
                 ("Authorization".to_string(), "Bearer token123".to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             body: Some(r#"{"name":"test"}"#.to_string()),
             status: 500,
             error: Some("Internal Server Error".to_string()),

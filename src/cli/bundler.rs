@@ -1,6 +1,6 @@
+use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
-use regex::Regex;
 
 #[allow(dead_code)]
 pub fn collect_assets(script_path: &Path) -> HashMap<String, String> {
@@ -9,7 +9,7 @@ pub fn collect_assets(script_path: &Path) -> HashMap<String, String> {
         Ok(c) => c,
         Err(_) => return assets,
     };
-    
+
     // Use r##"..."## to allow quotes and backslashes in regex
     let import_re = Regex::new(r#"from\s+['"](\./.*?)['"]"#).unwrap();
     let open_re = Regex::new(r#"open\s*\(\s*['"](\./.*?)['"]\s*\)"#).unwrap();
@@ -39,7 +39,7 @@ fn add_asset(parent: &Path, rel_path: &str, assets: &mut HashMap<String, String>
     if full_path.exists() && full_path.is_file() {
         if let Ok(content) = std::fs::read_to_string(&full_path) {
             assets.insert(rel_path.to_string(), content.clone());
-            
+
             if rel_path.ends_with(".js") || rel_path.ends_with(".mjs") {
                 let nested_assets = scan_content_for_assets(&content);
                 for nested_rel in nested_assets {

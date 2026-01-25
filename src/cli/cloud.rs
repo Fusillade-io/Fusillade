@@ -1,10 +1,10 @@
 //! Fusillade Cloud Authentication
-//! 
+//!
 //! Handles storing and retrieving API keys for cloud mode.
 
-use std::path::PathBuf;
-use std::fs;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 
 const CONFIG_DIR: &str = ".fusillade";
 const AUTH_FILE: &str = "auth.json";
@@ -27,25 +27,24 @@ pub fn save_token(token: &str, api_url: Option<&str>) -> Result<(), std::io::Err
         token: token.to_string(),
         api_url: api_url.map(|s| s.to_string()),
     };
-    
+
     let config_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(CONFIG_DIR);
-    
+
     fs::create_dir_all(&config_dir)?;
-    
-    let json = serde_json::to_string_pretty(&auth)
-        .map_err(std::io::Error::other)?;
-    
+
+    let json = serde_json::to_string_pretty(&auth).map_err(std::io::Error::other)?;
+
     fs::write(auth_file_path(), json)?;
-    
+
     // Set restrictive permissions on Unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(auth_file_path(), fs::Permissions::from_mode(0o600))?;
     }
-    
+
     Ok(())
 }
 
@@ -55,7 +54,7 @@ pub fn load_token() -> Option<CloudAuth> {
     if !path.exists() {
         return None;
     }
-    
+
     let content = fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
 }

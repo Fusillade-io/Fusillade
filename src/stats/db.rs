@@ -1,7 +1,7 @@
-use anyhow::Result;
-use rusqlite::{params, Connection};
-use chrono::Utc;
 use super::ReportStats;
+use anyhow::Result;
+use chrono::Utc;
+use rusqlite::{params, Connection};
 
 pub struct HistoryDb {
     conn: Connection,
@@ -11,7 +11,7 @@ impl HistoryDb {
     pub fn open_default() -> Result<Self> {
         let path = "fusillade_history.db";
         let conn = Connection::open(path)?;
-        
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS runs (
                 id INTEGER PRIMARY KEY,
@@ -38,7 +38,9 @@ impl HistoryDb {
     }
 
     pub fn list_runs(&self, limit: usize) -> Result<Vec<(i64, String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT id, start_time, scenario FROM runs ORDER BY id DESC LIMIT ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, start_time, scenario FROM runs ORDER BY id DESC LIMIT ?1")?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;

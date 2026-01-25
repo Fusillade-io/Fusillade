@@ -1,17 +1,23 @@
-use anyhow::Result;
-use rquickjs::{Context, Runtime, Module, Function, Value, Object, Ctx, loader::{FileResolver, ScriptLoader}, CatchResultExt, CaughtError};
-use tokio::time::{Duration, Instant};
 use crate::cli::config::Config;
-use crate::stats::{Metric, StatsAggregator, SharedAggregator, ShardedAggregator};
 use crate::engine::distributed::MetricBatch;
-use crate::engine::io_bridge::IoBridge;
-use crossbeam_channel::{self, Sender, Receiver};
-use std::collections::HashMap;
-use std::path::{PathBuf, Path};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use crate::engine::http_client::HttpClient;
-use std::thread::JoinHandle;
+use crate::engine::io_bridge::IoBridge;
+use crate::stats::{Metric, ShardedAggregator, SharedAggregator, StatsAggregator};
+use anyhow::Result;
+use crossbeam_channel::{self, Receiver, Sender};
 use http::Method;
+use rquickjs::{
+    loader::{FileResolver, ScriptLoader},
+    CatchResultExt, CaughtError, Context, Ctx, Function, Module, Object, Runtime, Value,
+};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread::JoinHandle;
+use tokio::time::{Duration, Instant};
 // Will use may::coroutine when worker spawning is migrated
 #[allow(unused_imports)]
 use may::coroutine;
@@ -30,21 +36,26 @@ fn format_js_error(error: &CaughtError) -> String {
         CaughtError::Value(val) => {
             format!("Exception: {:?}", val)
         }
-        CaughtError::Error(e) => {
-            e.to_string()
-        }
+        CaughtError::Error(e) => e.to_string(),
     }
 }
 
-
-
 fn parse_duration_str(s: &str) -> Option<Duration> {
     if s.ends_with("ms") {
-        s.trim_end_matches("ms").parse::<u64>().ok().map(Duration::from_millis)
+        s.trim_end_matches("ms")
+            .parse::<u64>()
+            .ok()
+            .map(Duration::from_millis)
     } else if s.ends_with('s') {
-        s.trim_end_matches('s').parse::<u64>().ok().map(Duration::from_secs)
+        s.trim_end_matches('s')
+            .parse::<u64>()
+            .ok()
+            .map(Duration::from_secs)
     } else if s.ends_with('m') {
-        s.trim_end_matches('m').parse::<u64>().ok().map(|m| Duration::from_secs(m * 60))
+        s.trim_end_matches('m')
+            .parse::<u64>()
+            .ok()
+            .map(|m| Duration::from_secs(m * 60))
     } else {
         s.parse::<u64>().ok().map(Duration::from_millis)
     }
@@ -54,9 +65,9 @@ pub struct Engine {
     shared_data: crate::bridge::data::SharedData,
 }
 
+pub mod control;
 pub mod distributed;
 pub mod http_client;
-pub mod control;
 pub mod io_bridge;
 pub mod memory;
 
@@ -68,33 +79,51 @@ impl Engine {
         })
     }
 
-
-
     fn create_runtime() -> Result<(Runtime, Context)> {
         let runtime = Runtime::new()?;
         let resolver = FileResolver::default()
-                .with_path("./")
-                .with_path("./scenarios")
-                .with_path("./support");
+            .with_path("./")
+            .with_path("./scenarios")
+            .with_path("./support");
         let loader = ScriptLoader::default();
         runtime.set_loader(resolver, loader);
         let context = Context::full(&runtime)?;
         Ok((runtime, context))
     }
 
-    pub fn extract_config(&self, script_path: PathBuf, script_content: String) -> Result<Option<Config>> {
+    pub fn extract_config(
+        &self,
+        script_path: PathBuf,
+        script_content: String,
+    ) -> Result<Option<Config>> {
         let (runtime, context) = Self::create_runtime()?;
         let (tx, _rx) = crossbeam_channel::unbounded();
         let dummy_shared_data = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let dummy_aggregator = Arc::new(std::sync::RwLock::new(StatsAggregator::new()));
-        let tokio_rt = Arc::new(tokio::runtime::Builder::new_current_thread().enable_all().build()?);
+        let tokio_rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+        );
         let client = {
             let _guard = tokio_rt.enter();
             HttpClient::new()
         };
 
         let config = context.with(|ctx| {
-            crate::bridge::register_globals_sync(&ctx, tx, client, dummy_shared_data, 0, dummy_aggregator, tokio_rt, None, None, false).expect("Failed to register globals in config extraction");
+            crate::bridge::register_globals_sync(
+                &ctx,
+                tx,
+                client,
+                dummy_shared_data,
+                0,
+                dummy_aggregator,
+                tokio_rt,
+                None,
+                None,
+                false,
+            )
+            .expect("Failed to register globals in config extraction");
             let module_name = script_path.to_string_lossy().to_string();
             let module = Module::declare(ctx.clone(), module_name, script_content)?;
             let (module, _) = module.eval()?;
@@ -103,13 +132,27 @@ impl Engine {
                     let json_str = json_stringify(ctx.clone(), options)?;
                     let mut config_val: serde_json::Value = serde_json::from_str(&json_str)?;
                     if let Some(obj) = config_val.as_object_mut() {
-                        if let Some(s) = obj.remove("stages") { obj.insert("schedule".to_string(), s); }
-                        if let Some(t) = obj.remove("thresholds") { obj.insert("criteria".to_string(), t); }
-                        if let Some(e) = obj.remove("executor") { obj.insert("executor".to_string(), e); }
-                        if let Some(r) = obj.remove("rate") { obj.insert("rate".to_string(), r); }
-                        if let Some(tu) = obj.remove("timeUnit") { obj.insert("time_unit".to_string(), tu); }
-                        if let Some(mid) = obj.remove("minIterationDuration") { obj.insert("min_iteration_duration".to_string(), mid); }
-                        if let Some(rs) = obj.remove("responseSink") { obj.insert("response_sink".to_string(), rs); }
+                        if let Some(s) = obj.remove("stages") {
+                            obj.insert("schedule".to_string(), s);
+                        }
+                        if let Some(t) = obj.remove("thresholds") {
+                            obj.insert("criteria".to_string(), t);
+                        }
+                        if let Some(e) = obj.remove("executor") {
+                            obj.insert("executor".to_string(), e);
+                        }
+                        if let Some(r) = obj.remove("rate") {
+                            obj.insert("rate".to_string(), r);
+                        }
+                        if let Some(tu) = obj.remove("timeUnit") {
+                            obj.insert("time_unit".to_string(), tu);
+                        }
+                        if let Some(mid) = obj.remove("minIterationDuration") {
+                            obj.insert("min_iteration_duration".to_string(), mid);
+                        }
+                        if let Some(rs) = obj.remove("responseSink") {
+                            obj.insert("response_sink".to_string(), rs);
+                        }
 
                         // Handle scenarios with k6-compatible key mapping
                         if let Some(scenarios) = obj.get_mut("scenarios") {
@@ -117,10 +160,18 @@ impl Engine {
                                 for (_name, scenario) in scenarios_obj.iter_mut() {
                                     if let Some(scenario_obj) = scenario.as_object_mut() {
                                         // Map k6 keys to Thruster keys
-                                        if let Some(vus) = scenario_obj.remove("vus") { scenario_obj.insert("workers".to_string(), vus); }
-                                        if let Some(stages) = scenario_obj.remove("stages") { scenario_obj.insert("schedule".to_string(), stages); }
-                                        if let Some(tu) = scenario_obj.remove("timeUnit") { scenario_obj.insert("time_unit".to_string(), tu); }
-                                        if let Some(rs) = scenario_obj.remove("responseSink") { scenario_obj.insert("response_sink".to_string(), rs); }
+                                        if let Some(vus) = scenario_obj.remove("vus") {
+                                            scenario_obj.insert("workers".to_string(), vus);
+                                        }
+                                        if let Some(stages) = scenario_obj.remove("stages") {
+                                            scenario_obj.insert("schedule".to_string(), stages);
+                                        }
+                                        if let Some(tu) = scenario_obj.remove("timeUnit") {
+                                            scenario_obj.insert("time_unit".to_string(), tu);
+                                        }
+                                        if let Some(rs) = scenario_obj.remove("responseSink") {
+                                            scenario_obj.insert("response_sink".to_string(), rs);
+                                        }
                                     }
                                 }
                             }
@@ -160,18 +211,23 @@ impl Engine {
         let shared_data = self.shared_data.clone();
         let script_content = script_content.clone();
         let script_path = script_path.clone();
-        
+
         let min_iter_duration = if let Some(s) = &config.min_iteration_duration {
             parse_duration(s).ok()
         } else {
             None
         };
 
-// Initialize control state early
+        // Initialize control state early
         let control_state = Arc::new(control::ControlState::new(config.workers.unwrap_or(1)));
-        
+
         // 1. Run Setup (same as before)
-        let setup_data = self.run_setup(&script_path, &script_content, Arc::new(std::sync::RwLock::new(StatsAggregator::new())))
+        let setup_data = self
+            .run_setup(
+                &script_path,
+                &script_content,
+                Arc::new(std::sync::RwLock::new(StatsAggregator::new())),
+            )
             .unwrap_or_else(|e| {
                 eprintln!("Setup failed: {}", e);
                 None
@@ -182,7 +238,10 @@ impl Engine {
         let handle = std::thread::spawn(move || {
             // Calculate total workers for scaling decisions
             let total_workers = if let Some(ref scenarios) = config.scenarios {
-                scenarios.values().map(|s| s.workers.unwrap_or(1)).sum::<usize>()
+                scenarios
+                    .values()
+                    .map(|s| s.workers.unwrap_or(1))
+                    .sum::<usize>()
             } else {
                 config.workers.unwrap_or(1)
             };
@@ -199,7 +258,8 @@ impl Engine {
             } else {
                 (total_workers * 10).clamp(20_000, 100_000)
             };
-            let (tx, rx): (Sender<Metric>, Receiver<Metric>) = crossbeam_channel::bounded(channel_size);
+            let (tx, rx): (Sender<Metric>, Receiver<Metric>) =
+                crossbeam_channel::bounded(channel_size);
 
             let agg_handle = sharded_aggregator.clone();
             let metrics_url = controller_metrics_url.clone();
@@ -214,11 +274,16 @@ impl Engine {
                 let metrics_url = metrics_url.clone();
 
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
                     let client = if metrics_url.is_some() {
                         let _guard = rt.enter();
                         Some(HttpClient::new())
-                    } else { None };
+                    } else {
+                        None
+                    };
 
                     let mut batch = Vec::new();
                     let mut last_send = Instant::now();
@@ -233,7 +298,9 @@ impl Engine {
                         if agg_id == 0 {
                             if let (Some(url), Some(client)) = (&metrics_url, &client) {
                                 batch.push(metric);
-                                if last_send.elapsed() >= Duration::from_secs(1) || batch.len() >= 100 {
+                                if last_send.elapsed() >= Duration::from_secs(1)
+                                    || batch.len() >= 100
+                                {
                                     let payload = MetricBatch {
                                         worker_id: 0,
                                         metrics: std::mem::take(&mut batch),
@@ -280,7 +347,7 @@ impl Engine {
                     .worker_threads(tokio_threads)
                     .enable_all()
                     .build()
-                    .expect("Failed to create shared Tokio runtime")
+                    .expect("Failed to create shared Tokio runtime"),
             );
             // Scale connection pool with workers: target ~1 idle connection per 5 workers
             let pool_size = (total_workers / 5).clamp(500, 2000);
@@ -313,7 +380,8 @@ impl Engine {
 
             let start_time = Instant::now();
             let mut active_scenario_handles: Vec<JoinHandle<()>> = Vec::new(); // For multi-scenario
-            let mut active_legacy_workers: Vec<(may::coroutine::JoinHandle<()>, Arc<AtomicBool>)> = Vec::new(); // For legacy (green threads)
+            let mut active_legacy_workers: Vec<(may::coroutine::JoinHandle<()>, Arc<AtomicBool>)> =
+                Vec::new(); // For legacy (green threads)
             let mut dynamic_target_legacy: Option<usize> = None; // For legacy ramp
             let schedule_legacy: Vec<(Duration, usize)>;
             let duration_legacy: Duration;
@@ -329,16 +397,18 @@ impl Engine {
                     Duration::from_secs(2),
                     move |info| {
                         // Warning threshold (85%): pause new worker spawning
-                        eprintln!("[Memory] Warning: {:.1}% used ({} available). Throttling worker spawns.", 
+                        eprintln!("[Memory] Warning: {:.1}% used ({} available). Throttling worker spawns.",
                             info.usage_percent() * 100.0,
                             memory::format_bytes(info.available_bytes));
                         throttle_flag.store(true, Ordering::Relaxed);
                     },
                     move |info| {
                         // Critical threshold (95%): signal for worker reduction
-                        eprintln!("[Memory] CRITICAL: {:.1}% used ({} available). Stopping new workers.", 
+                        eprintln!(
+                            "[Memory] CRITICAL: {:.1}% used ({} available). Stopping new workers.",
                             info.usage_percent() * 100.0,
-                            memory::format_bytes(info.available_bytes));
+                            memory::format_bytes(info.available_bytes)
+                        );
                         critical_flag.store(true, Ordering::Relaxed);
                     },
                 ))
@@ -351,10 +421,10 @@ impl Engine {
 
             if let Some(ref scenarios) = config.scenarios {
                 // Multi-scenario mode: spawn a worker pool per scenario
-                
+
                 // Duration for the loop is the max duration of all scenarios
                 // Actually we just wait for handles to finish.
-                
+
                 for (scenario_name, scenario_config) in scenarios.iter() {
                     let scenario_name = scenario_name.clone();
                     let scenario_config = scenario_config.clone();
@@ -370,7 +440,7 @@ impl Engine {
                     let shared_tokio_rt = shared_tokio_rt.clone();
                     let shared_http_client = shared_http_client.clone();
                     let control_state = control_state.clone();
-                    
+
                     let h = std::thread::spawn(move || {
                         // Handle startTime delay
                         if let Some(ref st) = scenario_config.start_time {
@@ -378,19 +448,29 @@ impl Engine {
                                 std::thread::sleep(delay);
                             }
                         }
-                        
-                        let exec_fn = scenario_config.exec.clone().unwrap_or_else(|| "default".to_string());
+
+                        let exec_fn = scenario_config
+                            .exec
+                            .clone()
+                            .unwrap_or_else(|| "default".to_string());
                         let duration = scenario_config.duration.as_deref().unwrap_or("10s");
-                        let scenario_duration = parse_duration(duration).unwrap_or(Duration::from_secs(10));
+                        let scenario_duration =
+                            parse_duration(duration).unwrap_or(Duration::from_secs(10));
                         let workers = scenario_config.workers.unwrap_or(1);
                         let max_iterations = scenario_config.iterations;
-                        
-                        println!("[Scenario: {}] Starting {} workers for {}...", scenario_name, workers, duration);
-                        
+
+                        println!(
+                            "[Scenario: {}] Starting {} workers for {}...",
+                            scenario_name, workers, duration
+                        );
+
                         let start_time = Instant::now();
-                        let mut active_workers: Vec<(may::coroutine::JoinHandle<()>, Arc<AtomicBool>)> = Vec::new();
+                        let mut active_workers: Vec<(
+                            may::coroutine::JoinHandle<()>,
+                            Arc<AtomicBool>,
+                        )> = Vec::new();
                         let mut next_worker_id = 1;
-                        
+
                         // Spawn all workers at once (constant-vus style)
                         for _ in 0..workers {
                             let worker_id = next_worker_id;
@@ -417,7 +497,8 @@ impl Engine {
 
                             // Spawn as may coroutine instead of OS thread
                             // SAFETY: Stack size is configured to be sufficient for JS execution
-                            let worker_handle = unsafe { may::coroutine::Builder::new()
+                            let worker_handle = unsafe {
+                                may::coroutine::Builder::new()
                                 .stack_size(stack_sz)
                                 .spawn(move || {
                                 let (runtime, context) = Self::create_runtime().unwrap();
@@ -443,13 +524,13 @@ impl Engine {
                                             return;
                                         }
                                     };
-                                    
+
                                     // Get the exec function (default or custom)
                                     let func: Function = module.get(&exec_fn).unwrap_or_else(|_| {
                                         eprintln!("[Scenario: {}] Function '{}' not found, using 'default'", scenario_name, exec_fn);
                                         module.get("default").unwrap()
                                     });
-                                    
+
                                     let data_val = if let Some(json) = setup_data_clone.as_ref() {
                                         json_parse(ctx.clone(), json).unwrap_or(Value::new_undefined(ctx.clone()))
                                     } else {
@@ -540,41 +621,46 @@ impl Engine {
                                 runtime.run_gc();
                                 std::mem::drop(context);
                                 std::mem::drop(runtime);
-                            }) };
-                            active_workers.push((worker_handle.expect("Failed to spawn coroutine"), running));
+                            })
+                            };
+                            active_workers
+                                .push((worker_handle.expect("Failed to spawn coroutine"), running));
                         }
-                        
+
                         // Wait for scenario duration
                         while start_time.elapsed() < scenario_duration {
-                             // Also check global stop
+                            // Also check global stop
                             if control_state.is_stopped() {
                                 break;
                             }
                             std::thread::sleep(Duration::from_millis(100));
                         }
-                        
+
                         // Stop all workers
-                        for (_, r) in active_workers.iter() { r.store(false, Ordering::Relaxed); }
-                        
+                        for (_, r) in active_workers.iter() {
+                            r.store(false, Ordering::Relaxed);
+                        }
+
                         // Wait for workers to finish
                         for (h, _) in active_workers {
                             let _ = h.join();
                         }
-                        
+
                         println!("[Scenario: {}] Complete.", scenario_name);
                     });
                     active_scenario_handles.push(h);
                 }
-                
+
                 // Initialization for legacy (empty, unused)
                 schedule_legacy = vec![];
                 duration_legacy = Duration::ZERO;
-
             } else {
                 // Legacy single-scenario mode setup
                 schedule_legacy = if let Some(ref s) = config.schedule {
                     let mut parsed = Vec::new();
-                    for step in s { parsed.push((parse_duration(&step.duration).unwrap(), step.target)); }
+                    for step in s {
+                        parsed.push((parse_duration(&step.duration).unwrap(), step.target));
+                    }
                     parsed
                 } else {
                     let duration_str = config.duration.as_deref().unwrap_or("10s");
@@ -605,11 +691,11 @@ impl Engine {
                     if active_scenario_handles.iter().all(|h| h.is_finished()) {
                         break 'main_loop;
                     }
-                } else if start_time.elapsed() >= duration_legacy && !control_state.is_stopped() { 
+                } else if start_time.elapsed() >= duration_legacy && !control_state.is_stopped() {
                     // Only break if natural finish
                     break 'main_loop;
                 }
-                
+
                 if control_state.is_stopped() {
                     break 'main_loop;
                 }
@@ -639,10 +725,14 @@ impl Engine {
                                 control_state.add_tag(k, v);
                             }
                             control::ControlCommand::Status => {
-                                let paused = if control_state.is_paused() { "PAUSED" } else { "RUNNING" };
+                                let paused = if control_state.is_paused() {
+                                    "PAUSED"
+                                } else {
+                                    "RUNNING"
+                                };
                                 let vus = if is_multi_scenario {
                                     // We don't verify exact VUs here easily without atomic counting, just printed status
-                                    "many".to_string() 
+                                    "many".to_string()
                                 } else {
                                     active_legacy_workers.len().to_string()
                                 };
@@ -671,8 +761,10 @@ impl Engine {
                             if info.usage_percent() < memory::WARN_THRESHOLD_PERCENT {
                                 memory_throttle.store(false, Ordering::Relaxed);
                                 memory_critical.store(false, Ordering::Relaxed);
-                                eprintln!("[Memory] Recovered: {:.1}% used. Resuming worker spawning.", 
-                                    info.usage_percent() * 100.0);
+                                eprintln!(
+                                    "[Memory] Recovered: {:.1}% used. Resuming worker spawning.",
+                                    info.usage_percent() * 100.0
+                                );
                             } else {
                                 // Still throttled, skip spawning this tick
                                 std::thread::sleep(Duration::from_millis(100));
@@ -704,7 +796,8 @@ impl Engine {
 
                             // Spawn as may coroutine instead of OS thread for higher concurrency
                             // SAFETY: Stack size is configured to be sufficient for JS execution
-                            let h = unsafe { may::coroutine::Builder::new()
+                            let h = unsafe {
+                                may::coroutine::Builder::new()
                                 .stack_size(stack_sz)
                                 .spawn(move || {
                                 let (runtime, context) = Self::create_runtime().unwrap();
@@ -736,7 +829,7 @@ impl Engine {
                                             return;
                                         }
                                     };
-                                    
+
                                     // Parse setup data once
                                     let data_val = if let Some(json) = setup_data_clone.as_ref() {
                                         json_parse(ctx.clone(), json).unwrap_or(Value::new_undefined(ctx.clone()))
@@ -753,7 +846,7 @@ impl Engine {
                                         if control_state.is_stopped() || !running_clone.load(Ordering::Relaxed) {
                                             break;
                                         }
-                                        
+
                                         // Reset sleep tracker before each iteration
                                         crate::bridge::reset_sleep_tracker();
                                         let iter_start = Instant::now();
@@ -828,14 +921,18 @@ impl Engine {
                                 runtime.run_gc();
                                 std::mem::drop(context);
                                 std::mem::drop(runtime);
-                            }) };
-                            active_legacy_workers.push((h.expect("Failed to spawn coroutine"), running));
+                            })
+                            };
+                            active_legacy_workers
+                                .push((h.expect("Failed to spawn coroutine"), running));
                         }
                     }
-                    
+
                     // Scale down if target is less than current (only from ramp command)
                     if let Some(target) = dynamic_target_legacy {
-                        while target < active_legacy_workers.len() && !active_legacy_workers.is_empty() {
+                        while target < active_legacy_workers.len()
+                            && !active_legacy_workers.is_empty()
+                        {
                             if let Some((_, running)) = active_legacy_workers.pop() {
                                 running.store(false, Ordering::Relaxed);
                             }
@@ -883,7 +980,8 @@ impl Engine {
                         // Add auth header if provided (format: "HeaderName: value")
                         if let Some(ref auth) = metrics_auth {
                             if let Some((header_name, header_value)) = auth.split_once(':') {
-                                req_builder = req_builder.header(header_name.trim(), header_value.trim());
+                                req_builder =
+                                    req_builder.header(header_name.trim(), header_value.trim());
                             }
                         }
 
@@ -896,7 +994,7 @@ impl Engine {
 
                 std::thread::sleep(Duration::from_millis(100));
             } // End main_loop
-            
+
             // Clean up
             if is_multi_scenario {
                 // Wait for all scenarios to complete
@@ -904,22 +1002,31 @@ impl Engine {
                     let _ = h.join();
                 }
             } else {
-                for (_, r) in active_legacy_workers.iter() { r.store(false, Ordering::Relaxed); }
+                for (_, r) in active_legacy_workers.iter() {
+                    r.store(false, Ordering::Relaxed);
+                }
                 // Graceful Stop for legacy
-                let graceful_stop_duration = config.stop.as_deref()
+                let graceful_stop_duration = config
+                    .stop
+                    .as_deref()
                     .and_then(parse_duration_str)
                     .unwrap_or(Duration::from_secs(30));
 
                 if graceful_stop_duration > Duration::ZERO {
-                    println!("Graceful stop: waiting up to {}s for workers to finish...", graceful_stop_duration.as_secs_f64());
+                    println!(
+                        "Graceful stop: waiting up to {}s for workers to finish...",
+                        graceful_stop_duration.as_secs_f64()
+                    );
                     let stop_start = Instant::now();
                     while stop_start.elapsed() < graceful_stop_duration {
-                         // Check if all workers have stopped (running flag is false means iteration loop exited)
-                         let all_stopped = active_legacy_workers.iter().all(|(_, r)| !r.load(Ordering::Relaxed));
-                         if all_stopped {
-                             break;
-                         }
-                         std::thread::sleep(Duration::from_millis(100));
+                        // Check if all workers have stopped (running flag is false means iteration loop exited)
+                        let all_stopped = active_legacy_workers
+                            .iter()
+                            .all(|(_, r)| !r.load(Ordering::Relaxed));
+                        if all_stopped {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
                     }
                 }
             }
@@ -928,15 +1035,22 @@ impl Engine {
             let merged_agg = sharded_aggregator.merge();
             let report = merged_agg.to_report();
 
-            if json_output { println!("{}", merged_agg.to_json()); }
-            else { merged_agg.report(); }
+            if json_output {
+                println!("{}", merged_agg.to_json());
+            } else {
+                merged_agg.report();
+            }
 
-            if let Some(path) = export_json { let _ = std::fs::write(path, merged_agg.to_json()); }
+            if let Some(path) = export_json {
+                let _ = std::fs::write(path, merged_agg.to_json());
+            }
 
             // Send final summary with endpoint metrics to control plane
             if let (Some(ref url), Some(ref client)) = (&metrics_url, &metrics_client) {
                 // Build endpoint metrics for per-URL breakdown (sent once at completion)
-                let endpoints: Vec<serde_json::Value> = report.grouped_requests.iter()
+                let endpoints: Vec<serde_json::Value> = report
+                    .grouped_requests
+                    .iter()
                     .map(|(name, req_report)| {
                         serde_json::json!({
                             "name": name,
@@ -952,7 +1066,9 @@ impl Engine {
 
                 if !endpoints.is_empty() {
                     // Include global status codes breakdown
-                    let status_codes: std::collections::HashMap<String, usize> = report.status_codes.iter()
+                    let status_codes: std::collections::HashMap<String, usize> = report
+                        .status_codes
+                        .iter()
                         .map(|(code, count)| (code.to_string(), *count))
                         .collect();
 
@@ -969,7 +1085,8 @@ impl Engine {
 
                     if let Some(ref auth) = metrics_auth {
                         if let Some((header_name, header_value)) = auth.split_once(':') {
-                            req_builder = req_builder.header(header_name.trim(), header_value.trim());
+                            req_builder =
+                                req_builder.header(header_name.trim(), header_value.trim());
                         }
                     }
 
@@ -985,7 +1102,12 @@ impl Engine {
             }
 
             // Teardown
-            let _ = self.run_teardown(&script_path, &script_content, setup_data.as_deref().map(|s| s.to_string()), aggregator.clone());
+            let _ = self.run_teardown(
+                &script_path,
+                &script_content,
+                setup_data.as_deref().map(|s| s.to_string()),
+                aggregator.clone(),
+            );
 
             // Validate thresholds if criteria are defined
             let threshold_failures = if let Some(ref criteria) = config.criteria {
@@ -1000,7 +1122,10 @@ impl Engine {
                 for failure in &threshold_failures {
                     eprintln!("  {}", failure);
                 }
-                return Err(anyhow::anyhow!("Thresholds breached: {} failure(s)", threshold_failures.len()));
+                return Err(anyhow::anyhow!(
+                    "Thresholds breached: {} failure(s)",
+                    threshold_failures.len()
+                ));
             } else if !threshold_failures.is_empty() {
                 // Print threshold failures as warnings even if not aborting
                 eprintln!("\nThreshold failures (warnings):");
@@ -1012,7 +1137,9 @@ impl Engine {
             Ok(report)
         });
 
-        handle.join().map_err(|_| anyhow::anyhow!("Test thread panicked"))?
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Test thread panicked"))?
     }
 
     fn calculate_target(schedule: &[(Duration, usize)], elapsed: Duration) -> usize {
@@ -1020,7 +1147,8 @@ impl Engine {
         let mut prev_target = 0;
         for (duration, target) in schedule {
             if elapsed < active_time + *duration {
-                let progress = (elapsed.as_secs_f64() - active_time.as_secs_f64()) / duration.as_secs_f64();
+                let progress =
+                    (elapsed.as_secs_f64() - active_time.as_secs_f64()) / duration.as_secs_f64();
                 let diff = *target as f64 - prev_target as f64;
                 return (prev_target as f64 + diff * progress) as usize;
             }
@@ -1033,34 +1161,47 @@ impl Engine {
     pub fn warmup(&self, url: &str) {
         let url = url.to_string();
         // Spawn a few threads to establish multiple connections in the pool
-        let threads: Vec<_> = (0..10).map(|_| {
-            let u = url.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-                let client = {
-                    let _guard = rt.enter();
-                    HttpClient::new()
-                };
-                let req = http::Request::builder()
-                    .method(Method::HEAD)
-                    .uri(&u)
-                    .body("".to_string());
-                
-                if let Ok(r) = req {
-                        let _ = rt.block_on(async move { tokio::time::timeout(Duration::from_secs(10), client.request(r, false)).await });
-                }
+        let threads: Vec<_> = (0..10)
+            .map(|_| {
+                let u = url.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let client = {
+                        let _guard = rt.enter();
+                        HttpClient::new()
+                    };
+                    let req = http::Request::builder()
+                        .method(Method::HEAD)
+                        .uri(&u)
+                        .body("".to_string());
+
+                    if let Ok(r) = req {
+                        let _ = rt.block_on(async move {
+                            tokio::time::timeout(Duration::from_secs(10), client.request(r, false))
+                                .await
+                        });
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         for t in threads {
             let _ = t.join();
         }
     }
 
-    fn run_setup(&self, script_path: &Path, script_content: &str, aggregator: SharedAggregator) -> Result<Option<String>> {
+    fn run_setup(
+        &self,
+        script_path: &Path,
+        script_content: &str,
+        aggregator: SharedAggregator,
+    ) -> Result<Option<String>> {
         let (runtime, context) = Self::create_runtime()?;
         let (_tx, _rx) = crossbeam_channel::unbounded::<Metric>(); // Drop metrics from setup
-        // We probably want to print them.
+                                                                   // We probably want to print them.
         let (tx_print, rx_print) = crossbeam_channel::unbounded();
         std::thread::spawn(move || {
             while let Ok(Metric::Log { message }) = rx_print.recv() {
@@ -1069,15 +1210,34 @@ impl Engine {
         });
 
         let shared_data = self.shared_data.clone();
-        let tokio_rt = Arc::new(tokio::runtime::Builder::new_current_thread().enable_all().build()?);
+        let tokio_rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+        );
         let client = {
             let _guard = tokio_rt.enter();
             HttpClient::new()
         };
-        
+
         let result = context.with(|ctx| {
-            crate::bridge::register_globals_sync(&ctx, tx_print, client, shared_data, 0, aggregator, tokio_rt, None, None, false)?;
-            let module = Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content)?;
+            crate::bridge::register_globals_sync(
+                &ctx,
+                tx_print,
+                client,
+                shared_data,
+                0,
+                aggregator,
+                tokio_rt,
+                None,
+                None,
+                false,
+            )?;
+            let module = Module::declare(
+                ctx.clone(),
+                script_path.to_string_lossy().to_string(),
+                script_content,
+            )?;
             let (module, _) = module.eval()?;
 
             if let Ok(setup_fn) = module.get::<_, Function>("setup") {
@@ -1101,14 +1261,29 @@ impl Engine {
         let (tx, _rx) = crossbeam_channel::unbounded::<Metric>();
         let shared_data = self.shared_data.clone();
         let aggregator = Arc::new(std::sync::RwLock::new(StatsAggregator::new()));
-        let tokio_rt = Arc::new(tokio::runtime::Builder::new_current_thread().enable_all().build()?);
+        let tokio_rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+        );
         let client = {
             let _guard = tokio_rt.enter();
             HttpClient::new()
         };
 
         context.with(|ctx| {
-            crate::bridge::register_globals_sync(&ctx, tx, client, shared_data, 0, aggregator, tokio_rt, None, None, false)?;
+            crate::bridge::register_globals_sync(
+                &ctx,
+                tx,
+                client,
+                shared_data,
+                0,
+                aggregator,
+                tokio_rt,
+                None,
+                None,
+                false,
+            )?;
             let _ = ctx.eval::<Value, _>(script_content)?;
             Ok::<(), anyhow::Error>(())
         })?;
@@ -1120,7 +1295,13 @@ impl Engine {
         Ok(())
     }
 
-    fn run_teardown(&self, script_path: &Path, script_content: &str, data: Option<String>, aggregator: SharedAggregator) -> Result<()> {
+    fn run_teardown(
+        &self,
+        script_path: &Path,
+        script_content: &str,
+        data: Option<String>,
+        aggregator: SharedAggregator,
+    ) -> Result<()> {
         let (runtime, context) = Self::create_runtime()?;
         let (tx_print, rx_print) = crossbeam_channel::unbounded();
         std::thread::spawn(move || {
@@ -1130,15 +1311,34 @@ impl Engine {
         });
 
         let shared_data = self.shared_data.clone();
-        let tokio_rt = Arc::new(tokio::runtime::Builder::new_current_thread().enable_all().build()?);
+        let tokio_rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+        );
         let client = {
             let _guard = tokio_rt.enter();
             HttpClient::new()
         };
 
         let _ = context.with(|ctx| {
-            crate::bridge::register_globals_sync(&ctx, tx_print, client, shared_data, 0, aggregator, tokio_rt, None, None, false)?;
-            let module = Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content)?;
+            crate::bridge::register_globals_sync(
+                &ctx,
+                tx_print,
+                client,
+                shared_data,
+                0,
+                aggregator,
+                tokio_rt,
+                None,
+                None,
+                false,
+            )?;
+            let module = Module::declare(
+                ctx.clone(),
+                script_path.to_string_lossy().to_string(),
+                script_content,
+            )?;
             let (module, _) = module.eval()?;
 
             if let Ok(teardown_fn) = module.get::<_, Function>("teardown") {

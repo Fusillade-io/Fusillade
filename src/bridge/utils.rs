@@ -1,7 +1,7 @@
-use rquickjs::{Ctx, Function, Object, Result, Value, Array, IntoJs};
-use uuid::Uuid;
-use rand::{Rng, distributions::Alphanumeric};
+use rand::{distributions::Alphanumeric, Rng};
+use rquickjs::{Array, Ctx, Function, IntoJs, Object, Result, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
+use uuid::Uuid;
 
 // Global counter for sequential IDs (thread-safe)
 static SEQUENTIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -11,7 +11,9 @@ fn generate_uuid() -> String {
 }
 
 fn random_int(min: i32, max: i32) -> i32 {
-    if min >= max { return min; }
+    if min >= max {
+        return min;
+    }
     rand::thread_rng().gen_range(min..=max)
 }
 
@@ -25,7 +27,9 @@ fn random_string(len: usize) -> String {
 
 fn random_item<'js>(_ctx: Ctx<'js>, arr: Array<'js>) -> Result<Option<Value<'js>>> {
     let len = arr.len();
-    if len == 0 { return Ok(None); }
+    if len == 0 {
+        return Ok(None);
+    }
     let idx = rand::thread_rng().gen_range(0..len);
     arr.get(idx).map(Some)
 }
@@ -41,7 +45,8 @@ fn random_email() -> String {
 
 fn random_phone() -> String {
     let mut rng = rand::thread_rng();
-    format!("+1-{:03}-{:03}-{:04}",
+    format!(
+        "+1-{:03}-{:03}-{:04}",
         rng.gen_range(200..999),
         rng.gen_range(200..999),
         rng.gen_range(1000..9999)
@@ -66,10 +71,42 @@ impl<'js> IntoJs<'js> for RandomName {
 }
 
 fn random_name() -> RandomName {
-    let first_names = ["James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda",
-                       "William", "Elizabeth", "David", "Susan", "Richard", "Jessica", "Joseph", "Sarah"];
-    let last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
-                      "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas"];
+    let first_names = [
+        "James",
+        "Mary",
+        "John",
+        "Patricia",
+        "Robert",
+        "Jennifer",
+        "Michael",
+        "Linda",
+        "William",
+        "Elizabeth",
+        "David",
+        "Susan",
+        "Richard",
+        "Jessica",
+        "Joseph",
+        "Sarah",
+    ];
+    let last_names = [
+        "Smith",
+        "Johnson",
+        "Williams",
+        "Brown",
+        "Jones",
+        "Garcia",
+        "Miller",
+        "Davis",
+        "Rodriguez",
+        "Martinez",
+        "Hernandez",
+        "Lopez",
+        "Gonzalez",
+        "Wilson",
+        "Anderson",
+        "Thomas",
+    ];
 
     let mut rng = rand::thread_rng();
     let first = first_names[rng.gen_range(0..first_names.len())].to_string();
@@ -84,7 +121,13 @@ fn random_date(start_year: i32, end_year: i32) -> String {
     let year = rng.gen_range(start_year..=end_year);
     let month = rng.gen_range(1..=12);
     let max_day = match month {
-        2 => if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 29 } else { 28 },
+        2 => {
+            if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
         4 | 6 | 9 | 11 => 30,
         _ => 31,
     };
@@ -104,47 +147,59 @@ pub fn register_sync(ctx: &Ctx, worker_id: usize) -> Result<()> {
     let utils = Object::new(ctx.clone())?;
 
     // uuid() -> String
-    utils.set("uuid", Function::new(ctx.clone(), || -> String {
-        generate_uuid()
-    }))?;
+    utils.set(
+        "uuid",
+        Function::new(ctx.clone(), || -> String { generate_uuid() }),
+    )?;
 
     // randomInt(min, max) -> i32
-    utils.set("randomInt", Function::new(ctx.clone(), |min: i32, max: i32| -> i32 {
-        random_int(min, max)
-    }))?;
+    utils.set(
+        "randomInt",
+        Function::new(ctx.clone(), |min: i32, max: i32| -> i32 {
+            random_int(min, max)
+        }),
+    )?;
 
     // randomString(length) -> String
-    utils.set("randomString", Function::new(ctx.clone(), |len: usize| -> String {
-        random_string(len)
-    }))?;
+    utils.set(
+        "randomString",
+        Function::new(ctx.clone(), |len: usize| -> String { random_string(len) }),
+    )?;
 
     // randomItem(Array) -> Value
     utils.set("randomItem", Function::new(ctx.clone(), random_item))?;
 
     // randomEmail() -> String
-    utils.set("randomEmail", Function::new(ctx.clone(), || -> String {
-        random_email()
-    }))?;
+    utils.set(
+        "randomEmail",
+        Function::new(ctx.clone(), || -> String { random_email() }),
+    )?;
 
     // randomPhone() -> String
-    utils.set("randomPhone", Function::new(ctx.clone(), || -> String {
-        random_phone()
-    }))?;
+    utils.set(
+        "randomPhone",
+        Function::new(ctx.clone(), || -> String { random_phone() }),
+    )?;
 
     // randomName() -> { first, last, full }
-    utils.set("randomName", Function::new(ctx.clone(), || -> RandomName {
-        random_name()
-    }))?;
+    utils.set(
+        "randomName",
+        Function::new(ctx.clone(), || -> RandomName { random_name() }),
+    )?;
 
     // randomDate(startYear, endYear) -> String (YYYY-MM-DD)
-    utils.set("randomDate", Function::new(ctx.clone(), |start: i32, end: i32| -> String {
-        random_date(start, end)
-    }))?;
+    utils.set(
+        "randomDate",
+        Function::new(ctx.clone(), |start: i32, end: i32| -> String {
+            random_date(start, end)
+        }),
+    )?;
 
     // sequentialId() -> u64 (unique across workers)
-    utils.set("sequentialId", Function::new(ctx.clone(), move || -> u64 {
-        sequential_id(worker_id)
-    }))?;
+    utils.set(
+        "sequentialId",
+        Function::new(ctx.clone(), move || -> u64 { sequential_id(worker_id) }),
+    )?;
 
     ctx.globals().set("utils", utils)?;
     Ok(())

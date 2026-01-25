@@ -1,13 +1,13 @@
-use rquickjs::{Ctx, Object, Result, Function};
 use md5::Md5;
+use rquickjs::{Ctx, Function, Object, Result};
 use sha1::Sha1;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 fn hmac_md5(key: &[u8], data: &[u8]) -> String {
     // Simple HMAC implementation for MD5
     const BLOCK_SIZE: usize = 64;
     let mut key_block = [0u8; BLOCK_SIZE];
-    
+
     if key.len() > BLOCK_SIZE {
         let mut hasher = Md5::new();
         hasher.update(key);
@@ -16,15 +16,15 @@ fn hmac_md5(key: &[u8], data: &[u8]) -> String {
     } else {
         key_block[..key.len()].copy_from_slice(key);
     }
-    
+
     let i_key_pad: Vec<u8> = key_block.iter().map(|b| b ^ 0x36).collect();
     let o_key_pad: Vec<u8> = key_block.iter().map(|b| b ^ 0x5c).collect();
-    
+
     let mut inner_hasher = Md5::new();
     inner_hasher.update(&i_key_pad);
     inner_hasher.update(data);
     let inner_hash = inner_hasher.finalize();
-    
+
     let mut outer_hasher = Md5::new();
     outer_hasher.update(&o_key_pad);
     outer_hasher.update(inner_hash);
@@ -34,7 +34,7 @@ fn hmac_md5(key: &[u8], data: &[u8]) -> String {
 fn hmac_sha1(key: &[u8], data: &[u8]) -> String {
     const BLOCK_SIZE: usize = 64;
     let mut key_block = [0u8; BLOCK_SIZE];
-    
+
     if key.len() > BLOCK_SIZE {
         let mut hasher = Sha1::new();
         hasher.update(key);
@@ -43,15 +43,15 @@ fn hmac_sha1(key: &[u8], data: &[u8]) -> String {
     } else {
         key_block[..key.len()].copy_from_slice(key);
     }
-    
+
     let i_key_pad: Vec<u8> = key_block.iter().map(|b| b ^ 0x36).collect();
     let o_key_pad: Vec<u8> = key_block.iter().map(|b| b ^ 0x5c).collect();
-    
+
     let mut inner_hasher = Sha1::new();
     inner_hasher.update(&i_key_pad);
     inner_hasher.update(data);
     let inner_hash = inner_hasher.finalize();
-    
+
     let mut outer_hasher = Sha1::new();
     outer_hasher.update(&o_key_pad);
     outer_hasher.update(inner_hash);
@@ -61,7 +61,7 @@ fn hmac_sha1(key: &[u8], data: &[u8]) -> String {
 fn hmac_sha256(key: &[u8], data: &[u8]) -> String {
     const BLOCK_SIZE: usize = 64;
     let mut key_block = [0u8; BLOCK_SIZE];
-    
+
     if key.len() > BLOCK_SIZE {
         let mut hasher = Sha256::new();
         hasher.update(key);
@@ -70,15 +70,15 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> String {
     } else {
         key_block[..key.len()].copy_from_slice(key);
     }
-    
+
     let i_key_pad: Vec<u8> = key_block.iter().map(|b| b ^ 0x36).collect();
     let o_key_pad: Vec<u8> = key_block.iter().map(|b| b ^ 0x5c).collect();
-    
+
     let mut inner_hasher = Sha256::new();
     inner_hasher.update(&i_key_pad);
     inner_hasher.update(data);
     let inner_hash = inner_hasher.finalize();
-    
+
     let mut outer_hasher = Sha256::new();
     outer_hasher.update(&o_key_pad);
     outer_hasher.update(inner_hash);
@@ -88,32 +88,47 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> String {
 pub fn register_sync<'js>(ctx: &Ctx<'js>) -> Result<()> {
     let crypto = Object::new(ctx.clone())?;
 
-    crypto.set("md5", Function::new(ctx.clone(), move |data: String| -> String {
-        let mut hasher = Md5::new();
-        hasher.update(data.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }))?;
+    crypto.set(
+        "md5",
+        Function::new(ctx.clone(), move |data: String| -> String {
+            let mut hasher = Md5::new();
+            hasher.update(data.as_bytes());
+            format!("{:x}", hasher.finalize())
+        }),
+    )?;
 
-    crypto.set("sha1", Function::new(ctx.clone(), move |data: String| -> String {
-        let mut hasher = Sha1::new();
-        hasher.update(data.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }))?;
+    crypto.set(
+        "sha1",
+        Function::new(ctx.clone(), move |data: String| -> String {
+            let mut hasher = Sha1::new();
+            hasher.update(data.as_bytes());
+            format!("{:x}", hasher.finalize())
+        }),
+    )?;
 
-    crypto.set("sha256", Function::new(ctx.clone(), move |data: String| -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(data.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }))?;
+    crypto.set(
+        "sha256",
+        Function::new(ctx.clone(), move |data: String| -> String {
+            let mut hasher = Sha256::new();
+            hasher.update(data.as_bytes());
+            format!("{:x}", hasher.finalize())
+        }),
+    )?;
 
-    crypto.set("hmac", Function::new(ctx.clone(), move |algorithm: String, key: String, data: String| -> String {
-        match algorithm.as_str() {
-            "md5" => hmac_md5(key.as_bytes(), data.as_bytes()),
-            "sha1" => hmac_sha1(key.as_bytes(), data.as_bytes()),
-            "sha256" => hmac_sha256(key.as_bytes(), data.as_bytes()),
-            _ => "unsupported algorithm".to_string(),
-        }
-    }))?;
+    crypto.set(
+        "hmac",
+        Function::new(
+            ctx.clone(),
+            move |algorithm: String, key: String, data: String| -> String {
+                match algorithm.as_str() {
+                    "md5" => hmac_md5(key.as_bytes(), data.as_bytes()),
+                    "sha1" => hmac_sha1(key.as_bytes(), data.as_bytes()),
+                    "sha256" => hmac_sha256(key.as_bytes(), data.as_bytes()),
+                    _ => "unsupported algorithm".to_string(),
+                }
+            },
+        ),
+    )?;
 
     ctx.globals().set("crypto", crypto)?;
     Ok(())
@@ -124,7 +139,7 @@ mod tests {
     use super::*;
     use md5::Md5;
     use sha1::Sha1;
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     // --- HMAC Tests ---
 
@@ -149,7 +164,10 @@ mod tests {
         let result = hmac_sha256(b"key", b"The quick brown fox jumps over the lazy dog");
         assert_eq!(result.len(), 64);
         // Known test vector
-        assert_eq!(result, "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
+        assert_eq!(
+            result,
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
     }
 
     #[test]
@@ -216,7 +234,10 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(b"hello");
         let result = format!("{:x}", hasher.finalize());
-        assert_eq!(result, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+        assert_eq!(
+            result,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 
     #[test]
@@ -232,6 +253,9 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(b"");
         let result = format!("{:x}", hasher.finalize());
-        assert_eq!(result, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            result,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }

@@ -1,16 +1,16 @@
-use std::collections::{HashMap, VecDeque};
-use tokio::time::Duration;
 use hdrhistogram::Histogram;
-use serde::{Serialize, Deserialize};
-use std::sync::Arc;
 use parking_lot::RwLock as ParkingLotRwLock;
 use rquickjs::class::Trace;
 use rquickjs::JsLifetime;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use tokio::time::Duration;
 
-pub mod html;
-pub mod db;
-pub mod otlp;
 pub mod csv;
+pub mod db;
+pub mod html;
+pub mod otlp;
 
 // SharedAggregator uses std::sync::RwLock for JS bridge compatibility (JsLifetime trait)
 pub type SharedAggregator = Arc<std::sync::RwLock<StatsAggregator>>;
@@ -85,7 +85,9 @@ impl ShardedAggregator {
                 let merged_stats = merged.requests.entry(name.clone()).or_default();
                 merged_stats.total_requests += stats.total_requests;
                 merged_stats.total_duration += stats.total_duration;
-                if merged_stats.min_duration.is_none() || stats.min_duration < merged_stats.min_duration {
+                if merged_stats.min_duration.is_none()
+                    || stats.min_duration < merged_stats.min_duration
+                {
                     merged_stats.min_duration = stats.min_duration;
                 }
                 if stats.max_duration > merged_stats.max_duration {
@@ -244,7 +246,6 @@ pub struct ReportStats {
     pub gauges: HashMap<String, f64>,
 }
 
-
 #[derive(Serialize, Deserialize)]
 pub struct HistogramReport {
     pub avg: f64,
@@ -368,14 +369,20 @@ impl StatsAggregator {
 
     pub fn add(&mut self, metric: Metric) {
         match metric {
-            Metric::Request { timings, status, error, name, tags } => {
+            Metric::Request {
+                timings,
+                status,
+                error,
+                name,
+                tags,
+            } => {
                 self.total_requests += 1;
                 self.total_duration += timings.duration;
-                
+
                 if self.min_duration.is_none_or(|min| timings.duration < min) {
                     self.min_duration = Some(timings.duration);
                 }
-                
+
                 if timings.duration > self.max_duration {
                     self.max_duration = timings.duration;
                 }
@@ -397,7 +404,9 @@ impl StatsAggregator {
                     sorted_tags.sort_by_key(|a| a.0);
                     full_name.push('{');
                     for (i, (k, v)) in sorted_tags.iter().enumerate() {
-                        if i > 0 { full_name.push(','); }
+                        if i > 0 {
+                            full_name.push(',');
+                        }
                         full_name.push_str(k);
                         full_name.push(':');
                         full_name.push_str(v);
@@ -409,7 +418,10 @@ impl StatsAggregator {
                 let req_stats = self.requests.entry(full_name).or_default();
                 req_stats.total_requests += 1;
                 req_stats.total_duration += timings.duration;
-                if req_stats.min_duration.is_none_or(|min| timings.duration < min) {
+                if req_stats
+                    .min_duration
+                    .is_none_or(|min| timings.duration < min)
+                {
                     req_stats.min_duration = Some(timings.duration);
                 }
                 if timings.duration > req_stats.max_duration {
@@ -419,7 +431,7 @@ impl StatsAggregator {
                 if error.is_some() {
                     req_stats.error_count += 1;
                 }
-                
+
                 // Aggregate granular timings
                 req_stats.total_blocked += timings.blocked;
                 req_stats.total_connecting += timings.connecting;
@@ -447,20 +459,38 @@ impl StatsAggregator {
                     self.logs.pop_front();
                 }
             }
-            Metric::Histogram { name, value, tags: _ } => {
-                let h = self.histograms.entry(name.clone()).or_insert_with(|| Histogram::<u64>::new_with_bounds(1, 60 * 60 * 1000 * 1000, 2).unwrap());
+            Metric::Histogram {
+                name,
+                value,
+                tags: _,
+            } => {
+                let h = self.histograms.entry(name.clone()).or_insert_with(|| {
+                    Histogram::<u64>::new_with_bounds(1, 60 * 60 * 1000 * 1000, 2).unwrap()
+                });
                 // Assuming value is compatible with u64 (like micros or simple counts)
                 // If it's a float, we might need to cast.
                 let _ = h.record(value as u64);
                 *self.histogram_sums.entry(name).or_insert(0.0) += value;
             }
-            Metric::Counter { name, value, tags: _ } => {
+            Metric::Counter {
+                name,
+                value,
+                tags: _,
+            } => {
                 *self.counters.entry(name).or_insert(0.0) += value;
             }
-            Metric::Gauge { name, value, tags: _ } => {
+            Metric::Gauge {
+                name,
+                value,
+                tags: _,
+            } => {
                 self.gauges.insert(name, value);
             }
-            Metric::Rate { name, success, tags: _ } => {
+            Metric::Rate {
+                name,
+                success,
+                tags: _,
+            } => {
                 let entry = self.rates.entry(name).or_insert((0, 0));
                 entry.0 += 1;
                 if success {
@@ -486,36 +516,44 @@ impl StatsAggregator {
             };
 
             let count = stats.total_requests as f64;
-            let (avg_blocked, avg_conn, avg_tls, avg_send, avg_wait, avg_recv, avg_resp_size) = if stats.total_requests > 0 {
-                 (
-                    stats.total_blocked.as_millis() as f64 / count,
-                    stats.total_connecting.as_millis() as f64 / count,
-                    stats.total_tls_handshaking.as_millis() as f64 / count,
-                    stats.total_sending.as_millis() as f64 / count,
-                    stats.total_waiting.as_millis() as f64 / count,
-                    stats.total_receiving.as_millis() as f64 / count,
-                    stats.total_response_size as f64 / count
-                 )
-            } else {
-                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-            };
+            let (avg_blocked, avg_conn, avg_tls, avg_send, avg_wait, avg_recv, avg_resp_size) =
+                if stats.total_requests > 0 {
+                    (
+                        stats.total_blocked.as_millis() as f64 / count,
+                        stats.total_connecting.as_millis() as f64 / count,
+                        stats.total_tls_handshaking.as_millis() as f64 / count,
+                        stats.total_sending.as_millis() as f64 / count,
+                        stats.total_waiting.as_millis() as f64 / count,
+                        stats.total_receiving.as_millis() as f64 / count,
+                        stats.total_response_size as f64 / count,
+                    )
+                } else {
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                };
 
-            grouped_requests.insert(name.clone(), RequestReport {
-                total_requests: stats.total_requests,
-                min_latency_ms: stats.min_duration.unwrap_or_default().as_millis(),
-                max_latency_ms: stats.max_duration.as_millis(),
-                avg_latency_ms: req_avg,
-                p95_latency_ms: Duration::from_micros(stats.histogram.value_at_quantile(0.95)).as_secs_f64() * 1000.0,
-                p99_latency_ms: Duration::from_micros(stats.histogram.value_at_quantile(0.99)).as_secs_f64() * 1000.0,
-                error_count: stats.error_count,
-                avg_blocked_ms: avg_blocked,
-                avg_connecting_ms: avg_conn,
-                avg_tls_handshaking_ms: avg_tls,
-                avg_sending_ms: avg_send,
-                avg_waiting_ms: avg_wait,
-                avg_receiving_ms: avg_recv,
-                avg_response_size: avg_resp_size,
-            });
+            grouped_requests.insert(
+                name.clone(),
+                RequestReport {
+                    total_requests: stats.total_requests,
+                    min_latency_ms: stats.min_duration.unwrap_or_default().as_millis(),
+                    max_latency_ms: stats.max_duration.as_millis(),
+                    avg_latency_ms: req_avg,
+                    p95_latency_ms: Duration::from_micros(stats.histogram.value_at_quantile(0.95))
+                        .as_secs_f64()
+                        * 1000.0,
+                    p99_latency_ms: Duration::from_micros(stats.histogram.value_at_quantile(0.99))
+                        .as_secs_f64()
+                        * 1000.0,
+                    error_count: stats.error_count,
+                    avg_blocked_ms: avg_blocked,
+                    avg_connecting_ms: avg_conn,
+                    avg_tls_handshaking_ms: avg_tls,
+                    avg_sending_ms: avg_send,
+                    avg_waiting_ms: avg_wait,
+                    avg_receiving_ms: avg_recv,
+                    avg_response_size: avg_resp_size,
+                },
+            );
         }
 
         // Custom Metrics Reports
@@ -524,22 +562,36 @@ impl StatsAggregator {
             let sum = self.histogram_sums.get(name).cloned().unwrap_or(0.0);
             let count = h.len();
             let avg = if count > 0 { sum / count as f64 } else { 0.0 };
-            
-            hist_reports.insert(name.clone(), HistogramReport {
-                avg,
-                min: h.min() as f64,
-                max: h.max() as f64,
-                p90: h.value_at_quantile(0.9) as f64,
-                p95: h.value_at_quantile(0.95) as f64,
-                p99: h.value_at_quantile(0.99) as f64,
-                count,
-            });
+
+            hist_reports.insert(
+                name.clone(),
+                HistogramReport {
+                    avg,
+                    min: h.min() as f64,
+                    max: h.max() as f64,
+                    p90: h.value_at_quantile(0.9) as f64,
+                    p95: h.value_at_quantile(0.95) as f64,
+                    p99: h.value_at_quantile(0.99) as f64,
+                    count,
+                },
+            );
         }
 
         let mut rate_reports = HashMap::new();
         for (name, &(total, success)) in &self.rates {
-            let rate = if total > 0 { success as f64 / total as f64 } else { 0.0 };
-            rate_reports.insert(name.clone(), RateReport { total, success, rate });
+            let rate = if total > 0 {
+                success as f64 / total as f64
+            } else {
+                0.0
+            };
+            rate_reports.insert(
+                name.clone(),
+                RateReport {
+                    total,
+                    success,
+                    rate,
+                },
+            );
         }
 
         ReportStats {
@@ -548,10 +600,18 @@ impl StatsAggregator {
             avg_latency_ms: avg_latency,
             min_latency_ms: self.min_duration.unwrap_or_default().as_millis(),
             max_latency_ms: self.max_duration.as_millis(),
-            p50_latency_ms: Duration::from_micros(self.histogram.value_at_quantile(0.5)).as_secs_f64() * 1000.0,
-            p90_latency_ms: Duration::from_micros(self.histogram.value_at_quantile(0.9)).as_secs_f64() * 1000.0,
-            p95_latency_ms: Duration::from_micros(self.histogram.value_at_quantile(0.95)).as_secs_f64() * 1000.0,
-            p99_latency_ms: Duration::from_micros(self.histogram.value_at_quantile(0.99)).as_secs_f64() * 1000.0,
+            p50_latency_ms: Duration::from_micros(self.histogram.value_at_quantile(0.5))
+                .as_secs_f64()
+                * 1000.0,
+            p90_latency_ms: Duration::from_micros(self.histogram.value_at_quantile(0.9))
+                .as_secs_f64()
+                * 1000.0,
+            p95_latency_ms: Duration::from_micros(self.histogram.value_at_quantile(0.95))
+                .as_secs_f64()
+                * 1000.0,
+            p99_latency_ms: Duration::from_micros(self.histogram.value_at_quantile(0.99))
+                .as_secs_f64()
+                * 1000.0,
             status_codes: self.status_codes.clone(),
             errors: self.errors.clone(),
             checks: self.checks.clone(),
@@ -570,32 +630,53 @@ impl StatsAggregator {
     }
 
     pub fn report(&self) {
-        if self.total_requests == 0 && self.checks.is_empty() && self.counters.is_empty() && self.gauges.is_empty() && self.histograms.is_empty() && self.rates.is_empty() {
+        if self.total_requests == 0
+            && self.checks.is_empty()
+            && self.counters.is_empty()
+            && self.gauges.is_empty()
+            && self.histograms.is_empty()
+            && self.rates.is_empty()
+        {
             println!("\n--- Test Summary ---");
             println!("No metrics collected.");
             return;
         }
 
         println!("\n--- Test Summary ---");
-        
+
         if self.total_requests > 0 {
             let avg_duration = self.total_duration / self.total_requests as u32;
             println!("Total Requests: {}", self.total_requests);
             println!("Avg Latency:    {:?}", avg_duration);
-            println!("Min Latency:    {:?}", self.min_duration.unwrap_or_default());
+            println!(
+                "Min Latency:    {:?}",
+                self.min_duration.unwrap_or_default()
+            );
             println!("Max Latency:    {:?}", self.max_duration);
-            println!("P50 Latency:    {:?}", Duration::from_micros(self.histogram.value_at_quantile(0.5)));
-            println!("P90 Latency:    {:?}", Duration::from_micros(self.histogram.value_at_quantile(0.9)));
-            println!("P95 Latency:    {:?}", Duration::from_micros(self.histogram.value_at_quantile(0.95)));
-            println!("P99 Latency:    {:?}", Duration::from_micros(self.histogram.value_at_quantile(0.99)));
-            
+            println!(
+                "P50 Latency:    {:?}",
+                Duration::from_micros(self.histogram.value_at_quantile(0.5))
+            );
+            println!(
+                "P90 Latency:    {:?}",
+                Duration::from_micros(self.histogram.value_at_quantile(0.9))
+            );
+            println!(
+                "P95 Latency:    {:?}",
+                Duration::from_micros(self.histogram.value_at_quantile(0.95))
+            );
+            println!(
+                "P99 Latency:    {:?}",
+                Duration::from_micros(self.histogram.value_at_quantile(0.99))
+            );
+
             println!("\nStatus Codes:");
             let mut codes: Vec<_> = self.status_codes.iter().collect();
             codes.sort_by_key(|a| a.0);
             for (code, count) in codes {
                 println!("  {}: {}", code, count);
             }
-            
+
             // Print data transfer
             let mb_sent = self.total_data_sent as f64 / 1_048_576.0;
             let mb_recv = self.total_data_received as f64 / 1_048_576.0;
@@ -634,7 +715,10 @@ impl StatsAggregator {
                 let fail = total - passes;
                 let percent = (*passes as f64 / *total as f64) * 100.0;
                 if fail > 0 {
-                    println!("  ✓ {} : {:.2}% ({} passed, {} failed)", name, percent, passes, fail);
+                    println!(
+                        "  ✓ {} : {:.2}% ({} passed, {} failed)",
+                        name, percent, passes, fail
+                    );
                 } else {
                     println!("  ✓ {} : 100% ({} passed)", name, passes);
                 }
@@ -668,7 +752,11 @@ impl StatsAggregator {
         if !self.rates.is_empty() {
             println!("\nRates:");
             for (name, (total, success)) in &self.rates {
-                let rate = if *total > 0 { *success as f64 / *total as f64 } else { 0.0 };
+                let rate = if *total > 0 {
+                    *success as f64 / *total as f64
+                } else {
+                    0.0
+                };
                 println!("  {}: {:.2}% ({}/{})", name, rate * 100.0, success, total);
             }
         }
@@ -684,14 +772,16 @@ impl StatsAggregator {
         for (metric_name, thresholds) in criteria {
             for threshold in thresholds {
                 let parts: Vec<&str> = threshold.split_whitespace().collect();
-                if parts.len() < 3 { continue; }
+                if parts.len() < 3 {
+                    continue;
+                }
 
                 let check_type = parts[0];
                 let operator = parts[1];
                 let value: f64 = parts[2].parse().unwrap_or(0.0);
 
                 let actual_value = if metric_name == "http_req_duration" {
-                     match check_type {
+                    match check_type {
                         "p95" => report.p95_latency_ms,
                         "p99" => report.p99_latency_ms,
                         "avg" => report.avg_latency_ms,
@@ -700,9 +790,14 @@ impl StatsAggregator {
                         _ => 0.0,
                     }
                 } else if metric_name == "http_req_failed" {
-                     if check_type == "rate" {
+                    if check_type == "rate" {
                         if report.total_requests > 0 {
-                            let total_errors: usize = report.errors.values().sum::<usize>() + report.grouped_requests.values().map(|r| r.error_count).sum::<usize>();
+                            let total_errors: usize = report.errors.values().sum::<usize>()
+                                + report
+                                    .grouped_requests
+                                    .values()
+                                    .map(|r| r.error_count)
+                                    .sum::<usize>();
                             total_errors as f64 / report.total_requests as f64
                         } else {
                             0.0
@@ -712,7 +807,7 @@ impl StatsAggregator {
                     }
                 } else if let Some(h) = report.histograms.get(metric_name) {
                     // Custom Histogram
-                     match check_type {
+                    match check_type {
                         "p95" => h.p95,
                         "p99" => h.p99,
                         "p90" => h.p90,
@@ -724,13 +819,25 @@ impl StatsAggregator {
                     }
                 } else if let Some(r) = report.rates.get(metric_name) {
                     // Custom Rate
-                    if check_type == "rate" { r.rate } else { 0.0 }
+                    if check_type == "rate" {
+                        r.rate
+                    } else {
+                        0.0
+                    }
                 } else if let Some(val) = report.counters.get(metric_name) {
                     // Custom Counter
-                    if check_type == "count" || check_type == "value" { *val } else { 0.0 }
+                    if check_type == "count" || check_type == "value" {
+                        *val
+                    } else {
+                        0.0
+                    }
                 } else if let Some(val) = report.gauges.get(metric_name) {
                     // Custom Gauge
-                    if check_type == "value" { *val } else { 0.0 }
+                    if check_type == "value" {
+                        *val
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
                 };
@@ -745,7 +852,10 @@ impl StatsAggregator {
                 };
 
                 if !pass {
-                    failures.push(format!("Threshold FAILED: {} {} {} (actual: {:.2})", metric_name, check_type, threshold, actual_value));
+                    failures.push(format!(
+                        "Threshold FAILED: {} {} {} (actual: {:.2})",
+                        metric_name, check_type, threshold, actual_value
+                    ));
                 }
             }
         }
@@ -761,7 +871,7 @@ mod tests {
     #[test]
     fn test_aggregator_math() {
         let mut agg = StatsAggregator::new();
-        
+
         agg.add(Metric::Request {
             name: "test".to_string(),
             timings: RequestTimings {
@@ -772,7 +882,7 @@ mod tests {
             error: None,
             tags: HashMap::new(),
         });
-        
+
         agg.add(Metric::Request {
             name: "test".to_string(),
             timings: RequestTimings {
@@ -794,7 +904,7 @@ mod tests {
     #[test]
     fn test_aggregator_errors() {
         let mut agg = StatsAggregator::new();
-        
+
         agg.add(Metric::Request {
             name: "test".to_string(),
             timings: RequestTimings {
@@ -809,14 +919,20 @@ mod tests {
         assert_eq!(agg.total_requests, 1);
         assert_eq!(*agg.errors.get("Timeout").unwrap(), 1);
     }
-    
+
     #[test]
     fn test_aggregator_checks() {
         let mut agg = StatsAggregator::new();
-        
-        agg.add(Metric::Check { name: "status is 200".to_string(), success: true });
-        agg.add(Metric::Check { name: "status is 200".to_string(), success: false });
-        
+
+        agg.add(Metric::Check {
+            name: "status is 200".to_string(),
+            success: true,
+        });
+        agg.add(Metric::Check {
+            name: "status is 200".to_string(),
+            success: false,
+        });
+
         let (total, passes) = agg.checks.get("status is 200").unwrap();
         assert_eq!(*total, 2);
         assert_eq!(*passes, 1);
@@ -825,7 +941,7 @@ mod tests {
     #[test]
     fn test_aggregator_histogram() {
         let mut agg = StatsAggregator::new();
-        
+
         // Add 100 requests with duration i * 1ms
         for i in 1..=100 {
             agg.add(Metric::Request {
@@ -843,7 +959,7 @@ mod tests {
         // P50 should be around 50ms (50000us)
         let p50 = agg.histogram.value_at_quantile(0.5);
         assert!((49000..=51000).contains(&p50), "P50 was {}", p50);
-        
+
         // P99 should be around 99ms (99000us)
         let p99 = agg.histogram.value_at_quantile(0.99);
         assert!((98000..=100000).contains(&p99), "P99 was {}", p99);
@@ -862,15 +978,15 @@ mod tests {
             error: None,
             tags: HashMap::new(),
         });
-        
+
         let report = agg.to_report();
         assert_eq!(report.total_requests, 1);
         assert_eq!(report.avg_latency_ms, 100.0);
-        
+
         let json = agg.to_json();
         assert!(json.contains("\"total_requests\": 1"));
         assert!(json.contains("\"avg_latency_ms\": 100.0"));
-        
+
         let html = crate::stats::html::generate_html(&report);
         assert!(html.contains("Fusillade Load Test Report"));
         assert!(html.contains("100.00 ms"));
@@ -879,7 +995,7 @@ mod tests {
     #[test]
     fn test_validate_criteria() {
         let mut agg = StatsAggregator::new();
-        
+
         // Add some successful requests
         for i in 1..=100 {
             agg.add(Metric::Request {
@@ -896,17 +1012,30 @@ mod tests {
 
         let mut criteria = HashMap::new();
         // Should pass: p95 is ~95ms, which is < 200
-        criteria.insert("http_req_duration".to_string(), vec!["p95 < 200".to_string()]);
+        criteria.insert(
+            "http_req_duration".to_string(),
+            vec!["p95 < 200".to_string()],
+        );
         // Should pass: rate is 0, which is < 0.1
-        criteria.insert("http_req_failed".to_string(), vec!["rate < 0.1".to_string()]);
+        criteria.insert(
+            "http_req_failed".to_string(),
+            vec!["rate < 0.1".to_string()],
+        );
 
         let failures = agg.validate_thresholds(&criteria);
-        assert!(failures.is_empty(), "Expected no failures, got: {:?}", failures);
+        assert!(
+            failures.is_empty(),
+            "Expected no failures, got: {:?}",
+            failures
+        );
 
         // Test failing criteria
         let mut fail_criteria = HashMap::new();
-        fail_criteria.insert("http_req_duration".to_string(), vec!["p95 < 50".to_string()]);
-        
+        fail_criteria.insert(
+            "http_req_duration".to_string(),
+            vec!["p95 < 50".to_string()],
+        );
+
         let failures = agg.validate_thresholds(&fail_criteria);
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("FAILED"));
@@ -927,15 +1056,24 @@ mod tests {
         });
 
         let mut c = HashMap::new();
-        c.insert("http_req_duration".to_string(), vec!["avg <= 100".to_string()]);
+        c.insert(
+            "http_req_duration".to_string(),
+            vec!["avg <= 100".to_string()],
+        );
         assert!(agg.validate_thresholds(&c).is_empty());
 
         let mut c = HashMap::new();
-        c.insert("http_req_duration".to_string(), vec!["avg >= 100".to_string()]);
+        c.insert(
+            "http_req_duration".to_string(),
+            vec!["avg >= 100".to_string()],
+        );
         assert!(agg.validate_thresholds(&c).is_empty());
 
         let mut c = HashMap::new();
-        c.insert("http_req_duration".to_string(), vec!["avg > 100".to_string()]);
+        c.insert(
+            "http_req_duration".to_string(),
+            vec!["avg > 100".to_string()],
+        );
         assert_eq!(agg.validate_thresholds(&c).len(), 1);
     }
 
@@ -943,11 +1081,11 @@ mod tests {
     fn test_report_empty() {
         let agg = StatsAggregator::new();
         let report = agg.to_report();
-        
+
         assert_eq!(report.total_requests, 0);
         assert_eq!(report.avg_latency_ms, 0.0);
         assert_eq!(report.p99_latency_ms, 0.0);
-        
+
         let html = crate::stats::html::generate_html(&report);
         assert!(html.contains("No requests made"));
     }
@@ -957,19 +1095,22 @@ mod tests {
     #[test]
     fn test_custom_histogram() {
         let mut agg = StatsAggregator::new();
-        
+
         // Add values to a custom histogram
         for i in 1..=100 {
-            agg.add(Metric::Histogram { 
-                name: "checkout_duration".to_string(), 
+            agg.add(Metric::Histogram {
+                name: "checkout_duration".to_string(),
                 value: i as f64,
                 tags: HashMap::new(),
             });
         }
 
         let report = agg.to_report();
-        let hist = report.histograms.get("checkout_duration").expect("Histogram should exist");
-        
+        let hist = report
+            .histograms
+            .get("checkout_duration")
+            .expect("Histogram should exist");
+
         assert_eq!(hist.count, 100);
         assert_eq!(hist.min, 1.0);
         assert_eq!(hist.max, 100.0);
@@ -980,75 +1121,132 @@ mod tests {
     #[test]
     fn test_custom_counter() {
         let mut agg = StatsAggregator::new();
-        
+
         // Add values to a counter
-        agg.add(Metric::Counter { name: "items_sold".to_string(), value: 5.0, tags: HashMap::new() });
-        agg.add(Metric::Counter { name: "items_sold".to_string(), value: 3.0, tags: HashMap::new() });
-        agg.add(Metric::Counter { name: "items_sold".to_string(), value: 2.0, tags: HashMap::new() });
-        
+        agg.add(Metric::Counter {
+            name: "items_sold".to_string(),
+            value: 5.0,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Counter {
+            name: "items_sold".to_string(),
+            value: 3.0,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Counter {
+            name: "items_sold".to_string(),
+            value: 2.0,
+            tags: HashMap::new(),
+        });
+
         let report = agg.to_report();
-        let counter = report.counters.get("items_sold").expect("Counter should exist");
-        
+        let counter = report
+            .counters
+            .get("items_sold")
+            .expect("Counter should exist");
+
         assert_eq!(*counter, 10.0);
     }
 
     #[test]
     fn test_custom_gauge() {
         let mut agg = StatsAggregator::new();
-        
+
         // Gauge should always store the latest value
-        agg.add(Metric::Gauge { name: "queue_size".to_string(), value: 10.0, tags: HashMap::new() });
-        agg.add(Metric::Gauge { name: "queue_size".to_string(), value: 25.0, tags: HashMap::new() });
-        agg.add(Metric::Gauge { name: "queue_size".to_string(), value: 5.0, tags: HashMap::new() });
-        
+        agg.add(Metric::Gauge {
+            name: "queue_size".to_string(),
+            value: 10.0,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Gauge {
+            name: "queue_size".to_string(),
+            value: 25.0,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Gauge {
+            name: "queue_size".to_string(),
+            value: 5.0,
+            tags: HashMap::new(),
+        });
+
         let report = agg.to_report();
         let gauge = report.gauges.get("queue_size").expect("Gauge should exist");
-        
+
         assert_eq!(*gauge, 5.0); // Should be the last value
     }
 
     #[test]
     fn test_custom_rate() {
         let mut agg = StatsAggregator::new();
-        
+
         // Add some successes and failures
         for _ in 0..8 {
-            agg.add(Metric::Rate { name: "cache_hit".to_string(), success: true, tags: HashMap::new() });
+            agg.add(Metric::Rate {
+                name: "cache_hit".to_string(),
+                success: true,
+                tags: HashMap::new(),
+            });
         }
         for _ in 0..2 {
-            agg.add(Metric::Rate { name: "cache_hit".to_string(), success: false, tags: HashMap::new() });
+            agg.add(Metric::Rate {
+                name: "cache_hit".to_string(),
+                success: false,
+                tags: HashMap::new(),
+            });
         }
-        
+
         let report = agg.to_report();
         let rate = report.rates.get("cache_hit").expect("Rate should exist");
-        
+
         assert_eq!(rate.total, 10);
         assert_eq!(rate.success, 8);
-        assert!((rate.rate - 0.8).abs() < f64::EPSILON, "Rate was {}", rate.rate);
+        assert!(
+            (rate.rate - 0.8).abs() < f64::EPSILON,
+            "Rate was {}",
+            rate.rate
+        );
     }
 
     #[test]
     fn test_custom_metrics_threshold_validation() {
         let mut agg = StatsAggregator::new();
-        
+
         // Add custom histogram values
         for i in 1..=100 {
-            agg.add(Metric::Histogram { 
-                name: "api_latency".to_string(), 
+            agg.add(Metric::Histogram {
+                name: "api_latency".to_string(),
                 value: i as f64,
                 tags: HashMap::new(),
             });
         }
-        
+
         // Add custom counter
-        agg.add(Metric::Counter { name: "requests".to_string(), value: 150.0, tags: HashMap::new() });
-        
+        agg.add(Metric::Counter {
+            name: "requests".to_string(),
+            value: 150.0,
+            tags: HashMap::new(),
+        });
+
         // Add custom rate (90% success)
-        for _ in 0..9 { agg.add(Metric::Rate { name: "success".to_string(), success: true, tags: HashMap::new() }); }
-        agg.add(Metric::Rate { name: "success".to_string(), success: false, tags: HashMap::new() });
-        
+        for _ in 0..9 {
+            agg.add(Metric::Rate {
+                name: "success".to_string(),
+                success: true,
+                tags: HashMap::new(),
+            });
+        }
+        agg.add(Metric::Rate {
+            name: "success".to_string(),
+            success: false,
+            tags: HashMap::new(),
+        });
+
         // Add custom gauge
-        agg.add(Metric::Gauge { name: "memory".to_string(), value: 50.0, tags: HashMap::new() });
+        agg.add(Metric::Gauge {
+            name: "memory".to_string(),
+            value: 50.0,
+            tags: HashMap::new(),
+        });
 
         // Test passing thresholds
         let mut criteria = HashMap::new();
@@ -1056,9 +1254,13 @@ mod tests {
         criteria.insert("requests".to_string(), vec!["count > 100".to_string()]);
         criteria.insert("success".to_string(), vec!["rate > 0.8".to_string()]);
         criteria.insert("memory".to_string(), vec!["value < 100".to_string()]);
-        
+
         let failures = agg.validate_thresholds(&criteria);
-        assert!(failures.is_empty(), "Expected no failures, got: {:?}", failures);
+        assert!(
+            failures.is_empty(),
+            "Expected no failures, got: {:?}",
+            failures
+        );
 
         // Test failing thresholds
         let mut fail_criteria = HashMap::new();
@@ -1066,30 +1268,65 @@ mod tests {
         fail_criteria.insert("requests".to_string(), vec!["count > 200".to_string()]);
         fail_criteria.insert("success".to_string(), vec!["rate > 0.95".to_string()]);
         fail_criteria.insert("memory".to_string(), vec!["value < 25".to_string()]);
-        
+
         let failures = agg.validate_thresholds(&fail_criteria);
-        assert_eq!(failures.len(), 4, "Expected 4 failures, got: {:?}", failures);
+        assert_eq!(
+            failures.len(),
+            4,
+            "Expected 4 failures, got: {:?}",
+            failures
+        );
     }
 
     #[test]
     fn test_custom_metrics_in_json() {
         let mut agg = StatsAggregator::new();
-        
-        agg.add(Metric::Histogram { name: "latency".to_string(), value: 100.0, tags: HashMap::new() });
-        agg.add(Metric::Counter { name: "count".to_string(), value: 42.0, tags: HashMap::new() });
-        agg.add(Metric::Gauge { name: "temp".to_string(), value: 98.6, tags: HashMap::new() });
-        agg.add(Metric::Rate { name: "hit_rate".to_string(), success: true, tags: HashMap::new() });
-        
+
+        agg.add(Metric::Histogram {
+            name: "latency".to_string(),
+            value: 100.0,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Counter {
+            name: "count".to_string(),
+            value: 42.0,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Gauge {
+            name: "temp".to_string(),
+            value: 98.6,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Rate {
+            name: "hit_rate".to_string(),
+            success: true,
+            tags: HashMap::new(),
+        });
+
         let json = agg.to_json();
-        
-        assert!(json.contains("\"histograms\""), "JSON should contain histograms");
-        assert!(json.contains("\"counters\""), "JSON should contain counters");
+
+        assert!(
+            json.contains("\"histograms\""),
+            "JSON should contain histograms"
+        );
+        assert!(
+            json.contains("\"counters\""),
+            "JSON should contain counters"
+        );
         assert!(json.contains("\"gauges\""), "JSON should contain gauges");
         assert!(json.contains("\"rates\""), "JSON should contain rates");
-        assert!(json.contains("\"latency\""), "JSON should contain latency histogram");
-        assert!(json.contains("\"count\""), "JSON should contain count counter");
+        assert!(
+            json.contains("\"latency\""),
+            "JSON should contain latency histogram"
+        );
+        assert!(
+            json.contains("\"count\""),
+            "JSON should contain count counter"
+        );
         assert!(json.contains("\"temp\""), "JSON should contain temp gauge");
-        assert!(json.contains("\"hit_rate\""), "JSON should contain hit_rate rate");
+        assert!(
+            json.contains("\"hit_rate\""),
+            "JSON should contain hit_rate rate"
+        );
     }
 }
-

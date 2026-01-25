@@ -6,14 +6,16 @@ fn read_file(path: &str) -> std::result::Result<String, std::io::Error> {
 }
 
 pub fn register_sync(ctx: &Ctx) -> Result<()> {
-    ctx.globals().set("open", Function::new(ctx.clone(), move |path: String| -> Result<String> {
-        // Security: Prevent reading outside of allowed paths?
-        // For now, allow reading relative to CWD.
-        // TODO: Enforce security if needed.
+    ctx.globals().set(
+        "open",
+        Function::new(ctx.clone(), move |path: String| -> Result<String> {
+            // Security: Prevent reading outside of allowed paths?
+            // For now, allow reading relative to CWD.
+            // TODO: Enforce security if needed.
 
-        read_file(&path)
-            .map_err(|_| rquickjs::Error::new_from_js("IOError", "String"))
-    }))?;
+            read_file(&path).map_err(|_| rquickjs::Error::new_from_js("IOError", "String"))
+        }),
+    )?;
     Ok(())
 }
 

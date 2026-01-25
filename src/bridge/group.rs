@@ -36,12 +36,18 @@ fn restore_group(prev: String) {
 }
 
 pub fn register_sync(ctx: &Ctx) -> Result<()> {
-    ctx.globals().set("segment", Function::new(ctx.clone(), move |name: String, func: Function| -> Result<()> {
-        let prev = set_group(&name);
-        let res: Result<()> = func.call(());
-        restore_group(prev);
-        res
-    }))?;
+    ctx.globals().set(
+        "segment",
+        Function::new(
+            ctx.clone(),
+            move |name: String, func: Function| -> Result<()> {
+                let prev = set_group(&name);
+                let res: Result<()> = func.call(());
+                restore_group(prev);
+                res
+            },
+        ),
+    )?;
     Ok(())
 }
 

@@ -1,8 +1,8 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write;
 use std::fs;
 use std::path::Path;
-use anyhow::Result;
-use std::fmt::Write;
 
 #[derive(Deserialize, Serialize, Debug)]
 struct Har {
@@ -55,7 +55,7 @@ pub fn convert_to_js<P: AsRef<Path>>(input: P) -> Result<String> {
         writeln!(&mut js, "    http.request({{")?;
         writeln!(&mut js, "        method: '{}',", req.method)?;
         writeln!(&mut js, "        url: '{}',", req.url)?;
-        
+
         if !req.headers.is_empty() {
             writeln!(&mut js, "        headers: {{")?;
             for header in req.headers {
@@ -98,7 +98,7 @@ pub fn convert_from_string(har_content: &str) -> Result<String> {
         writeln!(&mut js, "    http.request({{")?;
         writeln!(&mut js, "        method: '{}',", req.method)?;
         writeln!(&mut js, "        url: '{}',", req.url)?;
-        
+
         if !req.headers.is_empty() {
             writeln!(&mut js, "        headers: {{")?;
             for header in req.headers {
@@ -140,7 +140,7 @@ mod tests {
                 }]
             }
         }"#;
-        
+
         let result = convert_from_string(har_json).unwrap();
         assert!(result.contains("method: 'GET'"));
         assert!(result.contains("url: 'https://example.com/api'"));
@@ -164,7 +164,7 @@ mod tests {
                 }]
             }
         }"#;
-        
+
         let result = convert_from_string(har_json).unwrap();
         assert!(result.contains("headers: {"));
         assert!(result.contains("'Content-Type': 'application/json'"));
@@ -187,7 +187,7 @@ mod tests {
                 }]
             }
         }"#;
-        
+
         let result = convert_from_string(har_json).unwrap();
         assert!(result.contains("method: 'POST'"));
         assert!(result.contains("body:"));
@@ -200,7 +200,7 @@ mod tests {
                 "entries": []
             }
         }"#;
-        
+
         let result = convert_from_string(har_json).unwrap();
         assert!(result.contains("export const options"));
         assert!(result.contains("export default function()"));
@@ -230,7 +230,7 @@ mod tests {
                 ]
             }
         }"#;
-        
+
         let result = convert_from_string(har_json).unwrap();
         assert!(result.contains("https://example.com/first"));
         assert!(result.contains("https://example.com/second"));

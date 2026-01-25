@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Sender, Receiver, TrySendError};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use http::{Request, Response};
 use hyper::body::Bytes;
 use tokio::runtime::Runtime;
@@ -57,17 +57,29 @@ impl IoBridge {
                     // Each worker runs in its own thread, using the shared Tokio runtime
                     rt.block_on(async move {
                         while let Ok(io_req) = rx.recv() {
-                            let IoRequest { request, timeout, response_tx } = io_req;
+                            let IoRequest {
+                                request,
+                                timeout,
+                                response_tx,
+                            } = io_req;
 
                             // Execute HTTP request
                             // I/O bridge doesn't currently support response_sink, use false
                             let result = if let Some(timeout_dur) = timeout {
-                                match tokio::time::timeout(timeout_dur, client.request(request, false)).await {
+                                match tokio::time::timeout(
+                                    timeout_dur,
+                                    client.request(request, false),
+                                )
+                                .await
+                                {
                                     Ok(res) => res.map_err(|e| e.to_string()),
                                     Err(_) => Err("Request timeout".to_string()),
                                 }
                             } else {
-                                client.request(request, false).await.map_err(|e| e.to_string())
+                                client
+                                    .request(request, false)
+                                    .await
+                                    .map_err(|e| e.to_string())
                             };
 
                             // Send response back to coroutine (non-blocking for Tokio side)
@@ -157,7 +169,7 @@ mod tests {
                 .worker_threads(2)
                 .enable_all()
                 .build()
-                .unwrap()
+                .unwrap(),
         );
         let client = Arc::new(HttpClient::new());
         let _bridge = IoBridge::new(rt, client, 2);

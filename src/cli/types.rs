@@ -147,7 +147,9 @@ declare class GrpcClient {
     connect(url: string): Promise<void>;
     invoke(method: string, request: any): Promise<any>;
 }
-"#.trim().to_string()
+"#
+    .trim()
+    .to_string()
 }
 
 #[cfg(test)]

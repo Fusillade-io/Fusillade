@@ -1,14 +1,19 @@
-use rquickjs::{Ctx, Function, Result, Value, Object};
-use crossbeam_channel::Sender;
-use crate::stats::Metric;
 use crate::bridge::browser::CurrentPage;
+use crate::stats::Metric;
+use crossbeam_channel::Sender;
 use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption;
+use rquickjs::{Ctx, Function, Object, Result, Value};
 use std::fs;
 
 fn capture_screenshot(ctx: &Ctx<'_>, check_name: &str, failure_type: &str) {
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let filename_base = format!("failure_{}_{}_{}", check_name.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-' , "_"), failure_type, timestamp);
-    
+    let filename_base = format!(
+        "failure_{}_{}_{}",
+        check_name.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-', "_"),
+        failure_type,
+        timestamp
+    );
+
     // Ensure directory exists
     if let Err(e) = fs::create_dir_all("screenshots") {
         eprintln!("Failed to create screenshots directory: {}", e);
@@ -40,35 +45,38 @@ fn capture_screenshot(ctx: &Ctx<'_>, check_name: &str, failure_type: &str) {
 }
 
 pub fn register_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>) -> Result<()> {
-    let check_func = Function::new(ctx.clone(), move |ctx: Ctx<'js>, val: Value<'js>, checks: Object<'js>| -> Result<()> {
-        let tx = tx.clone();
-        for key in checks.keys::<String>() {
-            let key = key?;
-            let func: Function = checks.get(&key)?;
-            
-            let success = match func.call::<_, bool>((val.clone(),)) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Assertion function '{}' failed: {}", key, e);
-                    capture_screenshot(&ctx, &key, "js_error");
-                    false // Treat JS error as a failure
+    let check_func = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, val: Value<'js>, checks: Object<'js>| -> Result<()> {
+            let tx = tx.clone();
+            for key in checks.keys::<String>() {
+                let key = key?;
+                let func: Function = checks.get(&key)?;
+
+                let success = match func.call::<_, bool>((val.clone(),)) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Assertion function '{}' failed: {}", key, e);
+                        capture_screenshot(&ctx, &key, "js_error");
+                        false // Treat JS error as a failure
+                    }
+                };
+
+                let _ = tx.send(Metric::Check {
+                    name: key.clone(),
+                    success,
+                });
+
+                if !success {
+                    capture_screenshot(&ctx, &key, "assertion_failed");
                 }
-            };
-
-            let _ = tx.send(Metric::Check {
-                name: key.clone(),
-                success,
-            });
-
-            if !success {
-                capture_screenshot(&ctx, &key, "assertion_failed");
             }
-        }
-        Ok(())
-    })?;
-    
+            Ok(())
+        },
+    )?;
+
     ctx.globals().set("assertion", check_func.clone())?;
     ctx.globals().set("check", check_func)?;
-    
+
     Ok(())
 }

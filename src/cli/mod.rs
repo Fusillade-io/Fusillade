@@ -1,10 +1,10 @@
-pub mod config;
-pub mod har;
-pub mod types;
-pub mod recorder;
 pub mod bundler;
 pub mod cloud;
+pub mod config;
+pub mod har;
 pub mod init;
+pub mod recorder;
+pub mod types;
 pub mod validate;
 
 use clap::{Parser, Subcommand};

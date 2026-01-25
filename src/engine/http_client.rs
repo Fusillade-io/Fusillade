@@ -1,17 +1,17 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use http::{Request, Response, Uri};
+use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use hyper_rustls::HttpsConnector;
-use http_body_util::{BodyExt, Full};
 use tower::Service;
 
 use crate::stats::RequestTimings;
@@ -39,19 +39,23 @@ impl TimingContext {
 
     fn set_start(&self, instant: Instant) {
         // Store as nanos since some epoch (we'll use elapsed from a base)
-        self.request_start_nanos.store(instant.elapsed().as_nanos() as u64, Ordering::Release);
+        self.request_start_nanos
+            .store(instant.elapsed().as_nanos() as u64, Ordering::Release);
     }
 
     fn add_blocked(&self, d: Duration) {
-        self.blocked_nanos.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+        self.blocked_nanos
+            .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
     }
 
     fn add_connecting(&self, d: Duration) {
-        self.connecting_nanos.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+        self.connecting_nanos
+            .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
     }
 
     fn add_tls(&self, d: Duration) {
-        self.tls_nanos.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+        self.tls_nanos
+            .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
     }
 
     fn get_blocked(&self) -> Duration {
@@ -85,7 +89,10 @@ impl MeasuredHttpConnector {
     pub fn new(timing_ctx: TimingContext) -> Self {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
-        Self { inner: http, timing_ctx }
+        Self {
+            inner: http,
+            timing_ctx,
+        }
     }
 }
 
@@ -121,13 +128,17 @@ struct MeasuredHttpsConnector {
 impl MeasuredHttpsConnector {
     pub fn new(http: MeasuredHttpConnector, timing_ctx: TimingContext) -> Self {
         let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_native_roots().unwrap()
+            .with_native_roots()
+            .unwrap()
             .https_or_http()
             .enable_http1()
             .enable_http2()
             .wrap_connector(http);
 
-        Self { inner: https, timing_ctx }
+        Self {
+            inner: https,
+            timing_ctx,
+        }
     }
 }
 
@@ -186,11 +197,11 @@ impl HttpClient {
         // - Low workers (<2K): larger windows for better throughput
         // - High workers (>5K): smaller windows to save memory
         let (conn_window, stream_window) = if total_workers > 5000 {
-            (128 * 1024, 64 * 1024)   // 128KB/64KB for high concurrency
+            (128 * 1024, 64 * 1024) // 128KB/64KB for high concurrency
         } else if total_workers > 2000 {
-            (256 * 1024, 128 * 1024)  // 256KB/128KB for medium concurrency
+            (256 * 1024, 128 * 1024) // 256KB/128KB for medium concurrency
         } else {
-            (512 * 1024, 256 * 1024)  // 512KB/256KB for low concurrency
+            (512 * 1024, 256 * 1024) // 512KB/256KB for low concurrency
         };
 
         let client = Client::builder(TokioExecutor::new())
@@ -207,7 +218,11 @@ impl HttpClient {
     /// (required for connection keep-alive) but immediately discarded to save memory.
     /// The returned Response will have an empty body when sink mode is enabled.
     // Must be called inside a Tokio Runtime
-    pub async fn request(&self, req: Request<String>, response_sink: bool) -> Result<(Response<Bytes>, RequestTimings), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn request(
+        &self,
+        req: Request<String>,
+        response_sink: bool,
+    ) -> Result<(Response<Bytes>, RequestTimings), Box<dyn std::error::Error + Send + Sync>> {
         let request_start = Instant::now();
 
         let url = req.uri().clone();
@@ -224,9 +239,7 @@ impl HttpClient {
 
         use http_body_util::Full;
         let body_bytes = Bytes::from(body_str);
-        let mut builder = Request::builder()
-            .uri(url)
-            .method(method);
+        let mut builder = Request::builder().uri(url).method(method);
 
         for (k, v) in req.headers() {
             builder = builder.header(k, v);
@@ -288,28 +301,26 @@ impl HttpClient {
         // Status line: HTTP/1.1 STATUS REASON\r\n (approx 15 chars + reason)
         resp_size += 15;
         for (k, v) in parts.headers.iter() {
-             resp_size += k.as_str().len() + 2 + v.len() + 2;
+            resp_size += k.as_str().len() + 2 + v.len() + 2;
         }
         resp_size += 2; // Final \r\n
 
         timings.response_size = resp_size;
         timings.request_size = req_size;
-        
+
         // Construct new response with bytes body
         let mut builder = Response::builder()
             .status(parts.status)
             .version(parts.version);
-            
+
         for (k, v) in parts.headers {
             if let Some(key) = k {
                 builder = builder.header(key, v);
             }
         }
-        
-        
-        
+
         let final_res = builder.body(body)?;
-        
+
         Ok((final_res, timings))
     }
 }
@@ -324,13 +335,9 @@ mod tests {
         let _path_client = HttpClient::new();
     }
 
-
     #[test]
     fn test_http_client_custom_pool() {
         // Just verify builder logic runs
         let _client = HttpClient::with_pool_and_workers(50, 100);
     }
 }
-
-
-

@@ -1,28 +1,33 @@
-use rquickjs::{Ctx, Object, Result, Function};
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
+use rquickjs::{Ctx, Function, Object, Result};
 
 fn b64encode(data: &str) -> String {
     general_purpose::STANDARD.encode(data)
 }
 
 fn b64decode(data: &str) -> std::result::Result<String, &'static str> {
-    let decoded = general_purpose::STANDARD.decode(data)
+    let decoded = general_purpose::STANDARD
+        .decode(data)
         .map_err(|_| "Base64 decode failed")?;
-    String::from_utf8(decoded)
-        .map_err(|_| "Invalid UTF-8 after decode")
+    String::from_utf8(decoded).map_err(|_| "Invalid UTF-8 after decode")
 }
 
 pub fn register_sync<'js>(ctx: &Ctx<'js>) -> Result<()> {
     let encoding = Object::new(ctx.clone())?;
 
-    encoding.set("b64encode", Function::new(ctx.clone(), move |data: String| -> String {
-        b64encode(&data)
-    }))?;
+    encoding.set(
+        "b64encode",
+        Function::new(ctx.clone(), move |data: String| -> String {
+            b64encode(&data)
+        }),
+    )?;
 
-    encoding.set("b64decode", Function::new(ctx.clone(), move |data: String| -> Result<String> {
-        b64decode(&data)
-            .map_err(|e| rquickjs::Error::new_from_js(e, "ValueError"))
-    }))?;
+    encoding.set(
+        "b64decode",
+        Function::new(ctx.clone(), move |data: String| -> Result<String> {
+            b64decode(&data).map_err(|e| rquickjs::Error::new_from_js(e, "ValueError"))
+        }),
+    )?;
 
     ctx.globals().set("encoding", encoding)?;
     Ok(())
