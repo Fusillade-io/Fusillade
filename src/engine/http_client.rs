@@ -306,8 +306,31 @@ impl HttpClient {
             }
         }
         
+        
+        
         let final_res = builder.body(body)?;
         
         Ok((final_res, timings))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_http_client_defaults() {
+        // Just verify we can instantiate without panic
+        let _path_client = HttpClient::new();
+    }
+
+
+    #[test]
+    fn test_http_client_custom_pool() {
+        // Just verify builder logic runs
+        let _client = HttpClient::with_pool_and_workers(50, 100);
+    }
+}
+
+
+

@@ -396,3 +396,45 @@ async fn handle_api_dispatch(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_start_test_request_serialization() {
+        let config = Config::default();
+        let req = StartTestRequest {
+            script_content: "export default function() {}".to_string(),
+            script_name: "test.js".to_string(),
+            config,
+            controller_metrics_url: Some("http://localhost:9000".to_string()),
+            assets: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: StartTestRequest = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.script_name, "test.js");
+        assert_eq!(deserialized.controller_metrics_url, Some("http://localhost:9000".to_string()));
+    }
+
+    #[test]
+    fn test_worker_status_serialization() {
+        let status = WorkerStatus { status: "ready".to_string() };
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#"{"status":"ready"}"#);
+    }
+
+    #[test]
+    fn test_dispatch_response_serialization() {
+        let resp = DispatchTestResponse {
+            success: true,
+            workers_dispatched: 5,
+            message: "Go".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("true"));
+        assert!(json.contains("5"));
+    }
+}
