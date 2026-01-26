@@ -608,4 +608,117 @@ mod tests {
         assert_eq!(escape_html("<script>"), "&lt;script&gt;");
         assert_eq!(escape_html("a & b"), "a &amp; b");
     }
+
+    #[test]
+    fn test_iteration_metrics_filtered() {
+        use crate::stats::RequestReport;
+
+        let mut grouped_requests = HashMap::new();
+
+        // Add real endpoint
+        grouped_requests.insert(
+            "https://api.example.com/users".to_string(),
+            RequestReport {
+                total_requests: 100,
+                min_latency_ms: 10,
+                max_latency_ms: 200,
+                avg_latency_ms: 50.0,
+                p95_latency_ms: 150.0,
+                p99_latency_ms: 180.0,
+                error_count: 0,
+                avg_blocked_ms: 0.0,
+                avg_connecting_ms: 0.0,
+                avg_tls_handshaking_ms: 0.0,
+                avg_sending_ms: 0.0,
+                avg_waiting_ms: 0.0,
+                avg_receiving_ms: 0.0,
+                avg_response_size: 0.0,
+            },
+        );
+
+        // Add iteration metrics (should be filtered out)
+        grouped_requests.insert(
+            "iteration".to_string(),
+            RequestReport {
+                total_requests: 100,
+                min_latency_ms: 10,
+                max_latency_ms: 200,
+                avg_latency_ms: 50.0,
+                p95_latency_ms: 150.0,
+                p99_latency_ms: 180.0,
+                error_count: 100,
+                avg_blocked_ms: 0.0,
+                avg_connecting_ms: 0.0,
+                avg_tls_handshaking_ms: 0.0,
+                avg_sending_ms: 0.0,
+                avg_waiting_ms: 0.0,
+                avg_receiving_ms: 0.0,
+                avg_response_size: 0.0,
+            },
+        );
+
+        grouped_requests.insert(
+            "iteration_total".to_string(),
+            RequestReport {
+                total_requests: 100,
+                min_latency_ms: 10,
+                max_latency_ms: 200,
+                avg_latency_ms: 50.0,
+                p95_latency_ms: 150.0,
+                p99_latency_ms: 180.0,
+                error_count: 100,
+                avg_blocked_ms: 0.0,
+                avg_connecting_ms: 0.0,
+                avg_tls_handshaking_ms: 0.0,
+                avg_sending_ms: 0.0,
+                avg_waiting_ms: 0.0,
+                avg_receiving_ms: 0.0,
+                avg_response_size: 0.0,
+            },
+        );
+
+        let report = ReportStats {
+            total_requests: 100,
+            total_duration_ms: 10000,
+            avg_latency_ms: 50.0,
+            min_latency_ms: 10,
+            max_latency_ms: 200,
+            p50_latency_ms: 45.0,
+            p90_latency_ms: 80.0,
+            p95_latency_ms: 150.0,
+            p99_latency_ms: 180.0,
+            status_codes: HashMap::new(),
+            errors: HashMap::new(),
+            checks: HashMap::new(),
+            grouped_requests,
+            total_data_sent: 1024,
+            total_data_received: 5120,
+            histograms: HashMap::new(),
+            rates: HashMap::new(),
+            counters: HashMap::new(),
+            gauges: HashMap::new(),
+        };
+
+        let html = generate_html(&report);
+
+        // Real endpoint should be present
+        assert!(html.contains("api.example.com/users"));
+
+        // Iteration metrics should be filtered out from endpoints table
+        // They should NOT appear in the endpoints section
+        let endpoints_section = html
+            .find("<h2>Endpoints</h2>")
+            .map(|start| &html[start..])
+            .unwrap_or("");
+
+        // The endpoints section shouldn't contain "iteration" as a standalone endpoint
+        // But we need to be careful - "iteration" might appear in other contexts
+        let section_end = endpoints_section
+            .find("</table>")
+            .unwrap_or(endpoints_section.len());
+        let endpoints_table = &endpoints_section[..section_end];
+
+        assert!(!endpoints_table.contains("<code>iteration</code>"));
+        assert!(!endpoints_table.contains("<code>iteration_total</code>"));
+    }
 }
