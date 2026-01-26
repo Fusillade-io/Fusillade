@@ -191,14 +191,16 @@ Coordinate multiple worker nodes to generate massive load.
 **Worker:**
 
 ```bash
-fusillade worker --listen 0.0.0.0:8000
+fusillade worker --listen 0.0.0.0:8080
 ```
 
 **Controller:**
 
 ```bash
-fusillade run scenarios/checkout.js --execution distributed --workers 10.0.0.5:8000,10.0.0.6:8000
+fusillade controller --listen 0.0.0.0:9000
 ```
+
+Workers connect to the controller, and tests are dispatched via the controller's API. See the Kubernetes Deployment section for the full distributed architecture.
 
 ### HAR Conversion
 
@@ -228,6 +230,25 @@ Fusillade is configured via the `export const options` object in your script.
 | `stack_size` | Number | Worker thread stack size in bytes. Default: `32768` (32KB). Increase if encountering stack overflows with complex scripts. | `65536` |
 | `response_sink` | Boolean | Sink (discard) response bodies to save memory. See [Response Sink Mode](#response-sink-mode) below. | `true` |
 | `abort_on_fail` | Boolean | Abort the test immediately if any threshold is breached. Useful for CI/CD to fail fast. When enabled, the test exits with a non-zero status code on threshold failure. | `true` |
+| `jitter` | String | Chaos: Add artificial latency before each request. | `'500ms'` |
+| `drop` | Number | Chaos: Drop probability 0.0-1.0 for simulating packet loss. | `0.05` |
+| `no_endpoint_tracking` | Boolean | Disable per-URL metrics tracking to reduce memory for high-cardinality URLs. | `true` |
+| `memory_safe` | Boolean | Throttle worker spawning when memory usage is high (85% pause, 95% stop). | `true` |
+
+### k6 Compatibility
+
+Fusillade supports k6 option names for easy migration from k6 scripts:
+
+| k6 Name | Fusillade Name |
+|---------|----------------|
+| `vus` | `workers` |
+| `stages` | `schedule` |
+| `thresholds` | `criteria` |
+| `timeUnit` | `time_unit` |
+| `responseSink` | `response_sink` |
+| `startTime` | `start_time` |
+
+Both naming conventions work interchangeably.
 
 ### Scenarios
 
@@ -382,10 +403,10 @@ schedule:
 
 criteria:
   http_req_duration:
-    - p95<500
-    - avg<200
+    - "p95 < 500"
+    - "avg < 200"
   http_req_failed:
-    - rate<0.01
+    - "rate < 0.01"
 ```
 
 #### Stress Test
@@ -408,9 +429,9 @@ schedule:
 # More lenient thresholds - expect some degradation
 criteria:
   http_req_duration:
-    - p99<2000
+    - "p99 < 2000"
   http_req_failed:
-    - rate<0.05
+    - "rate < 0.05"
 ```
 
 #### Soak Test (Endurance)
@@ -428,10 +449,10 @@ warmup: https://api.example.com/health
 
 criteria:
   http_req_duration:
-    - p95<300
-    - avg<150
+    - "p95 < 300"
+    - "avg < 150"
   http_req_failed:
-    - rate<0.001          # Very strict - sustained load should be stable
+    - "rate < 0.001"      # Very strict - sustained load should be stable
 ```
 
 #### Constant Arrival Rate
@@ -450,7 +471,7 @@ duration: 2m
 
 criteria:
   http_req_duration:
-    - p95<200
+    - "p95 < 200"
 ```
 
 #### Chaos Engineering
@@ -468,7 +489,7 @@ drop: 0.03                # Drop 3% of requests
 # Account for injected failures in thresholds
 criteria:
   http_req_failed:
-    - rate<0.10           # 3% dropped + real failures
+    - "rate < 0.10"       # 3% dropped + real failures
 ```
 
 #### Multi-Scenario
@@ -491,7 +512,7 @@ scenarios:
     exec: checkoutFlow
     thresholds:
       http_req_failed:
-        - rate<0.005
+        - "rate < 0.005"
 ```
 
 ### JSON Equivalent
@@ -505,8 +526,8 @@ All YAML configs have JSON equivalents. Example:
   "jitter": "250ms",
   "drop": 0.03,
   "criteria": {
-    "http_req_duration": ["p95<1000"],
-    "http_req_failed": ["rate<0.10"]
+    "http_req_duration": ["p95 < 1000"],
+    "http_req_failed": ["rate < 0.10"]
   }
 }
 ```
@@ -517,24 +538,26 @@ Thresholds define pass/fail criteria for CI/CD integration:
 
 | Syntax | Description |
 |--------|-------------|
-| `p95<500` | 95th percentile under 500ms |
-| `p99<1000` | 99th percentile under 1000ms |
-| `avg<200` | Average under 200ms |
-| `min>0` | Minimum greater than 0 |
-| `max<5000` | Maximum under 5000ms |
-| `rate<0.01` | Rate under 1% (for error rates) |
-| `count>100` | Count greater than 100 |
+| `p95 < 500` | 95th percentile under 500ms |
+| `p99 < 1000` | 99th percentile under 1000ms |
+| `avg < 200` | Average under 200ms |
+| `min > 0` | Minimum greater than 0 |
+| `max < 5000` | Maximum under 5000ms |
+| `rate < 0.01` | Rate under 1% (for error rates) |
+| `count > 100` | Count greater than 100 |
+
+**Note:** Spaces around operators (`<`, `>`) are required.
 
 Multiple thresholds can be combined - all must pass:
 
 ```yaml
 criteria:
   http_req_duration:
-    - p95<500
-    - p99<1000
-    - avg<200
+    - "p95 < 500"
+    - "p99 < 1000"
+    - "avg < 200"
   http_req_failed:
-    - rate<0.01
+    - "rate < 0.01"
 ```
 
 ---
@@ -1084,6 +1107,7 @@ Executes a load test script.
 * `--out <CONFIG>`: Output configuration. Supports:
   * `--out otlp=<URL>`: Export to OTLP endpoint (e.g., `otlp=http://localhost:4318/v1/metrics`)
   * `--out csv=<FILE>`: Export to CSV file
+  * `--out junit=<FILE>`: Export to JUnit XML format (for CI/CD integration)
 * `--metrics-url <URL>`: Stream real-time metrics to a URL during test execution. Sends periodic JSON payloads with RPS, latency, errors, etc. At test completion, sends a summary to `<URL>/summary` with endpoint breakdown and HTTP status code counts.
 * `--metrics-auth <HEADER>`: Authentication header for metrics URL (format: `HeaderName: value`).
 * `-i, --interactive`: Enable interactive control mode (pause, resume, ramp workers).

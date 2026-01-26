@@ -247,8 +247,12 @@ enum Commands {
         /// API key from https://fusillade.io/settings
         token: String,
     },
+    /// Log out from Fusillade Cloud
+    Logout,
     /// Check authentication status
     Whoami,
+    /// Show version and status information
+    Status,
     /// Compare two test run summaries
     Compare {
         /// Path to baseline JSON summary
@@ -959,6 +963,51 @@ fn main() -> Result<()> {
                     println!("Get your API key at https://fusillade.io/settings");
                 }
             }
+            Ok(())
+        }
+        Commands::Logout => {
+            if fusillade::cli::cloud::is_logged_in() {
+                match fusillade::cli::cloud::clear_token() {
+                    Ok(()) => {
+                        println!("Logged out successfully.");
+                        println!("Token removed from ~/.fusillade/auth.json");
+                    }
+                    Err(e) => {
+                        eprintln!("Error removing token: {}", e);
+                    }
+                }
+            } else {
+                println!("Not logged in.");
+            }
+            Ok(())
+        }
+        Commands::Status => {
+            println!("Fusillade v{}", env!("CARGO_PKG_VERSION"));
+            println!();
+
+            // Cloud status
+            if fusillade::cli::cloud::is_logged_in() {
+                println!("Cloud:    Connected");
+                println!("  API:    {}", fusillade::cli::cloud::get_api_url());
+            } else {
+                println!("Cloud:    Not connected");
+            }
+
+            // System info
+            let mem = fusillade::engine::memory::MemoryInfo::current();
+            println!();
+            println!("System:");
+            println!(
+                "  RAM:    {} / {}",
+                fusillade::engine::memory::format_bytes(mem.available_bytes),
+                fusillade::engine::memory::format_bytes(mem.total_bytes)
+            );
+            println!("  CPUs:   {}", num_cpus::get());
+
+            // Estimate max workers
+            let max_workers = fusillade::engine::memory::estimate_max_workers(mem.available_bytes);
+            println!("  Max Workers: ~{}", max_workers);
+
             Ok(())
         }
         Commands::Compare { baseline, current } => {
