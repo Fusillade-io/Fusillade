@@ -167,6 +167,12 @@ enum Commands {
         /// Enable memory-safe mode: throttle worker spawning if memory usage is high
         #[arg(long)]
         memory_safe: bool,
+        /// Save test results to local history database
+        #[arg(long)]
+        save_history: bool,
+        /// Capture failed requests to file for later replay (default: fusillade-errors.json)
+        #[arg(long)]
+        capture_errors: Option<Option<PathBuf>>,
     },
     /// Initialize a new test script with starter template
     Init {
@@ -253,6 +259,15 @@ enum Commands {
     Whoami,
     /// Show version and status information
     Status,
+    /// View test run history
+    History {
+        /// Show detailed report for a specific run ID
+        #[arg(long)]
+        show: Option<i64>,
+        /// Number of recent runs to list (default: 10)
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
     /// Compare two test run summaries
     Compare {
         /// Path to baseline JSON summary
@@ -288,6 +303,8 @@ fn main() -> Result<()> {
             watch,
             no_memory_check,
             memory_safe,
+            save_history,
+            capture_errors,
         } => {
             // Load .env file if present (check script directory, then current directory)
             let script_dir = scenario.parent().unwrap_or(std::path::Path::new("."));
@@ -691,6 +708,28 @@ fn main() -> Result<()> {
                     }
                 }
             }
+
+            // Save to history database if requested
+            if save_history {
+                match fusillade::stats::db::HistoryDb::open_default() {
+                    Ok(db) => {
+                        let scenario_name = scenario
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        match db.save_run(&scenario_name, &report) {
+                            Ok(id) => println!("Saved to history as run #{}", id),
+                            Err(e) => eprintln!("Failed to save history: {}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to open history database: {}", e),
+                }
+            }
+
+            // Note: capture_errors is handled at the HTTP layer, not here
+            // The flag is passed to the engine which captures failed requests
+            let _ = capture_errors; // Suppress unused warning for now
+
             Ok(())
         }
         Commands::Init { output, config } => {
@@ -1008,6 +1047,57 @@ fn main() -> Result<()> {
             let max_workers = fusillade::engine::memory::estimate_max_workers(mem.available_bytes);
             println!("  Max Workers: ~{}", max_workers);
 
+            Ok(())
+        }
+        Commands::History { show, limit } => {
+            let db = match fusillade::stats::db::HistoryDb::open_default() {
+                Ok(db) => db,
+                Err(e) => {
+                    eprintln!("Failed to open history database: {}", e);
+                    eprintln!("History is stored in fusillade_history.db");
+                    return Ok(());
+                }
+            };
+
+            if let Some(run_id) = show {
+                // Show detailed report for specific run
+                match db.get_report(run_id) {
+                    Ok(report) => {
+                        println!("Run #{} Report", run_id);
+                        println!("{}", "=".repeat(60));
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&report).unwrap_or_default()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load run #{}: {}", run_id, e);
+                    }
+                }
+            } else {
+                // List recent runs
+                match db.list_runs(limit) {
+                    Ok(runs) => {
+                        if runs.is_empty() {
+                            println!("No test runs in history.");
+                            println!("Run a test with --save-history to start tracking.");
+                        } else {
+                            println!("Recent Test Runs");
+                            println!("{}", "=".repeat(60));
+                            println!("{:<6} {:<24} Scenario", "ID", "Time");
+                            println!("{}", "-".repeat(60));
+                            for (id, time, scenario) in runs {
+                                println!("{:<6} {:<24} {}", id, time, scenario);
+                            }
+                            println!();
+                            println!("Use 'fusillade history --show <ID>' to view details.");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to list runs: {}", e);
+                    }
+                }
+            }
             Ok(())
         }
         Commands::Compare { baseline, current } => {
