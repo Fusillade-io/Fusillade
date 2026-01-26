@@ -324,10 +324,7 @@ impl ControllerServer {
             .with_state(state);
 
         println!("Controller running on http://{}", addr);
-        println!(
-            "Workers will stream metrics to {}",
-            format!("http://{}/metrics", addr)
-        );
+        println!("Workers will stream metrics to http://{}/metrics", addr);
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app).await?;
         Ok(())
