@@ -433,10 +433,10 @@ mod tests {
     fn test_json_scalar_number() {
         // Test number parsing
         let json_int = json!(42);
-        let json_float = json!(3.14);
+        let json_float = json!(2.5);
 
         assert_eq!(json_int.as_i64(), Some(42));
-        assert_eq!(json_float.as_f64(), Some(3.14));
+        assert_eq!(json_float.as_f64(), Some(2.5));
     }
 
     #[test]
