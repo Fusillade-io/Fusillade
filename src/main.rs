@@ -798,7 +798,11 @@ fn main() -> Result<()> {
             println!(
                 "Replaying {} failed requests{}...",
                 requests.len(),
-                if parallel { " in parallel" } else { " sequentially" }
+                if parallel {
+                    " in parallel"
+                } else {
+                    " sequentially"
+                }
             );
 
             if parallel {
@@ -833,10 +837,8 @@ fn main() -> Result<()> {
                     .collect();
 
                 // Collect results
-                let mut results: Vec<_> = handles
-                    .into_iter()
-                    .filter_map(|h| h.join().ok())
-                    .collect();
+                let mut results: Vec<_> =
+                    handles.into_iter().filter_map(|h| h.join().ok()).collect();
                 results.sort_by_key(|(i, _, _, _)| *i);
 
                 for (i, method, url, result) in results {

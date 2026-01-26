@@ -385,7 +385,10 @@ memory_safe: true
         assert_eq!(config.time_unit, Some("1s".to_string()));
         assert!(config.criteria.is_some());
         assert_eq!(config.min_iteration_duration, Some("1s".to_string()));
-        assert_eq!(config.warmup, Some("https://api.example.com/health".to_string()));
+        assert_eq!(
+            config.warmup,
+            Some("https://api.example.com/health".to_string())
+        );
         assert_eq!(config.stop, Some("10s".to_string()));
         assert_eq!(config.iterations, Some(100));
         assert_eq!(config.jitter, Some("100ms".to_string()));
@@ -408,9 +411,9 @@ memory_safe: true
         };
 
         let file_config = Config {
-            workers: Some(50),  // Should override script
-            duration: Some("1m".to_string()),  // Should override script
-            drop: Some(0.05),  // New field from file
+            workers: Some(50),                // Should override script
+            duration: Some("1m".to_string()), // Should override script
+            drop: Some(0.05),                 // New field from file
             ..Default::default()
         };
 
@@ -426,17 +429,17 @@ memory_safe: true
             merged.drop = file_config.drop;
         }
 
-        assert_eq!(merged.workers, Some(50));  // From file
-        assert_eq!(merged.duration, Some("1m".to_string()));  // From file
-        assert_eq!(merged.jitter, Some("100ms".to_string()));  // From script (not in file)
-        assert_eq!(merged.drop, Some(0.05));  // From file
+        assert_eq!(merged.workers, Some(50)); // From file
+        assert_eq!(merged.duration, Some("1m".to_string())); // From file
+        assert_eq!(merged.jitter, Some("100ms".to_string())); // From script (not in file)
+        assert_eq!(merged.drop, Some(0.05)); // From file
 
         // Simulate CLI override
         let cli_workers = Some(100);
         if cli_workers.is_some() {
             merged.workers = cli_workers;
         }
-        assert_eq!(merged.workers, Some(100));  // From CLI
+        assert_eq!(merged.workers, Some(100)); // From CLI
     }
 
     #[test]
