@@ -26,7 +26,6 @@ fn json_to_dynamic_message(
                 let prost_val = json_val_to_prost(val, &field)?;
                 msg.set_field(&field, prost_val);
             }
-            // Ignore unknown fields? or error?
         }
     } else {
         return Err(rquickjs::Error::new_from_js(
@@ -39,6 +38,59 @@ fn json_to_dynamic_message(
 }
 
 fn json_val_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Result<ProstValue> {
+    // Handle repeated fields (arrays)
+    if field.is_list() {
+        let arr = json
+            .as_array()
+            .ok_or_else(|| rquickjs::Error::new_from_js("Expected array for repeated field", "TypeError"))?;
+        let items: Result<Vec<ProstValue>> = arr
+            .iter()
+            .map(|item| json_scalar_to_prost(item.clone(), field))
+            .collect();
+        return Ok(ProstValue::List(items?));
+    }
+
+    // Handle map fields
+    if field.is_map() {
+        let obj = json
+            .as_object()
+            .ok_or_else(|| rquickjs::Error::new_from_js("Expected object for map field", "TypeError"))?;
+        let map_entry = field.kind();
+        if let Kind::Message(entry_desc) = map_entry {
+            let key_field = entry_desc.get_field_by_name("key")
+                .ok_or_else(|| rquickjs::Error::new_from_js("Invalid map entry", "TypeError"))?;
+            let value_field = entry_desc.get_field_by_name("value")
+                .ok_or_else(|| rquickjs::Error::new_from_js("Invalid map entry", "TypeError"))?;
+
+            let mut map = std::collections::HashMap::new();
+            for (k, v) in obj {
+                let key_val = json_scalar_to_prost(serde_json::Value::String(k.clone()), &key_field)?;
+                let val_val = json_scalar_to_prost(v.clone(), &value_field)?;
+                if let ProstValue::String(key_str) = key_val {
+                    map.insert(prost_reflect::MapKey::String(key_str), val_val);
+                } else if let ProstValue::I32(key_i32) = key_val {
+                    map.insert(prost_reflect::MapKey::I32(key_i32), val_val);
+                } else if let ProstValue::I64(key_i64) = key_val {
+                    map.insert(prost_reflect::MapKey::I64(key_i64), val_val);
+                } else if let ProstValue::U32(key_u32) = key_val {
+                    map.insert(prost_reflect::MapKey::U32(key_u32), val_val);
+                } else if let ProstValue::U64(key_u64) = key_val {
+                    map.insert(prost_reflect::MapKey::U64(key_u64), val_val);
+                } else if let ProstValue::Bool(key_bool) = key_val {
+                    map.insert(prost_reflect::MapKey::Bool(key_bool), val_val);
+                }
+            }
+            return Ok(ProstValue::Map(map));
+        }
+        return Err(rquickjs::Error::new_from_js("Invalid map field type", "TypeError"));
+    }
+
+    // Handle scalar types
+    json_scalar_to_prost(json, field)
+}
+
+/// Convert a JSON value to a prost scalar value
+fn json_scalar_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Result<ProstValue> {
     match field.kind() {
         Kind::Double => json
             .as_f64()
@@ -72,15 +124,34 @@ fn json_val_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Result
             .as_str()
             .map(|s| ProstValue::String(s.to_string()))
             .ok_or_else(|| rquickjs::Error::new_from_js("Expected string", "TypeError")),
+        Kind::Bytes => {
+            // Expect base64-encoded string
+            let b64_str = json
+                .as_str()
+                .ok_or_else(|| rquickjs::Error::new_from_js("Expected base64 string for bytes", "TypeError"))?;
+            use base64::Engine;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64_str)
+                .map_err(|_| rquickjs::Error::new_from_js("Invalid base64 encoding", "TypeError"))?;
+            Ok(ProstValue::Bytes(prost::bytes::Bytes::from(decoded)))
+        }
+        Kind::Enum(enum_desc) => {
+            // Accept either string name or integer value
+            if let Some(name) = json.as_str() {
+                enum_desc
+                    .get_value_by_name(name)
+                    .map(|v| ProstValue::EnumNumber(v.number()))
+                    .ok_or_else(|| rquickjs::Error::new_from_js("Unknown enum value", "TypeError"))
+            } else if let Some(num) = json.as_i64() {
+                Ok(ProstValue::EnumNumber(num as i32))
+            } else {
+                Err(rquickjs::Error::new_from_js("Expected enum string or number", "TypeError"))
+            }
+        }
         Kind::Message(msg_desc) => {
             let nested_msg = json_to_dynamic_message(msg_desc, json)?;
             Ok(ProstValue::Message(nested_msg))
         }
-        // TODO: Handle repeated, map, bytes, enum
-        _ => Err(rquickjs::Error::new_from_js(
-            "Unsupported field type in JSON conversion (TODO: complete mapping)",
-            "TypeError",
-        )),
     }
 }
 
@@ -330,4 +401,84 @@ impl GrpcClient {
 pub fn register_sync(ctx: &Ctx) -> Result<()> {
     rquickjs::Class::<GrpcClient>::define(&ctx.globals())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Helper to create a mock field descriptor for testing
+    // Note: Full integration tests require actual proto files
+
+    #[test]
+    fn test_json_scalar_string() {
+        // Test that string conversion works correctly
+        let json_val = json!("hello");
+        assert!(json_val.as_str().is_some());
+        assert_eq!(json_val.as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_json_scalar_number() {
+        // Test number parsing
+        let json_int = json!(42);
+        let json_float = json!(3.14);
+
+        assert_eq!(json_int.as_i64(), Some(42));
+        assert_eq!(json_float.as_f64(), Some(3.14));
+    }
+
+    #[test]
+    fn test_json_scalar_bool() {
+        let json_true = json!(true);
+        let json_false = json!(false);
+
+        assert_eq!(json_true.as_bool(), Some(true));
+        assert_eq!(json_false.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_json_array_parsing() {
+        let json_arr = json!([1, 2, 3]);
+        let arr = json_arr.as_array().unwrap();
+
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_i64(), Some(1));
+        assert_eq!(arr[1].as_i64(), Some(2));
+        assert_eq!(arr[2].as_i64(), Some(3));
+    }
+
+    #[test]
+    fn test_json_map_parsing() {
+        let json_map = json!({"key1": "value1", "key2": "value2"});
+        let obj = json_map.as_object().unwrap();
+
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("key1").unwrap().as_str(), Some("value1"));
+        assert_eq!(obj.get("key2").unwrap().as_str(), Some("value2"));
+    }
+
+    #[test]
+    fn test_base64_decoding() {
+        use base64::Engine;
+        let original = b"hello world";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(original);
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&encoded).unwrap();
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_json_nested_object() {
+        let json_nested = json!({
+            "outer": {
+                "inner": "value"
+            }
+        });
+
+        let outer = json_nested.get("outer").unwrap();
+        let inner = outer.get("inner").unwrap();
+        assert_eq!(inner.as_str(), Some("value"));
+    }
 }

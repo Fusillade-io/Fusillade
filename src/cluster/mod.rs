@@ -59,6 +59,7 @@ pub async fn dispatch_test_to_workers(
     script_content: String,
     config_json: String,
     assets: HashMap<String, String>,
+    metrics_url: String,
 ) -> Result<usize, String> {
     let workers_guard = workers.read().map_err(|e| e.to_string())?;
     let worker_count = workers_guard.len();
@@ -72,6 +73,7 @@ pub async fn dispatch_test_to_workers(
             script_content,
             config_json,
             assets,
+            metrics_url,
         })),
     };
 

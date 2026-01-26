@@ -191,7 +191,6 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
         ),
     )?;
 
-    // POST
     let tx_post = tx.clone();
     let sink_post = global_response_sink;
     http.set(
@@ -320,7 +319,6 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
         ),
     )?;
 
-    // PUT
     let tx_put = tx.clone();
     let sink_put = global_response_sink;
     http.set(
@@ -427,7 +425,6 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
         ),
     )?;
 
-    // DELETE
     let tx_del = tx.clone();
     let sink_del = global_response_sink;
     http.set(

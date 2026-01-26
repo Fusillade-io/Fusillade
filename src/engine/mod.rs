@@ -18,7 +18,6 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use tokio::time::{Duration, Instant};
-// Will use may::coroutine when worker spawning is migrated
 #[allow(unused_imports)]
 use may::coroutine;
 
@@ -375,9 +374,6 @@ impl Engine {
                 num_io_workers,
             ));
 
-            // eprintln!("[Engine] Workers: {}, Tokio threads: {}, Shards: {}, Aggregators: {}, Pool: {}, May stack: {}KB, I/O workers: {}",
-            //          total_workers, tokio_threads, num_shards, num_aggregators, pool_size, may_stack_size / 1024, num_io_workers);
-
             let start_time = Instant::now();
             let mut active_scenario_handles: Vec<JoinHandle<()>> = Vec::new(); // For multi-scenario
             let mut active_legacy_workers: Vec<(may::coroutine::JoinHandle<()>, Arc<AtomicBool>)> =
@@ -421,10 +417,6 @@ impl Engine {
 
             if let Some(ref scenarios) = config.scenarios {
                 // Multi-scenario mode: spawn a worker pool per scenario
-
-                // Duration for the loop is the max duration of all scenarios
-                // Actually we just wait for handles to finish.
-
                 for (scenario_name, scenario_config) in scenarios.iter() {
                     let scenario_name = scenario_name.clone();
                     let scenario_config = scenario_config.clone();
@@ -1200,8 +1192,7 @@ impl Engine {
         aggregator: SharedAggregator,
     ) -> Result<Option<String>> {
         let (runtime, context) = Self::create_runtime()?;
-        let (_tx, _rx) = crossbeam_channel::unbounded::<Metric>(); // Drop metrics from setup
-                                                                   // We probably want to print them.
+        let (_tx, _rx) = crossbeam_channel::unbounded::<Metric>();
         let (tx_print, rx_print) = crossbeam_channel::unbounded();
         std::thread::spawn(move || {
             while let Ok(Metric::Log { message }) = rx_print.recv() {

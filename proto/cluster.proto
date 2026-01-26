@@ -44,6 +44,7 @@ message StartTest {
     string script_content = 1;
     string config_json = 2;
     map<string, string> assets = 3;
+    string metrics_url = 4;
 }
 
 message StopTest {}

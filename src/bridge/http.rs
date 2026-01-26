@@ -559,7 +559,6 @@ pub fn register_sync(
                         }
                     }
                     if !cookie_header_val.is_empty() {
-                        // eprintln!("DEBUG: Sending Cookie to {}: {}", url_parsed.as_str(), cookie_header_val);
                         req_builder = req_builder.header("Cookie", cookie_header_val);
                     }
 
@@ -807,13 +806,6 @@ pub fn register_sync(
                             }
 
                             let start = std::time::Instant::now();
-                            // NOTE: Blocking client wrapper for multipart doesn't easily support async sleep inside unless we wrap it
-                            // But we used reqwest::blocking::Client.
-                            // We can use std::thread::sleep here as it's a blocking client call on a dedicated thread anyway?
-                            // No, runtime.block_on is not used here for multipart?
-                            // Wait, code says: reqwest::blocking::Client::builder()...
-                            // And then blocking_client.post()... .send()
-                            // This is synchronous code strictly.
 
                             if let Some(d) = drop {
                                 if rand::thread_rng().gen::<f64>() < d {

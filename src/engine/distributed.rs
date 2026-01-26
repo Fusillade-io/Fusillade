@@ -3,6 +3,7 @@ use crate::cluster::proto::cluster_client::ClusterClient;
 use crate::cluster::proto::{
     controller_command, worker_message, RegisterRequest, TestFinished, WorkerMessage,
 };
+use crate::engine::control::ControlCommand;
 use crate::engine::Engine;
 use crate::stats::db::HistoryDb;
 use crate::stats::{Metric, ReportStats, SharedAggregator};
@@ -97,6 +98,10 @@ impl WorkerServer {
         let tx_clone = tx.clone();
         let worker_id_clone = worker_id.clone();
 
+        // Shared state to hold the control sender for stopping tests
+        let control_tx: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<ControlCommand>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
         while let Some(cmd) = inbound.message().await? {
             match cmd.cmd {
                 Some(controller_command::Cmd::StartTest(start_test)) => {
@@ -121,9 +126,27 @@ impl WorkerServer {
                     let tx_finished = tx_clone.clone();
                     let wid = worker_id_clone.clone();
 
+                    // Get metrics URL from controller
+                    let metrics_url = if start_test.metrics_url.is_empty() {
+                        None
+                    } else {
+                        Some(start_test.metrics_url.clone())
+                    };
+
+                    // Create control channel for graceful stop
+                    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel();
+                    {
+                        let mut guard = control_tx.lock().unwrap();
+                        *guard = Some(ctrl_tx);
+                    }
+                    let control_tx_clone = control_tx.clone();
+
                     // Run test in background
                     tokio::spawn(async move {
                         println!("Starting load test...");
+                        if metrics_url.is_some() {
+                            println!("Streaming metrics to controller");
+                        }
                         let result = engine_clone.run_load_test(
                             script_path,
                             script_content,
@@ -131,10 +154,16 @@ impl WorkerServer {
                             true, // json output
                             None, // export_json
                             None, // export_html
-                            None, // metrics_url (TODO: stream to controller)
+                            metrics_url,
                             None, // metrics_auth
-                            None, // control_rx
+                            Some(ctrl_rx),
                         );
+
+                        // Clear the control sender when test finishes
+                        {
+                            let mut guard = control_tx_clone.lock().unwrap();
+                            *guard = None;
+                        }
 
                         match result {
                             Ok(report) => {
@@ -158,8 +187,14 @@ impl WorkerServer {
                     });
                 }
                 Some(controller_command::Cmd::StopTest(_)) => {
-                    println!("Received StopTest command");
-                    // TODO: Implement graceful stop
+                    println!("Received StopTest command, stopping gracefully...");
+                    if let Ok(guard) = control_tx.lock() {
+                        if let Some(ref sender) = *guard {
+                            let _ = sender.send(ControlCommand::Stop);
+                        } else {
+                            println!("No test currently running");
+                        }
+                    }
                 }
                 None => {
                     println!("Received empty command");
@@ -227,6 +262,7 @@ use crate::cluster::{dispatch_test_to_workers, WorkerRegistry};
 pub struct ControllerState {
     pub aggregator: SharedAggregator,
     pub workers: WorkerRegistry,
+    pub metrics_url: String,
 }
 
 pub struct ControllerServer {
@@ -266,9 +302,13 @@ impl ControllerServer {
             }
         });
 
+        // Construct metrics URL for workers to send metrics to
+        let metrics_url = format!("http://{}/metrics", addr);
+
         let state = ControllerState {
             aggregator: self.aggregator,
             workers,
+            metrics_url,
         };
 
         let app = Router::new()
@@ -284,6 +324,7 @@ impl ControllerServer {
             .with_state(state);
 
         println!("Controller running on http://{}", addr);
+        println!("Workers will stream metrics to {}", format!("http://{}/metrics", addr));
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app).await?;
         Ok(())
@@ -362,7 +403,7 @@ async fn handle_api_workers(State(state): State<ControllerState>) -> Json<Worker
 }
 
 /// Request body for /api/dispatch endpoint
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct DispatchTestRequest {
     pub script_content: String,
     pub config: Config,
@@ -398,6 +439,7 @@ async fn handle_api_dispatch(
         payload.script_content,
         config_json,
         payload.assets,
+        state.metrics_url.clone(),
     )
     .await
     {
@@ -458,5 +500,93 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("true"));
         assert!(json.contains("5"));
+    }
+
+    #[test]
+    fn test_controller_state_metrics_url() {
+        // Test that ControllerState properly stores metrics_url
+        let aggregator = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::stats::StatsAggregator::new(),
+        ));
+        let workers: WorkerRegistry =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let metrics_url = "http://localhost:9000/metrics".to_string();
+
+        let state = ControllerState {
+            aggregator,
+            workers,
+            metrics_url: metrics_url.clone(),
+        };
+
+        assert_eq!(state.metrics_url, metrics_url);
+    }
+
+    #[test]
+    fn test_metrics_url_construction() {
+        let addr = "0.0.0.0:9000";
+        let metrics_url = format!("http://{}/metrics", addr);
+        assert_eq!(metrics_url, "http://0.0.0.0:9000/metrics");
+    }
+
+    #[test]
+    fn test_control_command_stop() {
+        // Test that ControlCommand::Stop can be sent through a channel
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(ControlCommand::Stop).unwrap();
+
+        let received = rx.recv().unwrap();
+        assert!(matches!(received, ControlCommand::Stop));
+    }
+
+    #[test]
+    fn test_dispatch_request_serialization() {
+        let config = Config::default();
+        let req = DispatchTestRequest {
+            script_content: "export default function() {}".to_string(),
+            config,
+            assets: std::collections::HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: DispatchTestRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.script_content, "export default function() {}");
+    }
+
+    #[test]
+    fn test_metric_batch_serialization() {
+        let batch = MetricBatch {
+            worker_id: 1,
+            metrics: vec![
+                Metric::Request {
+                    name: "test".to_string(),
+                    timings: crate::stats::RequestTimings::default(),
+                    status: 200,
+                    error: None,
+                    tags: std::collections::HashMap::new(),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&batch).unwrap();
+        assert!(json.contains("worker_id"));
+    }
+
+    #[test]
+    fn test_worker_list_response_serialization() {
+        let resp = WorkerListResponse {
+            workers: vec![
+                WorkerInfoResponse {
+                    id: "worker-1".to_string(),
+                    address: "192.168.1.1:9000".to_string(),
+                    available_cpus: 4,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("worker-1"));
+        assert!(json.contains("192.168.1.1:9000"));
+        assert!(json.contains("4"));
     }
 }
