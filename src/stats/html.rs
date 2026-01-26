@@ -250,8 +250,19 @@ pub fn generate_html(report: &ReportStats) -> String {
         html.push_str("</table></div>\n");
     }
 
-    // Per-endpoint breakdown
-    if !report.grouped_requests.is_empty() {
+    // Per-endpoint breakdown (filter out internal iteration metrics)
+    let real_endpoints: Vec<_> = report
+        .grouped_requests
+        .iter()
+        .filter(|(name, _)| {
+            !name.ends_with("iteration")
+                && !name.ends_with("iteration_total")
+                && *name != "iteration"
+                && *name != "iteration_total"
+        })
+        .collect();
+
+    if !real_endpoints.is_empty() {
         html.push_str(
             r#"
     <div class="section">
@@ -268,7 +279,7 @@ pub fn generate_html(report: &ReportStats) -> String {
             </tr>"#,
         );
 
-        let mut endpoints: Vec<_> = report.grouped_requests.iter().collect();
+        let mut endpoints = real_endpoints;
         endpoints.sort_by(|a, b| b.1.total_requests.cmp(&a.1.total_requests));
 
         for (name, req) in endpoints {
