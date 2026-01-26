@@ -416,7 +416,6 @@ pub fn register_sync(ctx: &Ctx) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
 
     // Helper to create a mock field descriptor for testing
