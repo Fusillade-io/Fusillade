@@ -33,7 +33,7 @@ pub struct ScenarioConfig {
     /// Per-scenario thresholds (k6: thresholds)
     #[serde(alias = "thresholds")]
     pub thresholds: Option<HashMap<String, Vec<String>>>,
-    /// Worker thread stack size in bytes (default: 128KB). Increase if encountering stack overflows.
+    /// Worker thread stack size in bytes (default: 32KB). Increase if encountering stack overflows.
     pub stack_size: Option<usize>,
     /// Sink (discard) response bodies to save memory. Body is still downloaded from the network
     /// (required for connection keep-alive), but immediately discarded instead of being stored.
@@ -73,7 +73,7 @@ pub struct Config {
     pub jitter: Option<String>,
     /// Chaos injection: Packet drop probability (0.0 - 1.0)
     pub drop: Option<f64>,
-    /// Worker thread stack size in bytes (default: 128KB). Increase to 256KB or higher if encountering stack overflows.
+    /// Worker thread stack size in bytes (default: 32KB). Increase if encountering stack overflows with complex scripts.
     pub stack_size: Option<usize>,
     /// Sink (discard) response bodies to save memory. Body is still downloaded from the network
     /// (required for connection keep-alive), but immediately discarded instead of being stored.
@@ -279,5 +279,197 @@ scenarios:
         let scenarios = config.scenarios.unwrap();
         assert_eq!(scenarios["load_test"].response_sink, Some(true));
         assert_eq!(scenarios["normal_test"].response_sink, None);
+    }
+
+    #[test]
+    fn test_config_abort_on_fail() {
+        let yaml = r#"
+workers: 10
+duration: "30s"
+abort_on_fail: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.abort_on_fail, Some(true));
+    }
+
+    #[test]
+    fn test_config_abort_on_fail_camel_case() {
+        let json = r#"{
+            "workers": 5,
+            "duration": "10s",
+            "abortOnFail": true
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.abort_on_fail, Some(true));
+    }
+
+    #[test]
+    fn test_config_memory_safe() {
+        let yaml = r#"
+workers: 10000
+duration: "5m"
+memory_safe: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.memory_safe, Some(true));
+    }
+
+    #[test]
+    fn test_config_memory_safe_camel_case() {
+        let json = r#"{
+            "workers": 5000,
+            "duration": "5m",
+            "memorySafe": true
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.memory_safe, Some(true));
+    }
+
+    #[test]
+    fn test_config_no_endpoint_tracking() {
+        let yaml = r#"
+workers: 10
+duration: "30s"
+no_endpoint_tracking: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.no_endpoint_tracking, Some(true));
+    }
+
+    #[test]
+    fn test_config_no_endpoint_tracking_camel_case() {
+        let json = r#"{
+            "workers": 5,
+            "duration": "10s",
+            "noEndpointTracking": true
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.no_endpoint_tracking, Some(true));
+    }
+
+    #[test]
+    fn test_config_all_fields() {
+        let yaml = r#"
+workers: 50
+duration: "2m"
+schedule:
+  - duration: "30s"
+    target: 25
+  - duration: "1m"
+    target: 50
+executor: "ramping-vus"
+rate: 100
+time_unit: "1s"
+criteria:
+  http_req_duration:
+    - "p95<500"
+min_iteration_duration: "1s"
+warmup: "https://api.example.com/health"
+stop: "10s"
+iterations: 100
+jitter: "100ms"
+drop: 0.05
+stack_size: 65536
+response_sink: true
+no_endpoint_tracking: false
+abort_on_fail: true
+memory_safe: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.workers, Some(50));
+        assert_eq!(config.duration, Some("2m".to_string()));
+        assert!(config.schedule.is_some());
+        assert_eq!(config.schedule.as_ref().unwrap().len(), 2);
+        assert_eq!(config.executor, Some("ramping-vus".to_string()));
+        assert_eq!(config.rate, Some(100));
+        assert_eq!(config.time_unit, Some("1s".to_string()));
+        assert!(config.criteria.is_some());
+        assert_eq!(config.min_iteration_duration, Some("1s".to_string()));
+        assert_eq!(config.warmup, Some("https://api.example.com/health".to_string()));
+        assert_eq!(config.stop, Some("10s".to_string()));
+        assert_eq!(config.iterations, Some(100));
+        assert_eq!(config.jitter, Some("100ms".to_string()));
+        assert_eq!(config.drop, Some(0.05));
+        assert_eq!(config.stack_size, Some(65536));
+        assert_eq!(config.response_sink, Some(true));
+        assert_eq!(config.no_endpoint_tracking, Some(false));
+        assert_eq!(config.abort_on_fail, Some(true));
+        assert_eq!(config.memory_safe, Some(true));
+    }
+
+    #[test]
+    fn test_config_merge_priority() {
+        // Test that merging works correctly (simulating CLI > file > script priority)
+        let script_config = Config {
+            workers: Some(10),
+            duration: Some("30s".to_string()),
+            jitter: Some("100ms".to_string()),
+            ..Default::default()
+        };
+
+        let file_config = Config {
+            workers: Some(50),  // Should override script
+            duration: Some("1m".to_string()),  // Should override script
+            drop: Some(0.05),  // New field from file
+            ..Default::default()
+        };
+
+        // Simulate merging: file overrides script
+        let mut merged = script_config.clone();
+        if file_config.workers.is_some() {
+            merged.workers = file_config.workers;
+        }
+        if file_config.duration.is_some() {
+            merged.duration = file_config.duration;
+        }
+        if file_config.drop.is_some() {
+            merged.drop = file_config.drop;
+        }
+
+        assert_eq!(merged.workers, Some(50));  // From file
+        assert_eq!(merged.duration, Some("1m".to_string()));  // From file
+        assert_eq!(merged.jitter, Some("100ms".to_string()));  // From script (not in file)
+        assert_eq!(merged.drop, Some(0.05));  // From file
+
+        // Simulate CLI override
+        let cli_workers = Some(100);
+        if cli_workers.is_some() {
+            merged.workers = cli_workers;
+        }
+        assert_eq!(merged.workers, Some(100));  // From CLI
+    }
+
+    #[test]
+    fn test_scenario_config_all_fields() {
+        let yaml = r#"
+scenarios:
+  test:
+    executor: "constant-vus"
+    workers: 10
+    duration: "1m"
+    iterations: 50
+    rate: 10
+    time_unit: "1s"
+    exec: "testFunction"
+    start_time: "30s"
+    stack_size: 32768
+    response_sink: true
+    thresholds:
+      http_req_duration:
+        - "p95<500"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let scenario = &config.scenarios.unwrap()["test"];
+        assert_eq!(scenario.executor, Some("constant-vus".to_string()));
+        assert_eq!(scenario.workers, Some(10));
+        assert_eq!(scenario.duration, Some("1m".to_string()));
+        assert_eq!(scenario.iterations, Some(50));
+        assert_eq!(scenario.rate, Some(10));
+        assert_eq!(scenario.time_unit, Some("1s".to_string()));
+        assert_eq!(scenario.exec, Some("testFunction".to_string()));
+        assert_eq!(scenario.start_time, Some("30s".to_string()));
+        assert_eq!(scenario.stack_size, Some(32768));
+        assert_eq!(scenario.response_sink, Some(true));
+        assert!(scenario.thresholds.is_some());
     }
 }

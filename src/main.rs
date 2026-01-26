@@ -135,6 +135,9 @@ enum Commands {
         workers: Option<usize>,
         #[arg(short, long)]
         duration: Option<String>,
+        /// External configuration file (YAML or JSON)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
         /// Run in headless mode (no TUI, suitable for CI/CD)
         #[arg(long)]
         headless: bool,
@@ -282,6 +285,7 @@ fn main() -> Result<()> {
             scenario,
             workers,
             duration,
+            config,
             headless,
             json,
             export_json,
@@ -408,11 +412,91 @@ fn main() -> Result<()> {
             // Local mode: Run test locally
             let engine = Engine::new()?;
             let script_content = std::fs::read_to_string(&scenario).unwrap();
+
+            // Start with config from script's export const options
             let mut final_config = engine
                 .extract_config(scenario.clone(), script_content.clone())
                 .unwrap()
                 .unwrap_or_default();
 
+            // Merge external config file if provided (overrides script config)
+            if let Some(config_path) = config {
+                let config_content = std::fs::read_to_string(&config_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read config file: {}", e))?;
+
+                let file_config: fusillade::cli::config::Config = if config_path
+                    .extension()
+                    .map(|e| e == "json")
+                    .unwrap_or(false)
+                {
+                    serde_json::from_str(&config_content)
+                        .map_err(|e| anyhow::anyhow!("Invalid JSON config: {}", e))?
+                } else {
+                    serde_yaml::from_str(&config_content)
+                        .map_err(|e| anyhow::anyhow!("Invalid YAML config: {}", e))?
+                };
+
+                // Merge file config into final_config (file overrides script)
+                if file_config.workers.is_some() {
+                    final_config.workers = file_config.workers;
+                }
+                if file_config.duration.is_some() {
+                    final_config.duration = file_config.duration;
+                }
+                if file_config.schedule.is_some() {
+                    final_config.schedule = file_config.schedule;
+                }
+                if file_config.executor.is_some() {
+                    final_config.executor = file_config.executor;
+                }
+                if file_config.rate.is_some() {
+                    final_config.rate = file_config.rate;
+                }
+                if file_config.time_unit.is_some() {
+                    final_config.time_unit = file_config.time_unit;
+                }
+                if file_config.criteria.is_some() {
+                    final_config.criteria = file_config.criteria;
+                }
+                if file_config.min_iteration_duration.is_some() {
+                    final_config.min_iteration_duration = file_config.min_iteration_duration;
+                }
+                if file_config.warmup.is_some() {
+                    final_config.warmup = file_config.warmup;
+                }
+                if file_config.stop.is_some() {
+                    final_config.stop = file_config.stop;
+                }
+                if file_config.iterations.is_some() {
+                    final_config.iterations = file_config.iterations;
+                }
+                if file_config.scenarios.is_some() {
+                    final_config.scenarios = file_config.scenarios;
+                }
+                if file_config.jitter.is_some() {
+                    final_config.jitter = file_config.jitter;
+                }
+                if file_config.drop.is_some() {
+                    final_config.drop = file_config.drop;
+                }
+                if file_config.stack_size.is_some() {
+                    final_config.stack_size = file_config.stack_size;
+                }
+                if file_config.response_sink.is_some() {
+                    final_config.response_sink = file_config.response_sink;
+                }
+                if file_config.no_endpoint_tracking.is_some() {
+                    final_config.no_endpoint_tracking = file_config.no_endpoint_tracking;
+                }
+                if file_config.abort_on_fail.is_some() {
+                    final_config.abort_on_fail = file_config.abort_on_fail;
+                }
+                if file_config.memory_safe.is_some() {
+                    final_config.memory_safe = file_config.memory_safe;
+                }
+            }
+
+            // CLI flags override everything (highest priority)
             if let Some(w) = workers {
                 final_config.workers = Some(w);
             }
@@ -711,53 +795,114 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            println!("Replaying {} failed requests...", requests.len());
+            println!(
+                "Replaying {} failed requests{}...",
+                requests.len(),
+                if parallel { " in parallel" } else { " sequentially" }
+            );
 
-            let client = reqwest::blocking::Client::new();
+            if parallel {
+                // Parallel execution using threads
+                let handles: Vec<_> = requests
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, req)| {
+                        std::thread::spawn(move || {
+                            let client = reqwest::blocking::Client::new();
+                            let mut builder = match req.method.as_str() {
+                                "GET" => client.get(&req.url),
+                                "POST" => client.post(&req.url),
+                                "PUT" => client.put(&req.url),
+                                "DELETE" => client.delete(&req.url),
+                                "PATCH" => client.patch(&req.url),
+                                _ => client.get(&req.url),
+                            };
 
-            for (i, req) in requests.iter().enumerate() {
-                println!(
-                    "\n[{}/{}] {} {}",
-                    i + 1,
-                    requests.len(),
-                    req.method,
-                    req.url
-                );
+                            for (key, value) in &req.headers {
+                                builder = builder.header(key, value);
+                            }
 
-                let mut builder = match req.method.as_str() {
-                    "GET" => client.get(&req.url),
-                    "POST" => client.post(&req.url),
-                    "PUT" => client.put(&req.url),
-                    "DELETE" => client.delete(&req.url),
-                    "PATCH" => client.patch(&req.url),
-                    _ => client.get(&req.url),
-                };
+                            if let Some(body) = &req.body {
+                                builder = builder.body(body.clone());
+                            }
 
-                for (key, value) in &req.headers {
-                    builder = builder.header(key, value);
-                }
+                            let result = builder.send();
+                            (i, req.method.clone(), req.url.clone(), result)
+                        })
+                    })
+                    .collect();
 
-                if let Some(body) = &req.body {
-                    builder = builder.body(body.clone());
-                }
+                // Collect results
+                let mut results: Vec<_> = handles
+                    .into_iter()
+                    .filter_map(|h| h.join().ok())
+                    .collect();
+                results.sort_by_key(|(i, _, _, _)| *i);
 
-                match builder.send() {
-                    Ok(response) => {
-                        let status = response.status();
-                        let body = response.text().unwrap_or_default();
-                        println!("  Status: {}", status);
-                        if body.len() < 500 {
-                            println!("  Body: {}", body);
-                        } else {
-                            println!("  Body: {}... (truncated)", &body[..500]);
+                for (i, method, url, result) in results {
+                    println!("\n[{}] {} {}", i + 1, method, url);
+                    match result {
+                        Ok(response) => {
+                            let status = response.status();
+                            let body = response.text().unwrap_or_default();
+                            println!("  Status: {}", status);
+                            if body.len() < 500 {
+                                println!("  Body: {}", body);
+                            } else {
+                                println!("  Body: {}... (truncated)", &body[..500]);
+                            }
+                        }
+                        Err(e) => {
+                            println!("  Error: {}", e);
                         }
                     }
-                    Err(e) => {
-                        println!("  Error: {}", e);
-                    }
                 }
+            } else {
+                // Sequential execution with delay
+                let client = reqwest::blocking::Client::new();
 
-                if !parallel {
+                for (i, req) in requests.iter().enumerate() {
+                    println!(
+                        "\n[{}/{}] {} {}",
+                        i + 1,
+                        requests.len(),
+                        req.method,
+                        req.url
+                    );
+
+                    let mut builder = match req.method.as_str() {
+                        "GET" => client.get(&req.url),
+                        "POST" => client.post(&req.url),
+                        "PUT" => client.put(&req.url),
+                        "DELETE" => client.delete(&req.url),
+                        "PATCH" => client.patch(&req.url),
+                        _ => client.get(&req.url),
+                    };
+
+                    for (key, value) in &req.headers {
+                        builder = builder.header(key, value);
+                    }
+
+                    if let Some(body) = &req.body {
+                        builder = builder.body(body.clone());
+                    }
+
+                    match builder.send() {
+                        Ok(response) => {
+                            let status = response.status();
+                            let body = response.text().unwrap_or_default();
+                            println!("  Status: {}", status);
+                            if body.len() < 500 {
+                                println!("  Body: {}", body);
+                            } else {
+                                println!("  Body: {}... (truncated)", &body[..500]);
+                            }
+                        }
+                        Err(e) => {
+                            println!("  Error: {}", e);
+                        }
+                    }
+
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
