@@ -324,7 +324,10 @@ impl ControllerServer {
             .with_state(state);
 
         println!("Controller running on http://{}", addr);
-        println!("Workers will stream metrics to {}", format!("http://{}/metrics", addr));
+        println!(
+            "Workers will stream metrics to {}",
+            format!("http://{}/metrics", addr)
+        );
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app).await?;
         Ok(())
@@ -505,9 +508,8 @@ mod tests {
     #[test]
     fn test_controller_state_metrics_url() {
         // Test that ControllerState properly stores metrics_url
-        let aggregator = std::sync::Arc::new(std::sync::RwLock::new(
-            crate::stats::StatsAggregator::new(),
-        ));
+        let aggregator =
+            std::sync::Arc::new(std::sync::RwLock::new(crate::stats::StatsAggregator::new()));
         let workers: WorkerRegistry =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let metrics_url = "http://localhost:9000/metrics".to_string();
@@ -557,15 +559,13 @@ mod tests {
     fn test_metric_batch_serialization() {
         let batch = MetricBatch {
             worker_id: 1,
-            metrics: vec![
-                Metric::Request {
-                    name: "test".to_string(),
-                    timings: crate::stats::RequestTimings::default(),
-                    status: 200,
-                    error: None,
-                    tags: std::collections::HashMap::new(),
-                },
-            ],
+            metrics: vec![Metric::Request {
+                name: "test".to_string(),
+                timings: crate::stats::RequestTimings::default(),
+                status: 200,
+                error: None,
+                tags: std::collections::HashMap::new(),
+            }],
         };
 
         let json = serde_json::to_string(&batch).unwrap();
@@ -575,13 +575,11 @@ mod tests {
     #[test]
     fn test_worker_list_response_serialization() {
         let resp = WorkerListResponse {
-            workers: vec![
-                WorkerInfoResponse {
-                    id: "worker-1".to_string(),
-                    address: "192.168.1.1:9000".to_string(),
-                    available_cpus: 4,
-                },
-            ],
+            workers: vec![WorkerInfoResponse {
+                id: "worker-1".to_string(),
+                address: "192.168.1.1:9000".to_string(),
+                available_cpus: 4,
+            }],
         };
 
         let json = serde_json::to_string(&resp).unwrap();

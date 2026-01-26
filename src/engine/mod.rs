@@ -6,6 +6,8 @@ use crate::stats::{Metric, ShardedAggregator, SharedAggregator, StatsAggregator}
 use anyhow::Result;
 use crossbeam_channel::{self, Receiver, Sender};
 use http::Method;
+#[allow(unused_imports)]
+use may::coroutine;
 use rquickjs::{
     loader::{FileResolver, ScriptLoader},
     CatchResultExt, CaughtError, Context, Ctx, Function, Module, Object, Runtime, Value,
@@ -18,8 +20,6 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use tokio::time::{Duration, Instant};
-#[allow(unused_imports)]
-use may::coroutine;
 
 /// Format a CaughtError with detailed message and stack trace (including line numbers)
 fn format_js_error(error: &CaughtError) -> String {

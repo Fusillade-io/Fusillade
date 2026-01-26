@@ -40,9 +40,9 @@ fn json_to_dynamic_message(
 fn json_val_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Result<ProstValue> {
     // Handle repeated fields (arrays)
     if field.is_list() {
-        let arr = json
-            .as_array()
-            .ok_or_else(|| rquickjs::Error::new_from_js("Expected array for repeated field", "TypeError"))?;
+        let arr = json.as_array().ok_or_else(|| {
+            rquickjs::Error::new_from_js("Expected array for repeated field", "TypeError")
+        })?;
         let items: Result<Vec<ProstValue>> = arr
             .iter()
             .map(|item| json_scalar_to_prost(item.clone(), field))
@@ -52,19 +52,22 @@ fn json_val_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Result
 
     // Handle map fields
     if field.is_map() {
-        let obj = json
-            .as_object()
-            .ok_or_else(|| rquickjs::Error::new_from_js("Expected object for map field", "TypeError"))?;
+        let obj = json.as_object().ok_or_else(|| {
+            rquickjs::Error::new_from_js("Expected object for map field", "TypeError")
+        })?;
         let map_entry = field.kind();
         if let Kind::Message(entry_desc) = map_entry {
-            let key_field = entry_desc.get_field_by_name("key")
+            let key_field = entry_desc
+                .get_field_by_name("key")
                 .ok_or_else(|| rquickjs::Error::new_from_js("Invalid map entry", "TypeError"))?;
-            let value_field = entry_desc.get_field_by_name("value")
+            let value_field = entry_desc
+                .get_field_by_name("value")
                 .ok_or_else(|| rquickjs::Error::new_from_js("Invalid map entry", "TypeError"))?;
 
             let mut map = std::collections::HashMap::new();
             for (k, v) in obj {
-                let key_val = json_scalar_to_prost(serde_json::Value::String(k.clone()), &key_field)?;
+                let key_val =
+                    json_scalar_to_prost(serde_json::Value::String(k.clone()), &key_field)?;
                 let val_val = json_scalar_to_prost(v.clone(), &value_field)?;
                 if let ProstValue::String(key_str) = key_val {
                     map.insert(prost_reflect::MapKey::String(key_str), val_val);
@@ -82,7 +85,10 @@ fn json_val_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Result
             }
             return Ok(ProstValue::Map(map));
         }
-        return Err(rquickjs::Error::new_from_js("Invalid map field type", "TypeError"));
+        return Err(rquickjs::Error::new_from_js(
+            "Invalid map field type",
+            "TypeError",
+        ));
     }
 
     // Handle scalar types
@@ -126,13 +132,15 @@ fn json_scalar_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Res
             .ok_or_else(|| rquickjs::Error::new_from_js("Expected string", "TypeError")),
         Kind::Bytes => {
             // Expect base64-encoded string
-            let b64_str = json
-                .as_str()
-                .ok_or_else(|| rquickjs::Error::new_from_js("Expected base64 string for bytes", "TypeError"))?;
+            let b64_str = json.as_str().ok_or_else(|| {
+                rquickjs::Error::new_from_js("Expected base64 string for bytes", "TypeError")
+            })?;
             use base64::Engine;
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(b64_str)
-                .map_err(|_| rquickjs::Error::new_from_js("Invalid base64 encoding", "TypeError"))?;
+                .map_err(|_| {
+                    rquickjs::Error::new_from_js("Invalid base64 encoding", "TypeError")
+                })?;
             Ok(ProstValue::Bytes(prost::bytes::Bytes::from(decoded)))
         }
         Kind::Enum(enum_desc) => {
@@ -145,7 +153,10 @@ fn json_scalar_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Res
             } else if let Some(num) = json.as_i64() {
                 Ok(ProstValue::EnumNumber(num as i32))
             } else {
-                Err(rquickjs::Error::new_from_js("Expected enum string or number", "TypeError"))
+                Err(rquickjs::Error::new_from_js(
+                    "Expected enum string or number",
+                    "TypeError",
+                ))
             }
         }
         Kind::Message(msg_desc) => {
@@ -464,7 +475,9 @@ mod tests {
         use base64::Engine;
         let original = b"hello world";
         let encoded = base64::engine::general_purpose::STANDARD.encode(original);
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&encoded).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .unwrap();
 
         assert_eq!(decoded, original);
     }
