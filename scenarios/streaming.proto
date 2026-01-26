@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package streaming;
+
+// Example service demonstrating all streaming patterns
+service DataService {
+    // Unary RPC - single request, single response
+    rpc GetData(DataRequest) returns (DataResponse);
+
+    // Server streaming - single request, stream of responses
+    rpc StreamData(StreamRequest) returns (stream DataChunk);
+
+    // Client streaming - stream of requests, single response
+    rpc UploadData(stream DataChunk) returns (UploadResponse);
+
+    // Bidirectional streaming - stream of requests, stream of responses
+    rpc Chat(stream ChatMessage) returns (stream ChatMessage);
+}
+
+message DataRequest {
+    string id = 1;
+}
+
+message DataResponse {
+    string id = 1;
+    string data = 2;
+    int64 timestamp = 3;
+}
+
+message StreamRequest {
+    string query = 1;
+    int32 count = 2;
+}
+
+message DataChunk {
+    string chunk = 1;
+    int32 index = 2;
+}
+
+message UploadResponse {
+    int32 chunks_received = 1;
+    int64 total_bytes = 2;
+    string status = 3;
+}
+
+message ChatMessage {
+    string message = 1;
+    int64 timestamp = 2;
+    string sender = 3;
+}

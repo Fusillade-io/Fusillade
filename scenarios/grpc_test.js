@@ -20,14 +20,14 @@ try {
     print("Proto load failed (expected if file missing): " + e);
 }
 
-export default async function () {
-    // This part requires a real server. 
+export default function () {
+    // This part requires a real server.
     // Uncomment and adapt when a server is available.
 
     try {
-        await client.connect('http://localhost:50051');
+        client.connect('http://localhost:50051');
 
-        let response = await client.invoke('helloworld.Greeter/SayHello', {
+        let response = client.invoke('helloworld.Greeter/SayHello', {
             name: 'Thruster'
         });
 

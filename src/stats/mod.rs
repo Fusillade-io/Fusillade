@@ -773,6 +773,10 @@ impl StatsAggregator {
             for threshold in thresholds {
                 let parts: Vec<&str> = threshold.split_whitespace().collect();
                 if parts.len() < 3 {
+                    eprintln!(
+                        "Warning: Invalid threshold format '{}' for metric '{}'. Expected format: 'p95 < 500' (spaces required)",
+                        threshold, metric_name
+                    );
                     continue;
                 }
 

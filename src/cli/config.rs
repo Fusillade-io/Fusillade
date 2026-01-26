@@ -148,7 +148,7 @@ schedule:
         let yaml = r#"
 criteria:
   http_req_duration:
-    - "p(95) < 500"
+    - "p95 < 500"
     - "avg < 200"
   checks:
     - "rate > 0.95"

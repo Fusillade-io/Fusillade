@@ -1,3 +1,4 @@
+use futures_lite::StreamExt;
 use prost::bytes::Buf;
 use prost_reflect::{
     DescriptorPool, DynamicMessage, FieldDescriptor, Kind, MethodDescriptor, Value as ProstValue,
@@ -5,11 +6,15 @@ use prost_reflect::{
 use rquickjs::{class::Trace, Ctx, Function, JsLifetime, Object, Result, Value};
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 use tonic::{
     client::Grpc,
     codec::{Codec, DecodeBuf, EncodeBuf},
     transport::{Channel, Endpoint},
-    Request, Status,
+    Request, Status, Streaming,
 };
 
 // --- Helper: JSON -> DynamicMessage ---
@@ -166,6 +171,36 @@ fn json_scalar_to_prost(json: serde_json::Value, field: &FieldDescriptor) -> Res
     }
 }
 
+/// Convert a DynamicMessage to JS Value
+fn dynamic_message_to_js<'js>(ctx: &Ctx<'js>, msg: &DynamicMessage) -> Result<Value<'js>> {
+    let response_json = serde_json::to_string(msg).map_err(|e| {
+        eprintln!("Response serialization error: {}", e);
+        rquickjs::Error::new_from_js("JsonError", "ValueError")
+    })?;
+
+    let json: Object = ctx.globals().get("JSON")?;
+    let parse: Function = json.get("parse")?;
+    parse.call((response_json,))
+}
+
+/// Convert JS Value to serde_json::Value
+fn js_to_json<'js>(ctx: &Ctx<'js>, val: Value<'js>) -> Result<serde_json::Value> {
+    if val.is_object() {
+        let json: Object = ctx.globals().get("JSON")?;
+        let stringify: Function = json.get("stringify")?;
+        let json_str: String = stringify.call((val,))?;
+        serde_json::from_str(&json_str).map_err(|e| {
+            eprintln!("JSON parse error: {}", e);
+            rquickjs::Error::new_from_js("JsonError", "ValueError")
+        })
+    } else {
+        Err(rquickjs::Error::new_from_js(
+            "Request body must be object",
+            "TypeError",
+        ))
+    }
+}
+
 // --- Dynamic Codec for Tonic ---
 
 #[derive(Debug, Clone)]
@@ -243,6 +278,186 @@ impl tonic::codec::Decoder for DynamicDecoder {
     }
 }
 
+// --- Server Stream Class ---
+
+/// Handle for server streaming RPC
+#[derive(Trace)]
+#[rquickjs::class]
+pub struct GrpcServerStream {
+    #[qjs(skip_trace)]
+    message_rx: RefCell<Option<crossbeam_channel::Receiver<DynamicMessage>>>,
+    #[qjs(skip_trace)]
+    running: Arc<AtomicBool>,
+}
+
+unsafe impl<'js> JsLifetime<'js> for GrpcServerStream {
+    type Changed<'to> = GrpcServerStream;
+}
+
+#[rquickjs::methods]
+impl GrpcServerStream {
+    /// Receive the next message from the server stream
+    /// Returns message object or null if stream ended
+    pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        let borrow = self.message_rx.borrow();
+        if let Some(ref rx) = *borrow {
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(msg) => dynamic_message_to_js(&ctx, &msg),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(Value::new_null(ctx)),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Ok(Value::new_null(ctx)),
+            }
+        } else {
+            Ok(Value::new_null(ctx))
+        }
+    }
+
+    /// Close the stream early
+    pub fn close(&self) -> Result<()> {
+        self.running.store(false, Ordering::SeqCst);
+        *self.message_rx.borrow_mut() = None;
+        Ok(())
+    }
+}
+
+// --- Client Stream Class ---
+
+/// Handle for client streaming RPC
+#[derive(Trace)]
+#[rquickjs::class]
+pub struct GrpcClientStream {
+    #[qjs(skip_trace)]
+    message_tx: RefCell<Option<mpsc::Sender<DynamicMessage>>>,
+    #[qjs(skip_trace)]
+    response_rx: RefCell<
+        Option<tokio::sync::oneshot::Receiver<std::result::Result<DynamicMessage, Status>>>,
+    >,
+    #[qjs(skip_trace)]
+    runtime: Arc<Runtime>,
+    #[qjs(skip_trace)]
+    input_desc: prost_reflect::MessageDescriptor,
+}
+
+unsafe impl<'js> JsLifetime<'js> for GrpcClientStream {
+    type Changed<'to> = GrpcClientStream;
+}
+
+#[rquickjs::methods]
+impl GrpcClientStream {
+    /// Send a message to the server
+    pub fn send<'js>(&self, ctx: Ctx<'js>, msg_val: Value<'js>) -> Result<()> {
+        let borrow = self.message_tx.borrow();
+        if let Some(ref tx) = *borrow {
+            let json_obj = js_to_json(&ctx, msg_val)?;
+            let msg = json_to_dynamic_message(self.input_desc.clone(), json_obj)?;
+
+            self.runtime
+                .block_on(async { tx.send(msg).await })
+                .map_err(|_| rquickjs::Error::new_from_js("Stream send failed", "NetworkError"))?;
+            Ok(())
+        } else {
+            Err(rquickjs::Error::new_from_js(
+                "Stream already closed",
+                "StateError",
+            ))
+        }
+    }
+
+    /// Close the send side and wait for the server's response
+    #[qjs(rename = "closeAndRecv")]
+    pub fn close_and_recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        // Drop the sender to signal end of stream
+        *self.message_tx.borrow_mut() = None;
+
+        // Wait for response
+        let mut response_borrow = self.response_rx.borrow_mut();
+        if let Some(rx) = response_borrow.take() {
+            let result = self.runtime.block_on(rx);
+            match result {
+                Ok(Ok(msg)) => dynamic_message_to_js(&ctx, &msg),
+                Ok(Err(e)) => {
+                    eprintln!("gRPC error: {}", e);
+                    Err(rquickjs::Error::new_from_js("GrpcError", "NetworkError"))
+                }
+                Err(_) => Err(rquickjs::Error::new_from_js(
+                    "Response channel closed",
+                    "NetworkError",
+                )),
+            }
+        } else {
+            Err(rquickjs::Error::new_from_js(
+                "Already received response",
+                "StateError",
+            ))
+        }
+    }
+}
+
+// --- Bidi Stream Class ---
+
+/// Handle for bidirectional streaming RPC
+#[derive(Trace)]
+#[rquickjs::class]
+pub struct GrpcBidiStream {
+    #[qjs(skip_trace)]
+    message_tx: RefCell<Option<mpsc::Sender<DynamicMessage>>>,
+    #[qjs(skip_trace)]
+    message_rx: RefCell<Option<crossbeam_channel::Receiver<DynamicMessage>>>,
+    #[qjs(skip_trace)]
+    runtime: Arc<Runtime>,
+    #[qjs(skip_trace)]
+    running: Arc<AtomicBool>,
+    #[qjs(skip_trace)]
+    input_desc: prost_reflect::MessageDescriptor,
+}
+
+unsafe impl<'js> JsLifetime<'js> for GrpcBidiStream {
+    type Changed<'to> = GrpcBidiStream;
+}
+
+#[rquickjs::methods]
+impl GrpcBidiStream {
+    /// Send a message to the server
+    pub fn send<'js>(&self, ctx: Ctx<'js>, msg_val: Value<'js>) -> Result<()> {
+        let borrow = self.message_tx.borrow();
+        if let Some(ref tx) = *borrow {
+            let json_obj = js_to_json(&ctx, msg_val)?;
+            let msg = json_to_dynamic_message(self.input_desc.clone(), json_obj)?;
+
+            self.runtime
+                .block_on(async { tx.send(msg).await })
+                .map_err(|_| rquickjs::Error::new_from_js("Stream send failed", "NetworkError"))?;
+            Ok(())
+        } else {
+            Err(rquickjs::Error::new_from_js(
+                "Stream already closed",
+                "StateError",
+            ))
+        }
+    }
+
+    /// Receive a message from the server
+    pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        let borrow = self.message_rx.borrow();
+        if let Some(ref rx) = *borrow {
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(msg) => dynamic_message_to_js(&ctx, &msg),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(Value::new_null(ctx)),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Ok(Value::new_null(ctx)),
+            }
+        } else {
+            Ok(Value::new_null(ctx))
+        }
+    }
+
+    /// Close the stream
+    pub fn close(&self) -> Result<()> {
+        self.running.store(false, Ordering::SeqCst);
+        *self.message_tx.borrow_mut() = None;
+        *self.message_rx.borrow_mut() = None;
+        Ok(())
+    }
+}
+
 // --- JS Class ---
 
 #[derive(Trace)]
@@ -252,19 +467,66 @@ pub struct GrpcClient {
     pool: RefCell<Option<DescriptorPool>>,
     #[qjs(skip_trace)]
     channel: RefCell<Option<Channel>>,
+    #[qjs(skip_trace)]
+    runtime: Arc<Runtime>,
 }
 
 unsafe impl<'js> JsLifetime<'js> for GrpcClient {
     type Changed<'to> = GrpcClient;
 }
 
+/// Parse method name into (service_name, method_name)
+fn parse_method_name(method_name: &str) -> Result<(&str, &str)> {
+    let clean_name = method_name.trim_start_matches('/');
+    match clean_name.rsplit_once('/') {
+        Some(v) => Ok(v),
+        None => match clean_name.rsplit_once('.') {
+            Some(v) => Ok(v),
+            None => Err(rquickjs::Error::new_from_js(
+                "Invalid method format",
+                "FormatError",
+            )),
+        },
+    }
+}
+
+// Internal helper methods for GrpcClient
+impl GrpcClient {
+    /// Get method descriptor from pool
+    fn get_method(&self, method_name: &str) -> Result<(MethodDescriptor, String, String)> {
+        let pool_borrow = self.pool.borrow();
+        let pool = pool_borrow
+            .as_ref()
+            .ok_or_else(|| rquickjs::Error::new_from_js("Proto not loaded", "StateError"))?;
+
+        let (service_name, method_short_name) = parse_method_name(method_name)?;
+
+        let service = pool
+            .get_service_by_name(service_name)
+            .ok_or_else(|| rquickjs::Error::new_from_js("Service not found", "NotFoundError"))?;
+
+        let method_desc = service
+            .methods()
+            .find(|m| m.name() == method_short_name)
+            .ok_or_else(|| rquickjs::Error::new_from_js("Method not found", "NotFoundError"))?;
+
+        Ok((
+            method_desc,
+            service_name.to_string(),
+            method_short_name.to_string(),
+        ))
+    }
+}
+
 #[rquickjs::methods]
 impl GrpcClient {
     #[qjs(constructor)]
     pub fn new() -> Self {
+        let rt = Runtime::new().expect("Failed to create gRPC runtime");
         Self {
             pool: RefCell::new(None),
             channel: RefCell::new(None),
+            runtime: Arc::new(rt),
         }
     }
 
@@ -287,86 +549,37 @@ impl GrpcClient {
         Ok(())
     }
 
-    pub async fn connect(&self, url: String) -> Result<()> {
+    pub fn connect(&self, url: String) -> Result<()> {
+        let rt = self.runtime.clone();
+
         let endpoint = Endpoint::from_shared(url).map_err(|e| {
             eprintln!("Endpoint error: {}", e);
             rquickjs::Error::new_from_js("UrlError", "GrpcError")
         })?;
 
-        let channel = endpoint.connect().await.map_err(|e| {
-            eprintln!("Connect error: {}", e);
-            rquickjs::Error::new_from_js("ConnectError", "GrpcError")
-        })?;
+        let channel = rt
+            .block_on(async { endpoint.connect().await })
+            .map_err(|e| {
+                eprintln!("Connect error: {}", e);
+                rquickjs::Error::new_from_js("ConnectError", "GrpcError")
+            })?;
 
         *self.channel.borrow_mut() = Some(channel);
         Ok(())
     }
 
-    pub async fn invoke<'js>(
+    pub fn invoke<'js>(
         &self,
         ctx: Ctx<'js>,
         method_name: String,
         request_val: Value<'js>,
     ) -> Result<Value<'js>> {
-        // 1. Get Pool & Method Descriptor
-        let (method_desc, service_name, method_short_name) = {
-            let pool_borrow = self.pool.borrow();
-            let pool = pool_borrow
-                .as_ref()
-                .ok_or_else(|| rquickjs::Error::new_from_js("Proto not loaded", "StateError"))?;
+        let (method_desc, service_name, method_short_name) = self.get_method(&method_name)?;
+        let json_obj = js_to_json(&ctx, request_val)?;
 
-            // 2. Parse Method Name
-            let clean_name = method_name.trim_start_matches('/');
-            let (service_name, method_short_name) = match clean_name.rsplit_once('/') {
-                Some(v) => v,
-                None => match clean_name.rsplit_once('.') {
-                    Some(v) => v,
-                    None => {
-                        return Err(rquickjs::Error::new_from_js(
-                            "Invalid method format",
-                            "FormatError",
-                        ))
-                    }
-                },
-            };
-
-            let service = pool.get_service_by_name(service_name).ok_or_else(|| {
-                rquickjs::Error::new_from_js("Service not found", "NotFoundError")
-            })?;
-
-            let method_desc = service
-                .methods()
-                .find(|m| m.name() == method_short_name)
-                .ok_or_else(|| rquickjs::Error::new_from_js("Method not found", "NotFoundError"))?;
-
-            (
-                method_desc,
-                service_name.to_string(),
-                method_short_name.to_string(),
-            )
-        };
-
-        // 3. Serialize JS Value to JSON String
-        let json_obj: serde_json::Value = if request_val.is_object() {
-            let json: Object = ctx.globals().get("JSON")?;
-            let stringify: Function = json.get("stringify")?;
-            let json_str: String = stringify.call((request_val,))?;
-            serde_json::from_str(&json_str).map_err(|e| {
-                eprintln!("JSON parse error: {}", e);
-                rquickjs::Error::new_from_js("JsonError", "ValueError")
-            })?
-        } else {
-            return Err(rquickjs::Error::new_from_js(
-                "Request body must be object",
-                "TypeError",
-            ));
-        };
-
-        // 4. Deserialize JSON to DynamicMessage (Manual Map)
         let input_desc = method_desc.input();
         let request_msg = json_to_dynamic_message(input_desc, json_obj)?;
 
-        // 5. Get Channel
         let channel = {
             let channel_borrow = self.channel.borrow();
             channel_borrow
@@ -375,10 +588,7 @@ impl GrpcClient {
                 .clone()
         };
 
-        // 6. Invoke
-        let mut grpc = Grpc::new(channel);
         let path = format!("/{}/{}", service_name, method_short_name);
-
         let path_uri: http::Uri = path
             .parse()
             .map_err(|_| rquickjs::Error::new_from_js("Invalid URI path", "PathError"))?;
@@ -386,44 +596,281 @@ impl GrpcClient {
             .map_err(|_| rquickjs::Error::new_from_js("Invalid PathAndQuery", "PathError"))?;
 
         let codec = DynamicCodec::new(method_desc.clone());
-
         let request = Request::new(request_msg);
-        let response = grpc.unary(request, path_http, codec).await.map_err(|e| {
-            eprintln!("gRPC Request failed: {}", e);
-            rquickjs::Error::new_from_js("GrpcError", "NetworkError")
-        })?;
+
+        let rt = self.runtime.clone();
+        let response = rt
+            .block_on(async {
+                let mut grpc = Grpc::new(channel);
+                grpc.unary(request, path_http, codec).await
+            })
+            .map_err(|e| {
+                eprintln!("gRPC Request failed: {}", e);
+                rquickjs::Error::new_from_js("GrpcError", "NetworkError")
+            })?;
 
         let response_msg = response.into_inner();
+        dynamic_message_to_js(&ctx, &response_msg)
+    }
 
-        // 7. Serialize Response to JSON
-        let response_json = serde_json::to_string(&response_msg).map_err(|e| {
-            eprintln!("Response serialization error: {}", e);
-            rquickjs::Error::new_from_js("JsonError", "ValueError")
-        })?;
+    /// Start a server streaming RPC
+    #[qjs(rename = "serverStream")]
+    pub fn server_stream<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        method_name: String,
+        request_val: Value<'js>,
+    ) -> Result<Value<'js>> {
+        let (method_desc, service_name, method_short_name) = self.get_method(&method_name)?;
+        let json_obj = js_to_json(&ctx, request_val)?;
 
-        let json: Object = ctx.globals().get("JSON")?;
-        let parse: Function = json.get("parse")?;
-        let js_val: Value = parse.call((response_json,))?;
+        let input_desc = method_desc.input();
+        let request_msg = json_to_dynamic_message(input_desc, json_obj)?;
 
-        Ok(js_val)
+        let channel = {
+            let channel_borrow = self.channel.borrow();
+            channel_borrow
+                .as_ref()
+                .ok_or_else(|| rquickjs::Error::new_from_js("Not connected", "StateError"))?
+                .clone()
+        };
+
+        let path = format!("/{}/{}", service_name, method_short_name);
+        let path_uri: http::Uri = path
+            .parse()
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid URI path", "PathError"))?;
+        let path_http = http::uri::PathAndQuery::try_from(path_uri.path())
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid PathAndQuery", "PathError"))?;
+
+        let codec = DynamicCodec::new(method_desc.clone());
+        let request = Request::new(request_msg);
+
+        let rt = self.runtime.clone();
+
+        // Start the server streaming call
+        let mut streaming: Streaming<DynamicMessage> = rt
+            .block_on(async {
+                let mut grpc = Grpc::new(channel);
+                grpc.server_streaming(request, path_http, codec).await
+            })
+            .map_err(|e| {
+                eprintln!("gRPC Server stream failed: {}", e);
+                rquickjs::Error::new_from_js("GrpcError", "NetworkError")
+            })?
+            .into_inner();
+
+        // Create channel for messages
+        let (tx, rx) = crossbeam_channel::bounded::<DynamicMessage>(1000);
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        let rt_clone = self.runtime.clone();
+
+        // Spawn background task to read from stream
+        std::thread::spawn(move || {
+            rt_clone.block_on(async {
+                while running_clone.load(Ordering::SeqCst) {
+                    let timeout_result = tokio::time::timeout(
+                        tokio::time::Duration::from_millis(100),
+                        streaming.next(),
+                    )
+                    .await;
+
+                    match timeout_result {
+                        Ok(Some(Ok(msg))) => {
+                            if tx.send(msg).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Some(Err(_))) => {
+                            // Stream error
+                            break;
+                        }
+                        Ok(None) => {
+                            // Stream ended
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout, continue
+                        }
+                    }
+                }
+            });
+        });
+
+        let stream = GrpcServerStream {
+            message_rx: RefCell::new(Some(rx)),
+            running,
+        };
+
+        let instance = rquickjs::Class::<GrpcServerStream>::instance(ctx, stream)?;
+        Ok(instance.into_value())
+    }
+
+    /// Start a client streaming RPC
+    #[qjs(rename = "clientStream")]
+    pub fn client_stream<'js>(&self, ctx: Ctx<'js>, method_name: String) -> Result<Value<'js>> {
+        let (method_desc, service_name, method_short_name) = self.get_method(&method_name)?;
+
+        let channel = {
+            let channel_borrow = self.channel.borrow();
+            channel_borrow
+                .as_ref()
+                .ok_or_else(|| rquickjs::Error::new_from_js("Not connected", "StateError"))?
+                .clone()
+        };
+
+        let path = format!("/{}/{}", service_name, method_short_name);
+        let path_uri: http::Uri = path
+            .parse()
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid URI path", "PathError"))?;
+        let path_http = http::uri::PathAndQuery::try_from(path_uri.path())
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid PathAndQuery", "PathError"))?;
+
+        let codec = DynamicCodec::new(method_desc.clone());
+        let input_desc = method_desc.input();
+
+        // Create channel for sending messages
+        let (tx, mut rx) = mpsc::channel::<DynamicMessage>(100);
+
+        // Create oneshot for response
+        let (response_tx, response_rx) =
+            tokio::sync::oneshot::channel::<std::result::Result<DynamicMessage, Status>>();
+
+        let rt = self.runtime.clone();
+
+        // Spawn background task to handle the client streaming call
+        std::thread::spawn(move || {
+            rt.block_on(async {
+                let request_stream = async_stream::stream! {
+                    while let Some(msg) = rx.recv().await {
+                        yield msg;
+                    }
+                };
+
+                let mut grpc = Grpc::new(channel);
+                let result = grpc
+                    .client_streaming(Request::new(request_stream), path_http, codec)
+                    .await;
+
+                let response = match result {
+                    Ok(resp) => Ok(resp.into_inner()),
+                    Err(e) => Err(e),
+                };
+
+                let _ = response_tx.send(response);
+            });
+        });
+
+        let stream = GrpcClientStream {
+            message_tx: RefCell::new(Some(tx)),
+            response_rx: RefCell::new(Some(response_rx)),
+            runtime: self.runtime.clone(),
+            input_desc,
+        };
+
+        let instance = rquickjs::Class::<GrpcClientStream>::instance(ctx, stream)?;
+        Ok(instance.into_value())
+    }
+
+    /// Start a bidirectional streaming RPC
+    #[qjs(rename = "bidiStream")]
+    pub fn bidi_stream<'js>(&self, ctx: Ctx<'js>, method_name: String) -> Result<Value<'js>> {
+        let (method_desc, service_name, method_short_name) = self.get_method(&method_name)?;
+
+        let channel = {
+            let channel_borrow = self.channel.borrow();
+            channel_borrow
+                .as_ref()
+                .ok_or_else(|| rquickjs::Error::new_from_js("Not connected", "StateError"))?
+                .clone()
+        };
+
+        let path = format!("/{}/{}", service_name, method_short_name);
+        let path_uri: http::Uri = path
+            .parse()
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid URI path", "PathError"))?;
+        let path_http = http::uri::PathAndQuery::try_from(path_uri.path())
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid PathAndQuery", "PathError"))?;
+
+        let codec = DynamicCodec::new(method_desc.clone());
+        let input_desc = method_desc.input();
+
+        // Create channel for sending messages
+        let (tx, mut send_rx) = mpsc::channel::<DynamicMessage>(100);
+
+        // Create channel for receiving messages
+        let (recv_tx, recv_rx) = crossbeam_channel::bounded::<DynamicMessage>(1000);
+
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        let rt = self.runtime.clone();
+
+        // Spawn background task to handle the bidi streaming call
+        std::thread::spawn(move || {
+            rt.block_on(async {
+                let request_stream = async_stream::stream! {
+                    while let Some(msg) = send_rx.recv().await {
+                        yield msg;
+                    }
+                };
+
+                let mut grpc = Grpc::new(channel);
+                let result = grpc
+                    .streaming(Request::new(request_stream), path_http, codec)
+                    .await;
+
+                if let Ok(response) = result {
+                    let mut streaming = response.into_inner();
+                    while running_clone.load(Ordering::SeqCst) {
+                        let timeout_result = tokio::time::timeout(
+                            tokio::time::Duration::from_millis(100),
+                            streaming.next(),
+                        )
+                        .await;
+
+                        match timeout_result {
+                            Ok(Some(Ok(msg))) => {
+                                if recv_tx.send(msg).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(Some(Err(_))) => break,
+                            Ok(None) => break,
+                            Err(_) => continue,
+                        }
+                    }
+                }
+            });
+        });
+
+        let stream = GrpcBidiStream {
+            message_tx: RefCell::new(Some(tx)),
+            message_rx: RefCell::new(Some(recv_rx)),
+            runtime: self.runtime.clone(),
+            running,
+            input_desc,
+        };
+
+        let instance = rquickjs::Class::<GrpcBidiStream>::instance(ctx, stream)?;
+        Ok(instance.into_value())
     }
 }
 
 pub fn register_sync(ctx: &Ctx) -> Result<()> {
     rquickjs::Class::<GrpcClient>::define(&ctx.globals())?;
+    rquickjs::Class::<GrpcServerStream>::define(&ctx.globals())?;
+    rquickjs::Class::<GrpcClientStream>::define(&ctx.globals())?;
+    rquickjs::Class::<GrpcBidiStream>::define(&ctx.globals())?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use serde_json::json;
-
-    // Helper to create a mock field descriptor for testing
-    // Note: Full integration tests require actual proto files
 
     #[test]
     fn test_json_scalar_string() {
-        // Test that string conversion works correctly
         let json_val = json!("hello");
         assert!(json_val.as_str().is_some());
         assert_eq!(json_val.as_str().unwrap(), "hello");
@@ -431,7 +878,6 @@ mod tests {
 
     #[test]
     fn test_json_scalar_number() {
-        // Test number parsing
         let json_int = json!(42);
         let json_float = json!(2.5);
 
@@ -493,4 +939,23 @@ mod tests {
         let inner = outer.get("inner").unwrap();
         assert_eq!(inner.as_str(), Some("value"));
     }
+
+    #[test]
+    fn test_parse_method_name_slash() {
+        let result = parse_method_name("pkg.Service/Method").unwrap();
+        assert_eq!(result, ("pkg.Service", "Method"));
+    }
+
+    #[test]
+    fn test_parse_method_name_leading_slash() {
+        let result = parse_method_name("/pkg.Service/Method").unwrap();
+        assert_eq!(result, ("pkg.Service", "Method"));
+    }
+
+    #[test]
+    fn test_parse_method_name_dot() {
+        let result = parse_method_name("pkg.Service.Method").unwrap();
+        assert_eq!(result, ("pkg.Service", "Method"));
+    }
+
 }
