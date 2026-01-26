@@ -3,32 +3,12 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use fusillade::engine::distributed::{ControllerServer, WorkerServer};
 use fusillade::engine::Engine;
-use std::time::Duration;
-
-fn parse_duration_str(s: &str) -> Option<Duration> {
-    if s.ends_with("ms") {
-        s.trim_end_matches("ms")
-            .parse::<u64>()
-            .ok()
-            .map(Duration::from_millis)
-    } else if s.ends_with('s') {
-        s.trim_end_matches('s')
-            .parse::<u64>()
-            .ok()
-            .map(Duration::from_secs)
-    } else if s.ends_with('m') {
-        s.trim_end_matches('m')
-            .parse::<u64>()
-            .ok()
-            .map(|m| Duration::from_secs(m * 60))
-    } else {
-        s.parse::<u64>().ok().map(Duration::from_millis)
-    }
-}
+use fusillade::parse_duration_str;
 
 /// Run a test on Fusillade Cloud
 fn run_cloud_test(

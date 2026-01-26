@@ -1,5 +1,6 @@
 use crate::engine::http_client::HttpClient;
 use crate::stats::{Metric, RequestTimings};
+use crate::utils::parse_duration_str;
 use cookie_store::CookieStore;
 use crossbeam_channel::Sender;
 use http::{Method, Request, Uri};
@@ -20,29 +21,6 @@ use url::Url;
 struct HttpDefaults {
     timeout: Option<Duration>,
     headers: HashMap<String, String>,
-}
-
-/// Parse a duration string (e.g., "30s", "500ms", "1m") into std::time::Duration
-fn parse_duration_str(s: &str) -> Option<Duration> {
-    if s.ends_with("ms") {
-        s.trim_end_matches("ms")
-            .parse::<u64>()
-            .ok()
-            .map(Duration::from_millis)
-    } else if s.ends_with('s') {
-        s.trim_end_matches('s')
-            .parse::<u64>()
-            .ok()
-            .map(Duration::from_secs)
-    } else if s.ends_with('m') {
-        s.trim_end_matches('m')
-            .parse::<u64>()
-            .ok()
-            .map(|m| Duration::from_secs(m * 60))
-    } else {
-        // Try parsing as milliseconds number
-        s.parse::<u64>().ok().map(Duration::from_millis)
-    }
 }
 
 /// Convert a url::Url to http::Uri using component extraction.
@@ -2179,37 +2157,7 @@ mod tests {
         assert_eq!(response.proto, "h2");
     }
 
-    #[test]
-    fn test_parse_duration_str_seconds() {
-        assert_eq!(parse_duration_str("30s"), Some(Duration::from_secs(30)));
-        assert_eq!(parse_duration_str("1s"), Some(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn test_parse_duration_str_milliseconds() {
-        assert_eq!(
-            parse_duration_str("500ms"),
-            Some(Duration::from_millis(500))
-        );
-        assert_eq!(
-            parse_duration_str("100ms"),
-            Some(Duration::from_millis(100))
-        );
-    }
-
-    #[test]
-    fn test_parse_duration_str_minutes() {
-        assert_eq!(parse_duration_str("5m"), Some(Duration::from_secs(300)));
-        assert_eq!(parse_duration_str("1m"), Some(Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn test_parse_duration_str_raw_number() {
-        assert_eq!(
-            parse_duration_str("1000"),
-            Some(Duration::from_millis(1000))
-        );
-    }
+    // Note: parse_duration_str tests are in src/utils.rs
 
     #[test]
     fn test_url_to_uri_simple() {
