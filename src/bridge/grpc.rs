@@ -957,5 +957,4 @@ mod tests {
         let result = parse_method_name("pkg.Service.Method").unwrap();
         assert_eq!(result, ("pkg.Service", "Method"));
     }
-
 }
