@@ -235,12 +235,12 @@ Fusillade is configured via the `export const options` object in your script.
 | `no_endpoint_tracking` | Boolean | Disable per-URL metrics tracking to reduce memory for high-cardinality URLs. | `true` |
 | `memory_safe` | Boolean | Throttle worker spawning when memory usage is high (85% pause, 95% stop). | `true` |
 
-### k6 Compatibility
+### Config Aliases
 
-Fusillade supports k6 option names for easy migration from k6 scripts:
+Alternative option names are supported:
 
-| k6 Name | Fusillade Name |
-|---------|----------------|
+| Alias | Primary Name |
+|-------|--------------|
 | `vus` | `workers` |
 | `stages` | `schedule` |
 | `thresholds` | `criteria` |
@@ -809,26 +809,78 @@ describe("Cart Logic", () => {
 * `.load(files, includes)`: Loads Protobuf definitions from `.proto` files.
 * `.connect(url)`: Connects to gRPC server.
 * `.invoke(method, payload)`: Performs a unary RPC call. Method format: `package.Service/Method`.
+* `.serverStream(method, request)`: Start a server streaming RPC, returns a `GrpcServerStream`.
+* `.clientStream(method)`: Start a client streaming RPC, returns a `GrpcClientStream`.
+* `.bidiStream(method)`: Start a bidirectional streaming RPC, returns a `GrpcBidiStream`.
+
+**GrpcServerStream:**
+* `.recv()`: Receive next message from server (blocking). Returns object or `null` when stream ends.
+* `.close()`: Close the stream early.
+
+**GrpcClientStream:**
+* `.send(msg)`: Send a message to the server.
+* `.closeAndRecv()`: Close the send side and wait for the server's response.
+
+**GrpcBidiStream:**
+* `.send(msg)`: Send a message to the server.
+* `.recv()`: Receive a message from the server (blocking). Returns object or `null`.
+* `.close()`: Close the stream.
 
 ```javascript
+// Unary RPC
 const client = new GrpcClient();
 client.load(['./protos/hello.proto'], ['./protos']);
 client.connect('http://localhost:50051');
 const response = client.invoke('helloworld.Greeter/SayHello', { name: 'World' });
 print(response.message);
+
+// Server Streaming RPC
+const stream = client.serverStream('pkg.Service/StreamData', { query: 'test' });
+let msg;
+while ((msg = stream.recv()) !== null) {
+    print(msg.data);
+}
+
+// Client Streaming RPC
+const stream = client.clientStream('pkg.Service/UploadData');
+stream.send({ chunk: 'data1' });
+stream.send({ chunk: 'data2' });
+const response = stream.closeAndRecv();
+print(response.summary);
+
+// Bidirectional Streaming RPC
+const stream = client.bidiStream('pkg.Service/Chat');
+stream.send({ message: 'Hello' });
+const reply = stream.recv();
+print(reply.response);
+stream.close();
 ```
 
 **MQTT:**
 
 * `new JsMqttClient()`: Create a new MQTT client.
 * `.connect(host, port, clientId)`: Connect to MQTT broker.
+* `.subscribe(topic)`: Subscribe to a topic pattern (supports MQTT wildcards `+` and `#`).
 * `.publish(topic, payload)`: Publish a message to a topic.
+* `.recv()`: Receive next message (blocking). Returns `{ topic, payload, qos }` or `null` on timeout.
 * `.close()`: Close the connection.
 
 ```javascript
+// Publish messages
 const mqtt = new JsMqttClient();
 mqtt.connect('localhost', 1883, 'test-client');
 mqtt.publish('sensors/temp', '22.5');
+mqtt.close();
+
+// Subscribe and receive messages
+const mqtt = new JsMqttClient();
+mqtt.connect('localhost', 1883, 'subscriber');
+mqtt.subscribe('sensors/+/temperature');  // Wildcard subscription
+
+let msg;
+while ((msg = mqtt.recv()) !== null) {
+    print(`${msg.topic}: ${msg.payload}`);
+}
 mqtt.close();
 ```
 
@@ -836,13 +888,30 @@ mqtt.close();
 
 * `new JsAmqpClient()`: Create a new AMQP client.
 * `.connect(url)`: Connect to AMQP broker (e.g., `amqp://localhost`).
+* `.subscribe(queue)`: Declare a queue and start consuming messages.
 * `.publish(exchange, routingKey, payload)`: Publish a message.
+* `.recv()`: Receive next message (blocking). Returns `{ body, deliveryTag }` or `null` on timeout.
+* `.ack(deliveryTag)`: Acknowledge a message by its delivery tag.
+* `.nack(deliveryTag, requeue)`: Negative acknowledge (reject) a message.
 * `.close()`: Close the connection.
 
 ```javascript
+// Publish messages
 const amqp = new JsAmqpClient();
 amqp.connect('amqp://localhost');
 amqp.publish('', 'my-queue', JSON.stringify({ event: 'order.created' }));
+amqp.close();
+
+// Consume messages
+const amqp = new JsAmqpClient();
+amqp.connect('amqp://guest:guest@localhost:5672');
+amqp.subscribe('my-queue');
+
+const msg = amqp.recv();
+if (msg !== null) {
+    print(msg.body);
+    amqp.ack(msg.deliveryTag);
+}
 amqp.close();
 ```
 
@@ -1120,6 +1189,30 @@ Executes a load test script.
 * `--no-endpoint-tracking`: Disable per-endpoint (per-URL) metrics tracking. Useful to reduce cardinality when testing URLs with unique IDs.
 * `--no-memory-check`: Disable pre-flight memory capacity check (warning only).
 * `--memory-safe`: Enable memory-safe mode: throttle worker spawning if memory usage is high.
+* `--save-history`: Save test results to local SQLite database (`fusillade_history.db`). View with `fusillade history`.
+* `--capture-errors [FILE]`: Capture failed requests to file for later replay. Default: `fusillade-errors.json`.
+
+### `fusillade history`
+View test run history from the local database.
+
+**Options:**
+* `--show <ID>`: Show detailed report for a specific run ID.
+* `-l, --limit <N>`: Number of recent runs to list (default: 10).
+
+**Example:**
+```bash
+# List recent test runs
+fusillade history
+
+# Show details for a specific run
+fusillade history --show 5
+```
+
+### `fusillade status`
+Show version and status information including cloud authentication status.
+
+### `fusillade logout`
+Log out from Fusillade Cloud (removes saved credentials).
 
 ### `fusillade compare`
 Compare two test run summaries to identify performance regressions or improvements.
