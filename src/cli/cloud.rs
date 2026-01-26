@@ -60,7 +60,6 @@ pub fn load_token() -> Option<CloudAuth> {
 }
 
 /// Remove stored token (logout)
-#[allow(dead_code)]
 pub fn clear_token() -> Result<(), std::io::Error> {
     let path = auth_file_path();
     if path.exists() {
@@ -70,7 +69,6 @@ pub fn clear_token() -> Result<(), std::io::Error> {
 }
 
 /// Check if user is logged in
-#[allow(dead_code)]
 pub fn is_logged_in() -> bool {
     load_token().is_some()
 }

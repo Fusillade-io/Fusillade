@@ -197,7 +197,7 @@ impl Engine {
         config: Config,
         json_output: bool,
         export_json: Option<PathBuf>,
-        _export_html: Option<PathBuf>,
+        export_html: Option<PathBuf>,
         controller_metrics_url: Option<String>,
         controller_metrics_auth: Option<String>,
         control_rx: Option<std::sync::mpsc::Receiver<control::ControlCommand>>,
@@ -1035,6 +1035,11 @@ impl Engine {
 
             if let Some(path) = export_json {
                 let _ = std::fs::write(path, merged_agg.to_json());
+            }
+
+            if let Some(path) = export_html {
+                let html = crate::stats::html::generate_html(&report);
+                let _ = std::fs::write(path, html);
             }
 
             // Send final summary with endpoint metrics to control plane

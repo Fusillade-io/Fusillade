@@ -1087,7 +1087,7 @@ mod tests {
         assert_eq!(report.p99_latency_ms, 0.0);
 
         let html = crate::stats::html::generate_html(&report);
-        assert!(html.contains("No requests made"));
+        assert!(html.contains("No requests were made"));
     }
 
     // ==================== Custom Metrics Tests ====================
