@@ -392,6 +392,8 @@ fn main() -> Result<()> {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                     );
 
                     println!("\n--- Waiting for changes to {} ---\n", scenario.display());
@@ -556,9 +558,6 @@ fn main() -> Result<()> {
 
             // Headless mode: either --headless or --json enables non-TUI mode
             let headless_mode = headless || json;
-            if !headless_mode {
-                println!("Running scenario...");
-            }
             let engine_arc = Arc::new(engine);
 
             // Cost estimation if requested
@@ -576,6 +575,8 @@ fn main() -> Result<()> {
                     script_content.clone(),
                     dry_config,
                     true,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -645,36 +646,80 @@ fn main() -> Result<()> {
                 println!("\nProceeding with full test...\n");
             }
 
-            // Setup interactive control if requested
-            let control_rx = if interactive {
-                use fusillade::engine::control::{parse_control_command, ControlCommand};
+            // Setup control channel and optional TUI
+            let (control_tx, control_rx) =
+                std::sync::mpsc::channel::<fusillade::engine::control::ControlCommand>();
+
+            // Determine total duration for TUI progress display
+            let tui_total_duration = if let Some(ref schedule) = final_config.schedule {
+                let total: u64 = schedule
+                    .iter()
+                    .filter_map(|s| fusillade::parse_duration_str(&s.duration).map(|d| d.as_secs()))
+                    .sum();
+                Some(Duration::from_secs(total))
+            } else {
+                final_config
+                    .duration
+                    .as_deref()
+                    .and_then(fusillade::parse_duration_str)
+            };
+
+            // Create shared arcs for TUI communication
+            let initial_workers = final_config.workers.unwrap_or(1);
+            let shared_control_state = Arc::new(fusillade::engine::control::ControlState::new(
+                initial_workers,
+            ));
+
+            // Calculate shard count for shared aggregator (same formula as engine)
+            let total_workers_est = if let Some(ref scenarios) = final_config.scenarios {
+                scenarios
+                    .values()
+                    .map(|s| s.workers.unwrap_or(1))
+                    .sum::<usize>()
+            } else {
+                initial_workers
+            };
+            let num_shards = (total_workers_est / 100).clamp(16, 256);
+            let shared_aggregator = Arc::new(fusillade::stats::ShardedAggregator::new(num_shards));
+
+            let tui_handle = if !headless_mode {
+                let agg = shared_aggregator.clone();
+                let cs = shared_control_state.clone();
+                let tx = control_tx.clone();
+                let dur = tui_total_duration;
+                Some(std::thread::spawn(move || {
+                    if let Err(e) = fusillade::tui::run_tui(agg, tx, cs, dur) {
+                        eprintln!("TUI error: {}", e);
+                    }
+                }))
+            } else {
+                None
+            };
+
+            // In headless+interactive mode, use stdin reader
+            if headless_mode && interactive {
+                use fusillade::engine::control::parse_control_command;
                 use std::io::BufRead;
 
-                let (tx, rx) = std::sync::mpsc::channel::<ControlCommand>();
-
+                let tx = control_tx.clone();
                 println!(
                     "Interactive mode enabled. Commands: ramp <N>, pause, resume, status, stop"
                 );
                 println!("   Type commands and press Enter.\n");
 
-                // Spawn input thread
                 std::thread::spawn(move || {
                     let stdin = std::io::stdin();
                     for line in stdin.lock().lines().map_while(Result::ok) {
                         if let Some(cmd) = parse_control_command(&line) {
                             if tx.send(cmd).is_err() {
-                                break; // Channel closed
+                                break;
                             }
                         } else if !line.trim().is_empty() {
                             println!("Unknown command: {}", line.trim());
                         }
                     }
                 });
-
-                Some(rx)
-            } else {
-                None
-            };
+            }
 
             let report = engine_arc.run_load_test(
                 scenario.clone(),
@@ -685,8 +730,15 @@ fn main() -> Result<()> {
                 export_html,
                 metrics_url,
                 metrics_auth,
-                control_rx,
+                Some(control_rx),
+                Some(shared_aggregator),
+                Some(shared_control_state),
             )?;
+
+            // Wait for TUI thread to finish
+            if let Some(handle) = tui_handle {
+                let _ = handle.join();
+            }
 
             // Handle OTLP export if --out otlp=<url> is specified
             if let Some(out_config) = out {
