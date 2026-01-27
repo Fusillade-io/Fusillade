@@ -168,6 +168,10 @@ impl App {
             KeyCode::Char('r') => {
                 self.input_mode = InputMode::RampInput(String::new());
             }
+            KeyCode::Char('a') => {
+                // Return to automatic schedule
+                let _ = self.control_tx.send(ControlCommand::Ramp(0));
+            }
             KeyCode::Char('t') => {
                 self.input_mode = InputMode::TagInput(String::new());
             }
@@ -252,6 +256,17 @@ fn key_event_ctrl(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::CONTROL)
 }
 
+/// Guard that restores terminal state on drop (including panics).
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        crate::bridge::TUI_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
 /// Run the TUI on the current thread. Blocks until the test completes or user quits.
 pub fn run_tui(
     aggregator: Arc<ShardedAggregator>,
@@ -266,6 +281,9 @@ pub fn run_tui(
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Guard ensures terminal is restored even on panic
+    let _guard = TerminalGuard;
 
     let mut app = App::new(
         aggregator,
@@ -308,11 +326,8 @@ pub fn run_tui(
         }
     }
 
-    crate::bridge::TUI_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+    // _guard drop handles: TUI_ACTIVE = false, disable_raw_mode, LeaveAlternateScreen
     Ok(())
 }
 
