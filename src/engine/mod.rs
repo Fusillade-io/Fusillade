@@ -436,6 +436,7 @@ impl Engine {
                     let shared_tokio_rt = shared_tokio_rt.clone();
                     let shared_http_client = shared_http_client.clone();
                     let control_state = control_state.clone();
+                    let graceful_stop = config.stop.clone();
 
                     let h = std::thread::spawn(move || {
                         // Handle startTime delay
@@ -522,10 +523,19 @@ impl Engine {
                                     };
 
                                     // Get the exec function (default or custom)
-                                    let func: Function = module.get(&exec_fn).unwrap_or_else(|_| {
-                                        eprintln!("[Scenario: {}] Function '{}' not found, using 'default'", scenario_name, exec_fn);
-                                        module.get("default").unwrap()
-                                    });
+                                    let func: Function = match module.get(&exec_fn) {
+                                        Ok(f) => f,
+                                        Err(_) => {
+                                            eprintln!("[Scenario: {}] Function '{}' not found, trying 'default'", scenario_name, exec_fn);
+                                            match module.get("default") {
+                                                Ok(f) => f,
+                                                Err(_) => {
+                                                    eprintln!("[Scenario: {}] No 'default' function found either. Worker exiting.", scenario_name);
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    };
 
                                     let data_val = if let Some(json) = setup_data_clone.as_ref() {
                                         json_parse(ctx.clone(), json).unwrap_or(Value::new_undefined(ctx.clone()))
@@ -637,6 +647,24 @@ impl Engine {
                             r.store(false, Ordering::Relaxed);
                         }
 
+                        // Graceful stop: wait for in-flight requests to complete
+                        let grace = graceful_stop
+                            .as_deref()
+                            .and_then(parse_duration_str)
+                            .unwrap_or(Duration::from_secs(30));
+                        if grace > Duration::ZERO {
+                            let stop_start = Instant::now();
+                            while stop_start.elapsed() < grace {
+                                if active_workers
+                                    .iter()
+                                    .all(|(_, r)| !r.load(Ordering::Relaxed))
+                                {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                        }
+
                         // Wait for workers to finish
                         for (h, _) in active_workers {
                             let _ = h.join();
@@ -707,6 +735,13 @@ impl Engine {
                         let tui_on =
                             crate::bridge::TUI_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
                         match cmd {
+                            control::ControlCommand::Ramp(0) => {
+                                // Ramp 0 = return to schedule
+                                if !tui_on {
+                                    println!("[Control] Returning to schedule.");
+                                }
+                                dynamic_target_legacy = None;
+                            }
                             control::ControlCommand::Ramp(n) => {
                                 if is_multi_scenario {
                                     if !tui_on {
@@ -965,7 +1000,11 @@ impl Engine {
                         // Merge sharded aggregator and convert to report for accurate stats
                         let merged = sharded_aggregator.merge();
                         let report = merged.to_report();
-                        let elapsed_secs = start_time.elapsed().as_secs_f64().max(0.001);
+                        let elapsed_secs = start_time
+                            .elapsed()
+                            .saturating_sub(control_state.total_paused())
+                            .as_secs_f64()
+                            .max(0.001);
                         let rps = report.total_requests as f64 / elapsed_secs;
 
                         // Calculate error count
@@ -1065,13 +1104,17 @@ impl Engine {
                 merged_agg.report();
             }
 
-            if let Some(path) = export_json {
-                let _ = std::fs::write(path, merged_agg.to_json());
+            if let Some(ref path) = export_json {
+                if let Err(e) = std::fs::write(path, merged_agg.to_json()) {
+                    eprintln!("Failed to export JSON to {}: {}", path.display(), e);
+                }
             }
 
-            if let Some(path) = export_html {
+            if let Some(ref path) = export_html {
                 let html = crate::stats::html::generate_html(&report);
-                let _ = std::fs::write(path, html);
+                if let Err(e) = std::fs::write(path, html) {
+                    eprintln!("Failed to export HTML to {}: {}", path.display(), e);
+                }
             }
 
             // Send final summary with endpoint metrics to control plane
