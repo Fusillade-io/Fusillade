@@ -1,7 +1,8 @@
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Commands that can be sent to control a running load test
 #[derive(Debug, Clone)]
@@ -30,6 +31,12 @@ pub struct ControlState {
     pub tags: ArcSwap<HashMap<String, String>>,
     /// Stop flag
     pub stopped: AtomicBool,
+    /// Accumulated paused duration in milliseconds
+    total_paused_ms: AtomicU64,
+    /// Timestamp (ms since epoch-ish) when pause started, 0 if not paused
+    pause_started_ms: AtomicU64,
+    /// Reference instant for converting between Instant and atomic timestamps
+    reference_instant: Instant,
 }
 
 impl ControlState {
@@ -39,15 +46,40 @@ impl ControlState {
             target_workers: AtomicUsize::new(initial_workers),
             tags: ArcSwap::from_pointee(HashMap::new()),
             stopped: AtomicBool::new(false),
+            total_paused_ms: AtomicU64::new(0),
+            pause_started_ms: AtomicU64::new(0),
+            reference_instant: Instant::now(),
         }
     }
 
     pub fn pause(&self) {
+        let now_ms = self.reference_instant.elapsed().as_millis() as u64;
+        self.pause_started_ms.store(now_ms, Ordering::SeqCst);
         self.paused.store(true, Ordering::SeqCst);
     }
 
     pub fn resume(&self) {
         self.paused.store(false, Ordering::SeqCst);
+        let started = self.pause_started_ms.swap(0, Ordering::SeqCst);
+        if started > 0 {
+            let now_ms = self.reference_instant.elapsed().as_millis() as u64;
+            let paused_dur = now_ms.saturating_sub(started);
+            self.total_paused_ms.fetch_add(paused_dur, Ordering::SeqCst);
+        }
+    }
+
+    /// Returns total time spent paused (including current pause if active)
+    pub fn total_paused(&self) -> Duration {
+        let mut total = self.total_paused_ms.load(Ordering::SeqCst);
+        // If currently paused, add the ongoing pause duration
+        if self.is_paused() {
+            let started = self.pause_started_ms.load(Ordering::SeqCst);
+            if started > 0 {
+                let now_ms = self.reference_instant.elapsed().as_millis() as u64;
+                total += now_ms.saturating_sub(started);
+            }
+        }
+        Duration::from_millis(total)
     }
 
     pub fn is_paused(&self) -> bool {

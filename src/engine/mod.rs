@@ -687,8 +687,13 @@ impl Engine {
                     if active_scenario_handles.iter().all(|h| h.is_finished()) {
                         break 'main_loop;
                     }
-                } else if start_time.elapsed() >= duration_legacy && !control_state.is_stopped() {
-                    // Only break if natural finish
+                } else if start_time
+                    .elapsed()
+                    .saturating_sub(control_state.total_paused())
+                    >= duration_legacy
+                    && !control_state.is_stopped()
+                {
+                    // Only break if natural finish (exclude paused time)
                     break 'main_loop;
                 }
 
@@ -760,8 +765,10 @@ impl Engine {
                 }
 
                 if !is_multi_scenario && !control_state.is_stopped() {
-                    // Legacy scaling logic
-                    let elapsed = start_time.elapsed();
+                    // Legacy scaling logic (exclude paused time)
+                    let elapsed = start_time
+                        .elapsed()
+                        .saturating_sub(control_state.total_paused());
                     let scheduled_target = Self::calculate_target(&schedule_legacy, elapsed);
                     let target_workers = dynamic_target_legacy.unwrap_or(scheduled_target);
 

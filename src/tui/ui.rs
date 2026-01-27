@@ -28,7 +28,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
-    let elapsed = app.start_time.elapsed();
+    let elapsed = app
+        .start_time
+        .elapsed()
+        .saturating_sub(app.control_state.total_paused());
     let elapsed_str = format_duration(elapsed);
 
     let duration_str = match app.total_duration {
