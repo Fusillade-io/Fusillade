@@ -1627,18 +1627,82 @@ The errors file uses JSONL format for streaming writes:
 
 ---
 
-## 12. Interactive Flight Control
+## 12. Terminal TUI & Interactive Control
 
-Control your load test in real-time with the `--interactive` flag.
+Fusillade includes a built-in terminal user interface (TUI) that displays live statistics and provides interactive controls during load test runs. The TUI is enabled by default when running locally; use `--headless` to disable it for CI/CD pipelines.
 
-### Usage
+### TUI Layout
 
-```bash
-fusillade run scenarios/checkout.js --interactive -w 10 -d 5m
+When you run a test without `--headless`, Fusillade renders a full-screen terminal dashboard:
+
+```
+┌─ Fusillade ─────────────────────────────────────────────────────────┐
+│ ● RUNNING  │  Workers: 1000  │  Elapsed: 01:23 / 02:00              │
+├─────────────────────────────────────────────────────────────────────┤
+│  Requests: 12,345    RPS: 423.1    Errors: 12 (0.1%)                │
+│  Sent: 15.2 MB       Received: 128.4 MB                             │
+│                                                                     │
+│  Avg: 23.4ms  Min: 1.2ms  Max: 892ms                                │
+│  P50: 18.2ms  P90: 45.1ms  P95: 67.3ms  P99: 234.5ms                │
+├─ Status Codes ──────────────────────────────────────────────────────┤
+│  200: 12,100  │  404: 120  │  500: 12                               │
+├─ Endpoints ─────────────────────────────────────────────────────────┤
+│  Name                     Reqs    Avg      P95      Errs            │
+│  GET /api/users           4521    12.3ms   34.5ms   2               │
+│  POST /api/login          3210    45.2ms   89.3ms   8               │
+├─────────────────────────────────────────────────────────────────────┤
+│ [p] Pause  [s] Stop  [+/-] Workers ±10  [r] Ramp  [q] Quit          │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Interactive Commands
-When running with `--interactive` (or `-i`), Fusillade accepts commands via stdin to control the running test in real-time.
+The TUI shows:
+- **Header**: Test status (RUNNING/PAUSED/STOPPED), current worker count, and elapsed/total time.
+- **Stats panel**: Total requests, requests per second (RPS), error count and percentage, data transfer, and latency percentiles (avg, min, max, P50, P90, P95, P99).
+- **Status codes**: Color-coded HTTP status code breakdown (green=2xx, yellow=3xx, magenta=4xx, red=5xx).
+- **Endpoints table**: Per-endpoint breakdown sorted by request count, showing request count, average latency, P95 latency, and error count. Scrollable with arrow keys.
+- **Controls footer**: Available keyboard shortcuts, or input prompt when in ramp/tag mode.
+
+Stats refresh every second.
+
+### TUI Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `p` | Toggle pause/resume |
+| `+` or `=` | Increase workers by 10 |
+| `-` | Decrease workers by 10 (minimum 1) |
+| `r` | Enter ramp input mode (type target worker count, Enter to submit, Esc to cancel) |
+| `t` | Enter tag input mode (type `key=value`, Enter to submit, Esc to cancel) |
+| `s` | Stop the test (graceful shutdown) |
+| `q` or `Esc` | Quit (stops test and exits) |
+| `↑` / `↓` | Scroll the endpoints table |
+| `Ctrl+C` | Force quit |
+
+### Running Without the TUI
+
+For CI/CD pipelines, scripts, or environments without a terminal, use `--headless`:
+
+```bash
+# No TUI, text output only
+fusillade run scenarios/checkout.js --headless
+
+# JSON output for machine consumption
+fusillade run scenarios/checkout.js --json
+```
+
+Both `--headless` and `--json` disable the TUI.
+
+### Headless Interactive Mode
+
+You can combine `--headless` with `--interactive` to get text-based interactive control via stdin (the original behavior before the TUI was added):
+
+```bash
+fusillade run scenarios/checkout.js --headless --interactive -w 10 -d 5m
+```
+
+### Interactive Commands (Headless Mode)
+
+When running with `--headless --interactive`, Fusillade accepts commands via stdin:
 
 | Command | Aliases | Description | Example |
 |---------|---------|-------------|---------|
