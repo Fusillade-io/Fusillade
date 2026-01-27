@@ -959,7 +959,9 @@ impl Engine {
                             "latency_avg_ms": report.avg_latency_ms,
                             "latency_p95_ms": report.p95_latency_ms,
                             "errors": error_count,
-                            "active_workers": active_workers
+                            "active_workers": active_workers,
+                            "data_sent": report.total_data_sent,
+                            "data_received": report.total_data_received
                         });
 
                         // Send metrics to URL
