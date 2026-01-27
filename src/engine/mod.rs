@@ -201,6 +201,8 @@ impl Engine {
         controller_metrics_url: Option<String>,
         controller_metrics_auth: Option<String>,
         control_rx: Option<std::sync::mpsc::Receiver<control::ControlCommand>>,
+        shared_aggregator: Option<Arc<ShardedAggregator>>,
+        shared_control_state: Option<Arc<control::ControlState>>,
     ) -> Result<crate::stats::ReportStats> {
         if let Some(url) = &config.warmup {
             self.warmup(url);
@@ -217,8 +219,9 @@ impl Engine {
             None
         };
 
-        // Initialize control state early
-        let control_state = Arc::new(control::ControlState::new(config.workers.unwrap_or(1)));
+        // Initialize control state early (use shared if provided by TUI)
+        let control_state = shared_control_state
+            .unwrap_or_else(|| Arc::new(control::ControlState::new(config.workers.unwrap_or(1))));
 
         // 1. Run Setup (same as before)
         let setup_data = self
@@ -248,7 +251,8 @@ impl Engine {
             // Dynamic shard count: target ~100 workers per shard for optimal contention
             // At 10k workers: 100 shards = 100 workers/shard (vs old 625 workers/shard)
             let num_shards = (total_workers / 100).clamp(16, 256);
-            let sharded_aggregator = Arc::new(ShardedAggregator::new(num_shards));
+            let sharded_aggregator =
+                shared_aggregator.unwrap_or_else(|| Arc::new(ShardedAggregator::new(num_shards)));
 
             // Use crossbeam bounded channel for backpressure at extreme load
             // Scale buffer with workers, with higher limits for extreme concurrency
@@ -695,43 +699,59 @@ impl Engine {
                 // Process control commands
                 if let Some(ref rx) = control_rx {
                     while let Ok(cmd) = rx.try_recv() {
+                        let tui_on =
+                            crate::bridge::TUI_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
                         match cmd {
                             control::ControlCommand::Ramp(n) => {
                                 if is_multi_scenario {
-                                    println!("[Control] WARNING: Ramping not supported in multi-scenario mode.");
+                                    if !tui_on {
+                                        println!("[Control] WARNING: Ramping not supported in multi-scenario mode.");
+                                    }
                                 } else {
-                                    println!("[Control] Ramping to {} workers", n);
+                                    if !tui_on {
+                                        println!("[Control] Ramping to {} workers", n);
+                                    }
+                                    control_state.set_target_workers(n);
                                     dynamic_target_legacy = Some(n);
                                 }
                             }
                             control::ControlCommand::Pause => {
-                                println!("[Control] Pausing workers...");
+                                if !tui_on {
+                                    println!("[Control] Pausing workers...");
+                                }
                                 control_state.pause();
                             }
                             control::ControlCommand::Resume => {
-                                println!("[Control] Resuming workers...");
+                                if !tui_on {
+                                    println!("[Control] Resuming workers...");
+                                }
                                 control_state.resume();
                             }
                             control::ControlCommand::Tag(k, v) => {
-                                println!("[Control] Adding tag: {}={}", k, v);
+                                if !tui_on {
+                                    println!("[Control] Adding tag: {}={}", k, v);
+                                }
                                 control_state.add_tag(k, v);
                             }
                             control::ControlCommand::Status => {
-                                let paused = if control_state.is_paused() {
-                                    "PAUSED"
-                                } else {
-                                    "RUNNING"
-                                };
-                                let vus = if is_multi_scenario {
-                                    // We don't verify exact VUs here easily without atomic counting, just printed status
-                                    "many".to_string()
-                                } else {
-                                    active_legacy_workers.len().to_string()
-                                };
-                                println!("[Status] Workers: {}, State: {}", vus, paused);
+                                if !tui_on {
+                                    let paused = if control_state.is_paused() {
+                                        "PAUSED"
+                                    } else {
+                                        "RUNNING"
+                                    };
+                                    let vus = if is_multi_scenario {
+                                        "many".to_string()
+                                    } else {
+                                        active_legacy_workers.len().to_string()
+                                    };
+                                    println!("[Status] Workers: {}, State: {}", vus, paused);
+                                }
                             }
                             control::ControlCommand::Stop => {
-                                println!("[Control] Stopping test...");
+                                if !tui_on {
+                                    println!("[Control] Stopping test...");
+                                }
                                 control_state.stop();
                                 break 'main_loop;
                             }
@@ -988,6 +1008,9 @@ impl Engine {
 
                 std::thread::sleep(Duration::from_millis(100));
             } // End main_loop
+
+            // Signal TUI that the test is done
+            control_state.stop();
 
             // Clean up
             if is_multi_scenario {

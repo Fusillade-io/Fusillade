@@ -24,9 +24,13 @@ use crossbeam_channel::Sender;
 use rand::Rng;
 use rquickjs::{Ctx, Function, Result};
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
+
+/// When true, suppress stdout output (TUI is active on the alternate screen)
+pub static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // Thread-local sleep tracker for accurate iteration timing
 // This tracks cumulative sleep time during an iteration so it can be excluded from response time metrics
@@ -50,8 +54,10 @@ fn track_sleep(duration: Duration) {
 }
 
 fn print(tx: Sender<Metric>, msg: String) {
-    // Print to stdout for user visibility
-    println!("{}", msg);
+    // Only print to stdout when TUI is not active
+    if !TUI_ACTIVE.load(Ordering::Relaxed) {
+        println!("{}", msg);
+    }
     // Send to metrics channel for aggregation
     let _ = tx.send(Metric::Log { message: msg });
 }

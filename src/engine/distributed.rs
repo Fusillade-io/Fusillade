@@ -157,6 +157,8 @@ impl WorkerServer {
                             metrics_url,
                             None, // metrics_auth
                             Some(ctrl_rx),
+                            None,
+                            None,
                         );
 
                         // Clear the control sender when test finishes
@@ -243,6 +245,8 @@ async fn handle_start(
             None,
             None,
             metrics_url,
+            None,
+            None,
             None,
             None,
         );
