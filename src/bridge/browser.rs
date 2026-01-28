@@ -1,15 +1,42 @@
+use crate::stats::{Metric, RequestTimings};
+use crossbeam_channel::Sender;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use rquickjs::{
     class::{Trace, Tracer},
     Class, Ctx, Function, IntoJs, JsLifetime, Object, Result, Value,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+fn make_metric(name: &str, start: Instant, error: Option<String>) -> Metric {
+    let duration = start.elapsed();
+    let timings = RequestTimings {
+        duration,
+        waiting: duration,
+        ..Default::default()
+    };
+    let status = if error.is_none() { 200 } else { 0 };
+    Metric::Request {
+        name: name.to_string(),
+        timings,
+        status,
+        error,
+        tags: HashMap::new(),
+    }
+}
 
 #[derive(Clone)]
 pub struct CurrentPage(pub Arc<Mutex<Option<Arc<Tab>>>>);
 
 unsafe impl<'js> JsLifetime<'js> for CurrentPage {
     type Changed<'to> = CurrentPage;
+}
+
+#[derive(Clone)]
+struct BrowserMetricSender(Sender<Metric>);
+unsafe impl<'js> JsLifetime<'js> for BrowserMetricSender {
+    type Changed<'to> = BrowserMetricSender;
 }
 
 #[rquickjs::class]
@@ -40,7 +67,8 @@ impl JsBrowser {
             *guard = Some(tab.clone());
         }
 
-        let js_page = JsPage { inner: tab };
+        let tx = ctx.userdata::<BrowserMetricSender>().map(|w| w.0.clone());
+        let js_page = JsPage { inner: tab, tx };
         Class::<JsPage>::instance(ctx, js_page)
     }
 
@@ -56,6 +84,7 @@ impl JsBrowser {
 #[rquickjs::class]
 pub struct JsPage {
     inner: Arc<Tab>,
+    tx: Option<Sender<Metric>>,
 }
 
 impl<'js> Trace<'js> for JsPage {
@@ -69,17 +98,37 @@ unsafe impl<'js> JsLifetime<'js> for JsPage {
 #[rquickjs::methods]
 impl<'js> JsPage {
     pub fn goto(&self, ctx: Ctx<'_>, url: String) -> Result<()> {
-        self.inner.navigate_to(&url).map_err(|e| {
-            let msg = format!("Navigation failed: {}", e);
-            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
-            rquickjs::Error::Exception
-        })?;
-        self.inner.wait_until_navigated().map_err(|e| {
-            let msg = format!("Wait failed: {}", e);
-            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
-            rquickjs::Error::Exception
-        })?;
-        Ok(())
+        let start = Instant::now();
+        let result = (|| -> Result<()> {
+            self.inner.navigate_to(&url).map_err(|e| {
+                let msg = format!("Navigation failed: {}", e);
+                let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+                rquickjs::Error::Exception
+            })?;
+            self.inner.wait_until_navigated().map_err(|e| {
+                let msg = format!("Wait failed: {}", e);
+                let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+                rquickjs::Error::Exception
+            })?;
+            Ok(())
+        })();
+        match &result {
+            Ok(()) => {
+                if let Some(ref tx) = self.tx {
+                    let _ = tx.send(make_metric("browser::goto", start, None));
+                }
+            }
+            Err(_) => {
+                if let Some(ref tx) = self.tx {
+                    let _ = tx.send(make_metric(
+                        "browser::goto",
+                        start,
+                        Some("Navigation failed".to_string()),
+                    ));
+                }
+            }
+        }
+        result
     }
 
     pub fn content(&self, ctx: Ctx<'_>) -> Result<String> {
@@ -91,33 +140,55 @@ impl<'js> JsPage {
     }
 
     pub fn click(&self, ctx: Ctx<'_>, selector: String) -> Result<()> {
+        let start = Instant::now();
         let el = self.inner.find_element(&selector).map_err(|e| {
             let msg = format!("Element not found: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::click", start, Some(msg.clone())));
+            }
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
             rquickjs::Error::Exception
         })?;
 
         el.click().map_err(|e| {
             let msg = format!("Click failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::click", start, Some(msg.clone())));
+            }
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
             rquickjs::Error::Exception
         })?;
+
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::click", start, None));
+        }
         Ok(())
     }
 
     #[qjs(rename = "type")]
     pub fn type_into(&self, ctx: Ctx<'_>, selector: String, text: String) -> Result<()> {
+        let start = Instant::now();
         let el = self.inner.find_element(&selector).map_err(|e| {
             let msg = format!("Element not found: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::type", start, Some(msg.clone())));
+            }
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
             rquickjs::Error::Exception
         })?;
 
         el.type_into(&text).map_err(|e| {
             let msg = format!("Type failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::type", start, Some(msg.clone())));
+            }
             let _ = ctx.throw(msg.into_js(&ctx).unwrap());
             rquickjs::Error::Exception
         })?;
+
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::type", start, None));
+        }
         Ok(())
     }
 
@@ -174,9 +245,10 @@ fn launch_browser<'js>(ctx: Ctx<'js>) -> Result<Class<'js, JsBrowser>> {
     Class::<JsBrowser>::instance(ctx, js_browser)
 }
 
-pub fn register_sync(ctx: &Ctx) -> Result<()> {
+pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
     let current_page = CurrentPage(Arc::new(Mutex::new(None)));
     ctx.store_userdata(current_page)?;
+    ctx.store_userdata(BrowserMetricSender(tx))?;
 
     Class::<JsBrowser>::define(&ctx.globals())?;
     Class::<JsPage>::define(&ctx.globals())?;

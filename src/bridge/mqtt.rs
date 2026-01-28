@@ -1,12 +1,38 @@
+use crate::stats::{Metric, RequestTimings};
+use crossbeam_channel::Sender;
 use rquickjs::{
     class::{Trace, Tracer},
     Ctx, JsLifetime, Object, Result, Value,
 };
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+fn make_metric(name: &str, start: Instant, error: Option<String>) -> Metric {
+    let duration = start.elapsed();
+    let timings = RequestTimings {
+        duration,
+        waiting: duration,
+        ..Default::default()
+    };
+    let status = if error.is_none() { 200 } else { 0 };
+    Metric::Request {
+        name: name.to_string(),
+        timings,
+        status,
+        error,
+        tags: HashMap::new(),
+    }
+}
+
+#[derive(Clone)]
+struct MetricSender(Sender<Metric>);
+unsafe impl<'js> JsLifetime<'js> for MetricSender {
+    type Changed<'to> = MetricSender;
+}
 
 /// Message received from MQTT subscription
 struct MqttMessage {
@@ -21,6 +47,7 @@ pub struct JsMqttClient {
     message_rx: Option<crossbeam_channel::Receiver<MqttMessage>>,
     running: Arc<AtomicBool>,
     _background_handle: Option<JoinHandle<()>>,
+    tx: Option<Sender<Metric>>,
 }
 
 unsafe impl<'js> JsLifetime<'js> for JsMqttClient {
@@ -34,16 +61,19 @@ impl<'js> Trace<'js> for JsMqttClient {
 #[rquickjs::methods]
 impl JsMqttClient {
     #[qjs(constructor)]
-    pub fn new() -> Self {
+    pub fn new(ctx: Ctx<'_>) -> Self {
+        let tx = ctx.userdata::<MetricSender>().map(|w| w.0.clone());
         Self {
             client: None,
             message_rx: None,
             running: Arc::new(AtomicBool::new(false)),
             _background_handle: None,
+            tx,
         }
     }
 
     pub fn connect(&mut self, host: String, port: u16, client_id: String) -> Result<()> {
+        let start = Instant::now();
         let mut mqttoptions = MqttOptions::new(client_id, host, port);
         mqttoptions.set_keep_alive(Duration::from_secs(5));
 
@@ -94,16 +124,35 @@ impl JsMqttClient {
         self.message_rx = Some(rx);
         self._background_handle = Some(handle);
 
+        if let Some(ref mtx) = self.tx {
+            let _ = mtx.send(make_metric("mqtt::connect", start, None));
+        }
+
         Ok(())
     }
 
     /// Subscribe to a topic pattern (supports MQTT wildcards + and #)
     pub fn subscribe(&mut self, topic: String) -> Result<()> {
+        let start = Instant::now();
         if let Some(ref mut client) = self.client {
-            client.subscribe(&topic, QoS::AtLeastOnce).map_err(|_| {
-                rquickjs::Error::new_from_js("MQTT Subscribe failed", "NetworkError")
-            })?;
-            Ok(())
+            match client.subscribe(&topic, QoS::AtLeastOnce) {
+                Ok(()) => {
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("mqtt::subscribe", start, None));
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    let err_msg = format!("MQTT Subscribe failed: {}", e);
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("mqtt::subscribe", start, Some(err_msg)));
+                    }
+                    Err(rquickjs::Error::new_from_js(
+                        "MQTT Subscribe failed",
+                        "NetworkError",
+                    ))
+                }
+            }
         } else {
             Err(rquickjs::Error::new_from_js(
                 "MQTT Client not connected",
@@ -115,10 +164,14 @@ impl JsMqttClient {
     /// Receive the next message from subscribed topics
     /// Returns { topic, payload, qos } or null if no message available/disconnected
     pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        let start = Instant::now();
         if let Some(ref rx) = self.message_rx {
             // Use recv_timeout for blocking with reasonable timeout
             match rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(msg) => {
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("mqtt::recv", start, None));
+                    }
                     let obj = Object::new(ctx.clone())?;
                     obj.set("topic", msg.topic)?;
                     // Try to decode payload as UTF-8 string, otherwise use lossy conversion
@@ -142,11 +195,26 @@ impl JsMqttClient {
     }
 
     pub fn publish(&mut self, topic: String, payload: String) -> Result<()> {
+        let start = Instant::now();
         if let Some(ref mut client) = self.client {
-            client
-                .publish(topic, QoS::AtLeastOnce, false, payload.as_bytes())
-                .map_err(|_| rquickjs::Error::new_from_js("MQTT Publish failed", "NetworkError"))?;
-            Ok(())
+            match client.publish(topic, QoS::AtLeastOnce, false, payload.as_bytes()) {
+                Ok(()) => {
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("mqtt::publish", start, None));
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    let err_msg = format!("MQTT Publish failed: {}", e);
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("mqtt::publish", start, Some(err_msg)));
+                    }
+                    Err(rquickjs::Error::new_from_js(
+                        "MQTT Publish failed",
+                        "NetworkError",
+                    ))
+                }
+            }
         } else {
             Err(rquickjs::Error::new_from_js(
                 "MQTT Client not connected",
@@ -167,7 +235,8 @@ impl JsMqttClient {
     }
 }
 
-pub fn register_sync<'js>(ctx: &Ctx<'js>) -> Result<()> {
+pub fn register_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>) -> Result<()> {
+    ctx.store_userdata(MetricSender(tx))?;
     let globals = ctx.globals();
     rquickjs::Class::<JsMqttClient>::define(&globals)?;
     Ok(())

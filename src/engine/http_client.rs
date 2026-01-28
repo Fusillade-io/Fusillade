@@ -167,6 +167,7 @@ impl Service<Uri> for MeasuredHttpsConnector {
 #[derive(Clone)]
 pub struct HttpClient {
     client: Client<MeasuredHttpsConnector, Full<Bytes>>,
+    timing_ctx: TimingContext,
 }
 
 impl Default for HttpClient {
@@ -211,7 +212,7 @@ impl HttpClient {
             .http2_initial_stream_window_size(stream_window)
             .build(https);
 
-        Self { client }
+        Self { client, timing_ctx }
     }
 
     /// Make an HTTP request. If `response_sink` is true, the response body is read from the network
@@ -247,6 +248,8 @@ impl HttpClient {
 
         let req_hyper = builder.body(Full::new(body_bytes))?;
 
+        // Reset timing context before each request so connector timings are per-request
+        self.timing_ctx.reset();
         let response = self.client.request(req_hyper).await?;
         let headers_received = Instant::now();
 
@@ -275,21 +278,21 @@ impl HttpClient {
         };
         let receive_end = Instant::now();
 
-        // Simple timing: measure actual durations without connector-level breakdown
-        // This avoids race conditions with shared timing context in concurrent requests
         let mut timings = RequestTimings::default();
 
-        // Total time from request start to headers received (includes connection, TLS, send, wait)
+        // Total time from request start to headers received
         let time_to_headers = headers_received.duration_since(request_start);
 
-        // Rough breakdown: assume connection/TLS is ~10% of time for warmed connections
-        // For new connections, the connector timing would show this, but pooled connections
-        // skip that entirely, making breakdown unreliable without per-request state
         timings.blocked = Duration::ZERO;
-        timings.connecting = Duration::ZERO;
-        timings.tls_handshaking = Duration::ZERO;
+        // Read per-request connector timings (reset before request via reset() call above)
+        // For pooled connections these will be zero (correct: no new connection was made)
+        timings.connecting = self.timing_ctx.get_connecting();
+        timings.tls_handshaking = self.timing_ctx.get_tls();
+        let connection_time = timings.connecting + timings.tls_handshaking;
         timings.sending = Duration::from_micros(100);
-        timings.waiting = time_to_headers.saturating_sub(timings.sending);
+        timings.waiting = time_to_headers
+            .saturating_sub(connection_time)
+            .saturating_sub(timings.sending);
         timings.receiving = receive_end.duration_since(headers_received);
 
         // Total request duration: send + wait + receive

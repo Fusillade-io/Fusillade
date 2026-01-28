@@ -31,6 +31,18 @@ impl ShardedAggregator {
         Self { shards, num_shards }
     }
 
+    /// Create with no_endpoint_tracking enabled on all shards
+    pub fn new_no_endpoint_tracking(num_shards: usize) -> Self {
+        let shards = (0..num_shards)
+            .map(|_| {
+                let mut agg = StatsAggregator::new();
+                agg.no_endpoint_tracking = true;
+                ParkingLotRwLock::new(agg)
+            })
+            .collect();
+        Self { shards, num_shards }
+    }
+
     /// Add a metric to the appropriate shard based on worker_id
     pub fn add(&self, worker_id: usize, metric: Metric) {
         let shard_idx = worker_id % self.num_shards;
@@ -328,6 +340,8 @@ pub struct StatsAggregator {
     pub rates: HashMap<String, (usize, usize)>, // (total, success)
     pub counters: HashMap<String, f64>,
     pub gauges: HashMap<String, f64>,
+    /// When true, skip per-endpoint grouped_requests tracking to reduce memory
+    pub no_endpoint_tracking: bool,
 }
 
 unsafe impl<'js> JsLifetime<'js> for StatsAggregator {
@@ -364,6 +378,7 @@ impl StatsAggregator {
             rates: HashMap::new(),
             counters: HashMap::new(),
             gauges: HashMap::new(),
+            no_endpoint_tracking: false,
         }
     }
 
@@ -397,54 +412,56 @@ impl StatsAggregator {
                     *self.errors.entry(err).or_insert(0) += 1;
                 }
 
-                // Append tags to name for granular aggregation
-                let mut full_name = name;
-                if !tags.is_empty() {
-                    let mut sorted_tags: Vec<_> = tags.iter().collect();
-                    sorted_tags.sort_by_key(|a| a.0);
-                    full_name.push('{');
-                    for (i, (k, v)) in sorted_tags.iter().enumerate() {
-                        if i > 0 {
-                            full_name.push(',');
-                        }
-                        full_name.push_str(k);
-                        full_name.push(':');
-                        full_name.push_str(v);
-                    }
-                    full_name.push('}');
-                }
-
-                // Per-request stats
-                let req_stats = self.requests.entry(full_name).or_default();
-                req_stats.total_requests += 1;
-                req_stats.total_duration += timings.duration;
-                if req_stats
-                    .min_duration
-                    .is_none_or(|min| timings.duration < min)
-                {
-                    req_stats.min_duration = Some(timings.duration);
-                }
-                if timings.duration > req_stats.max_duration {
-                    req_stats.max_duration = timings.duration;
-                }
-                let _ = req_stats.histogram.record(micros.max(1));
-                if error.is_some() {
-                    req_stats.error_count += 1;
-                }
-
-                // Aggregate granular timings
-                req_stats.total_blocked += timings.blocked;
-                req_stats.total_connecting += timings.connecting;
-                req_stats.total_tls_handshaking += timings.tls_handshaking;
-                req_stats.total_sending += timings.sending;
-                req_stats.total_waiting += timings.waiting;
-                req_stats.total_receiving += timings.receiving;
-                req_stats.total_response_size += timings.response_size as u64;
-                req_stats.total_request_size += timings.request_size as u64;
-
                 // Update global data counters
                 self.total_data_sent += timings.request_size as u64;
                 self.total_data_received += timings.response_size as u64;
+
+                // Per-request stats (skip when no_endpoint_tracking to save memory)
+                if !self.no_endpoint_tracking {
+                    // Append tags to name for granular aggregation
+                    let mut full_name = name;
+                    if !tags.is_empty() {
+                        let mut sorted_tags: Vec<_> = tags.iter().collect();
+                        sorted_tags.sort_by_key(|a| a.0);
+                        full_name.push('{');
+                        for (i, (k, v)) in sorted_tags.iter().enumerate() {
+                            if i > 0 {
+                                full_name.push(',');
+                            }
+                            full_name.push_str(k);
+                            full_name.push(':');
+                            full_name.push_str(v);
+                        }
+                        full_name.push('}');
+                    }
+
+                    let req_stats = self.requests.entry(full_name).or_default();
+                    req_stats.total_requests += 1;
+                    req_stats.total_duration += timings.duration;
+                    if req_stats
+                        .min_duration
+                        .is_none_or(|min| timings.duration < min)
+                    {
+                        req_stats.min_duration = Some(timings.duration);
+                    }
+                    if timings.duration > req_stats.max_duration {
+                        req_stats.max_duration = timings.duration;
+                    }
+                    let _ = req_stats.histogram.record(micros.max(1));
+                    if error.is_some() {
+                        req_stats.error_count += 1;
+                    }
+
+                    // Aggregate granular timings
+                    req_stats.total_blocked += timings.blocked;
+                    req_stats.total_connecting += timings.connecting;
+                    req_stats.total_tls_handshaking += timings.tls_handshaking;
+                    req_stats.total_sending += timings.sending;
+                    req_stats.total_waiting += timings.waiting;
+                    req_stats.total_receiving += timings.receiving;
+                    req_stats.total_response_size += timings.response_size as u64;
+                    req_stats.total_request_size += timings.request_size as u64;
+                }
             }
             Metric::Check { name, success } => {
                 let entry = self.checks.entry(name).or_insert((0, 0));
@@ -467,9 +484,8 @@ impl StatsAggregator {
                 let h = self.histograms.entry(name.clone()).or_insert_with(|| {
                     Histogram::<u64>::new_with_bounds(1, 60 * 60 * 1000 * 1000, 2).unwrap()
                 });
-                // Assuming value is compatible with u64 (like micros or simple counts)
-                // If it's a float, we might need to cast.
-                let _ = h.record(value as u64);
+                // Store as micros (multiply by 1000) to preserve 3 decimal places of precision
+                let _ = h.record((value * 1000.0) as u64);
                 *self.histogram_sums.entry(name).or_insert(0.0) += value;
             }
             Metric::Counter {
@@ -567,11 +583,11 @@ impl StatsAggregator {
                 name.clone(),
                 HistogramReport {
                     avg,
-                    min: h.min() as f64,
-                    max: h.max() as f64,
-                    p90: h.value_at_quantile(0.9) as f64,
-                    p95: h.value_at_quantile(0.95) as f64,
-                    p99: h.value_at_quantile(0.99) as f64,
+                    min: h.min() as f64 / 1000.0,
+                    max: h.max() as f64 / 1000.0,
+                    p90: h.value_at_quantile(0.9) as f64 / 1000.0,
+                    p95: h.value_at_quantile(0.95) as f64 / 1000.0,
+                    p99: h.value_at_quantile(0.99) as f64 / 1000.0,
                     count,
                 },
             );
@@ -729,9 +745,15 @@ impl StatsAggregator {
         if !self.histograms.is_empty() {
             println!("\nHistograms:");
             for (name, h) in &self.histograms {
-                let p95 = h.value_at_quantile(0.95);
+                let p95 = h.value_at_quantile(0.95) as f64 / 1000.0;
                 let avg = self.histogram_sums.get(name).unwrap_or(&0.0) / h.len().max(1) as f64;
-                println!("  {}: p95={}, avg={:.2}, count={}", name, p95, avg, h.len());
+                println!(
+                    "  {}: p95={:.3}, avg={:.2}, count={}",
+                    name,
+                    p95,
+                    avg,
+                    h.len()
+                );
             }
         }
 
@@ -762,6 +784,60 @@ impl StatsAggregator {
         }
 
         println!("--------------------\n");
+    }
+
+    /// Validate thresholds scoped to a specific scenario.
+    /// Filters requests by scenario name prefix and builds a sub-aggregator
+    /// to evaluate thresholds only against that scenario's metrics.
+    pub fn validate_scenario_thresholds(
+        &self,
+        scenario_name: &str,
+        criteria: &HashMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        // Build a sub-aggregator containing only this scenario's request data
+        let mut sub = StatsAggregator::new();
+        let prefix = format!("{}::", scenario_name);
+
+        for (name, stats) in &self.requests {
+            if name.starts_with(&prefix) {
+                sub.total_requests += stats.total_requests;
+                sub.total_duration += stats.total_duration;
+                if sub.min_duration.is_none() || stats.min_duration < sub.min_duration {
+                    sub.min_duration = stats.min_duration;
+                }
+                if stats.max_duration > sub.max_duration {
+                    sub.max_duration = stats.max_duration;
+                }
+                sub.histogram.add(&stats.histogram).ok();
+                sub.total_data_sent += stats.total_request_size;
+                sub.total_data_received += stats.total_response_size;
+                // Count errors from grouped request stats
+                // (error_count is tracked per-request group)
+                let entry = sub.errors.entry("error".to_string()).or_insert(0);
+                *entry += stats.error_count;
+            }
+        }
+
+        // Copy custom metrics, checks, rates, counters, gauges as-is
+        // (they are global; scenario-scoped custom metrics would need tags filtering
+        //  which is a future enhancement)
+        sub.checks = self.checks.clone();
+        sub.histograms = self.histograms.clone();
+        sub.histogram_sums = self.histogram_sums.clone();
+        sub.rates = self.rates.clone();
+        sub.counters = self.counters.clone();
+        sub.gauges = self.gauges.clone();
+
+        // Remove the synthetic "error" entry if count is 0
+        if sub.errors.get("error") == Some(&0) {
+            sub.errors.remove("error");
+        }
+
+        // Prefix failure messages with scenario name
+        sub.validate_thresholds(criteria)
+            .into_iter()
+            .map(|f| format!("[scenario: {}] {}", scenario_name, f))
+            .collect()
     }
 
     #[allow(dead_code)]
@@ -796,12 +872,7 @@ impl StatsAggregator {
                 } else if metric_name == "http_req_failed" {
                     if check_type == "rate" {
                         if report.total_requests > 0 {
-                            let total_errors: usize = report.errors.values().sum::<usize>()
-                                + report
-                                    .grouped_requests
-                                    .values()
-                                    .map(|r| r.error_count)
-                                    .sum::<usize>();
+                            let total_errors: usize = report.errors.values().sum();
                             total_errors as f64 / report.total_requests as f64
                         } else {
                             0.0
@@ -1116,10 +1187,10 @@ mod tests {
             .expect("Histogram should exist");
 
         assert_eq!(hist.count, 100);
-        assert_eq!(hist.min, 1.0);
-        assert_eq!(hist.max, 100.0);
+        assert!((hist.min - 1.0).abs() < 1.0, "Min was {}", hist.min);
+        assert!((hist.max - 100.0).abs() < 1.0, "Max was {}", hist.max);
         assert!((hist.avg - 50.5).abs() < 1.0, "Avg was {}", hist.avg);
-        assert!(hist.p95 >= 94.0 && hist.p95 <= 96.0, "P95 was {}", hist.p95);
+        assert!(hist.p95 >= 94.0 && hist.p95 <= 97.0, "P95 was {}", hist.p95);
     }
 
     #[test]
