@@ -14,7 +14,7 @@ We take security seriously. If you discover a security vulnerability in Fusillad
 ### How to Report
 
 1. **Do not** open a public GitHub issue for security vulnerabilities
-2. Email us at **security@fusillade.io** with:
+2. Email us at **fusi@fusillade.io** with:
    - Description of the vulnerability
    - Steps to reproduce
    - Potential impact
