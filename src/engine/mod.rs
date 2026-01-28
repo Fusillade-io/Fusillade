@@ -237,6 +237,82 @@ impl Engine {
 
         let setup_data = Arc::new(setup_data);
 
+        // Pre-validate script: compile and check for exec function before spawning workers
+        {
+            let (pre_rt, pre_ctx) = Self::create_runtime()?;
+            let validation_err = pre_ctx.with(|ctx| {
+                let (pre_tx, _) = crossbeam_channel::unbounded();
+                let pre_agg = Arc::new(std::sync::RwLock::new(StatsAggregator::new()));
+                let pre_tokio = Arc::new(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                );
+                let pre_client = {
+                    let _guard = pre_tokio.enter();
+                    HttpClient::new()
+                };
+                let pre_shared = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+                crate::bridge::register_globals_sync(
+                    &ctx, pre_tx, pre_client, pre_shared, 0, pre_agg, pre_tokio, None, None, false,
+                )
+                .ok();
+
+                let module = match rquickjs::Module::declare(
+                    ctx.clone(),
+                    script_path.to_string_lossy().to_string(),
+                    script_content.clone(),
+                )
+                .catch(&ctx)
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Some(format!(
+                            "Script compilation failed:\n{}",
+                            format_js_error(&e)
+                        ));
+                    }
+                };
+                let (module, _) = match module.eval().catch(&ctx) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Some(format!("Script evaluation failed:\n{}", format_js_error(&e)));
+                    }
+                };
+
+                // Check for default function (or scenario exec functions)
+                let has_default = module.get::<_, rquickjs::Function>("default").is_ok();
+                let has_scenarios = config.scenarios.is_some();
+                if !has_default && !has_scenarios {
+                    return Some(
+                        "Script error: 'default' function not found. Did you forget to export default function?".to_string(),
+                    );
+                }
+                if let Some(ref scenarios) = config.scenarios {
+                    for (name, sc) in scenarios {
+                        let exec_fn = sc.exec.clone().unwrap_or_else(|| "default".to_string());
+                        if module.get::<_, rquickjs::Function>(&exec_fn).is_err()
+                            && module.get::<_, rquickjs::Function>("default").is_err()
+                        {
+                            return Some(format!(
+                                "Scenario '{}': function '{}' not found and no 'default' fallback",
+                                name, exec_fn
+                            ));
+                        }
+                    }
+                }
+                None
+            });
+            pre_rt.run_gc();
+            drop(pre_ctx);
+            drop(pre_rt);
+
+            if let Some(err_msg) = validation_err {
+                return Err(anyhow::anyhow!("{}", err_msg));
+            }
+        }
+
         let handle = std::thread::spawn(move || {
             // Calculate total workers for scaling decisions
             let total_workers = if let Some(ref scenarios) = config.scenarios {
@@ -251,8 +327,13 @@ impl Engine {
             // Dynamic shard count: target ~100 workers per shard for optimal contention
             // At 10k workers: 100 shards = 100 workers/shard (vs old 625 workers/shard)
             let num_shards = (total_workers / 100).clamp(16, 256);
-            let sharded_aggregator =
-                shared_aggregator.unwrap_or_else(|| Arc::new(ShardedAggregator::new(num_shards)));
+            let sharded_aggregator = shared_aggregator.unwrap_or_else(|| {
+                if config.no_endpoint_tracking.unwrap_or(false) {
+                    Arc::new(ShardedAggregator::new_no_endpoint_tracking(num_shards))
+                } else {
+                    Arc::new(ShardedAggregator::new(num_shards))
+                }
+            });
 
             // Use crossbeam bounded channel for backpressure at extreme load
             // Scale buffer with workers, with higher limits for extreme concurrency
@@ -436,6 +517,7 @@ impl Engine {
                     let shared_tokio_rt = shared_tokio_rt.clone();
                     let shared_http_client = shared_http_client.clone();
                     let control_state = control_state.clone();
+                    let graceful_stop = config.stop.clone();
 
                     let h = std::thread::spawn(move || {
                         // Handle startTime delay
@@ -522,10 +604,19 @@ impl Engine {
                                     };
 
                                     // Get the exec function (default or custom)
-                                    let func: Function = module.get(&exec_fn).unwrap_or_else(|_| {
-                                        eprintln!("[Scenario: {}] Function '{}' not found, using 'default'", scenario_name, exec_fn);
-                                        module.get("default").unwrap()
-                                    });
+                                    let func: Function = match module.get(&exec_fn) {
+                                        Ok(f) => f,
+                                        Err(_) => {
+                                            eprintln!("[Scenario: {}] Function '{}' not found, trying 'default'", scenario_name, exec_fn);
+                                            match module.get("default") {
+                                                Ok(f) => f,
+                                                Err(_) => {
+                                                    eprintln!("[Scenario: {}] No 'default' function found either. Worker exiting.", scenario_name);
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    };
 
                                     let data_val = if let Some(json) = setup_data_clone.as_ref() {
                                         json_parse(ctx.clone(), json).unwrap_or(Value::new_undefined(ctx.clone()))
@@ -545,6 +636,7 @@ impl Engine {
 
                                         // Reset sleep tracker before each iteration
                                         crate::bridge::reset_sleep_tracker();
+                                        let _ = ctx.globals().set("__ITERATION", iteration_count);
                                         let iter_start = Instant::now();
                                         let call_result = func.call::<_, ()>((data_val.clone(),)).catch(&ctx);
                                         let elapsed = iter_start.elapsed(); // Total elapsed time including sleep
@@ -637,6 +729,24 @@ impl Engine {
                             r.store(false, Ordering::Relaxed);
                         }
 
+                        // Graceful stop: wait for in-flight requests to complete
+                        let grace = graceful_stop
+                            .as_deref()
+                            .and_then(parse_duration_str)
+                            .unwrap_or(Duration::from_secs(30));
+                        if grace > Duration::ZERO {
+                            let stop_start = Instant::now();
+                            while stop_start.elapsed() < grace {
+                                if active_workers
+                                    .iter()
+                                    .all(|(_, r)| !r.load(Ordering::Relaxed))
+                                {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                        }
+
                         // Wait for workers to finish
                         for (h, _) in active_workers {
                             let _ = h.join();
@@ -707,6 +817,13 @@ impl Engine {
                         let tui_on =
                             crate::bridge::TUI_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
                         match cmd {
+                            control::ControlCommand::Ramp(0) => {
+                                // Ramp 0 = return to schedule
+                                if !tui_on {
+                                    println!("[Control] Returning to schedule.");
+                                }
+                                dynamic_target_legacy = None;
+                            }
                             control::ControlCommand::Ramp(n) => {
                                 if is_multi_scenario {
                                     if !tui_on {
@@ -868,6 +985,7 @@ impl Engine {
 
                                         // Reset sleep tracker before each iteration
                                         crate::bridge::reset_sleep_tracker();
+                                        let _ = ctx.globals().set("__ITERATION", iteration_count);
                                         let iter_start = Instant::now();
                                         let call_result = func.call::<_, ()>((data_val.clone(),)).catch(&ctx);
                                         let elapsed = iter_start.elapsed(); // Total elapsed time including sleep
@@ -965,7 +1083,11 @@ impl Engine {
                         // Merge sharded aggregator and convert to report for accurate stats
                         let merged = sharded_aggregator.merge();
                         let report = merged.to_report();
-                        let elapsed_secs = start_time.elapsed().as_secs_f64().max(0.001);
+                        let elapsed_secs = start_time
+                            .elapsed()
+                            .saturating_sub(control_state.total_paused())
+                            .as_secs_f64()
+                            .max(0.001);
                         let rps = report.total_requests as f64 / elapsed_secs;
 
                         // Calculate error count
@@ -1065,13 +1187,17 @@ impl Engine {
                 merged_agg.report();
             }
 
-            if let Some(path) = export_json {
-                let _ = std::fs::write(path, merged_agg.to_json());
+            if let Some(ref path) = export_json {
+                if let Err(e) = std::fs::write(path, merged_agg.to_json()) {
+                    eprintln!("Failed to export JSON to {}: {}", path.display(), e);
+                }
             }
 
-            if let Some(path) = export_html {
+            if let Some(ref path) = export_html {
                 let html = crate::stats::html::generate_html(&report);
-                let _ = std::fs::write(path, html);
+                if let Err(e) = std::fs::write(path, html) {
+                    eprintln!("Failed to export HTML to {}: {}", path.display(), e);
+                }
             }
 
             // Send final summary with endpoint metrics to control plane
@@ -1139,11 +1265,22 @@ impl Engine {
             );
 
             // Validate thresholds if criteria are defined
-            let threshold_failures = if let Some(ref criteria) = config.criteria {
+            let mut threshold_failures = if let Some(ref criteria) = config.criteria {
                 merged_agg.validate_thresholds(criteria)
             } else {
                 Vec::new()
             };
+
+            // Per-scenario threshold evaluation
+            if let Some(ref scenarios) = config.scenarios {
+                for (scenario_name, scenario_config) in scenarios {
+                    if let Some(ref thresholds) = scenario_config.thresholds {
+                        let scenario_failures =
+                            merged_agg.validate_scenario_thresholds(scenario_name, thresholds);
+                        threshold_failures.extend(scenario_failures);
+                    }
+                }
+            }
 
             // If abort_on_fail is enabled and thresholds failed, print failures and return error
             if config.abort_on_fail.unwrap_or(false) && !threshold_failures.is_empty() {

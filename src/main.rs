@@ -382,7 +382,7 @@ fn main() -> Result<()> {
                     );
 
                     let engine_arc = Arc::new(engine);
-                    let _ = engine_arc.run_load_test(
+                    match engine_arc.run_load_test(
                         scenario.clone(),
                         script_content,
                         watch_config,
@@ -394,7 +394,10 @@ fn main() -> Result<()> {
                         None,
                         None,
                         None,
-                    );
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[Watch] Test failed: {}", e),
+                    }
 
                     println!("\n--- Waiting for changes to {} ---\n", scenario.display());
 
