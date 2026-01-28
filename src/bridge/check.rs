@@ -53,18 +53,38 @@ pub fn register_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>) -> Result<()> {
                 let key = key?;
                 let func: Function = checks.get(&key)?;
 
-                let success = match func.call::<_, bool>((val.clone(),)) {
-                    Ok(s) => s,
+                // Call the assertion function and get the result as a Value
+                // This allows us to handle:
+                // - true -> pass
+                // - false -> fail (no custom message)
+                // - string -> fail with custom message
+                let (success, message) = match func.call::<_, Value>((val.clone(),)) {
+                    Ok(result) => {
+                        if result.is_bool() {
+                            // Boolean result: true = pass, false = fail
+                            (result.as_bool().unwrap_or(false), None)
+                        } else if result.is_string() {
+                            // String result: fail with custom message
+                            let msg = result.as_string().and_then(|s| s.to_string().ok());
+                            (false, msg)
+                        } else {
+                            // Truthy check for other types (numbers, objects, etc.)
+                            // null/undefined = false, everything else = true
+                            let is_truthy = !result.is_null() && !result.is_undefined();
+                            (is_truthy, None)
+                        }
+                    }
                     Err(e) => {
                         eprintln!("Assertion function '{}' failed: {}", key, e);
                         capture_screenshot(&ctx, &key, "js_error");
-                        false // Treat JS error as a failure
+                        (false, Some(format!("JS error: {}", e)))
                     }
                 };
 
                 let _ = tx.send(Metric::Check {
                     name: key.clone(),
                     success,
+                    message: message.clone(),
                 });
 
                 if !success {

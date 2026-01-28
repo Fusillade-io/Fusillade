@@ -22,12 +22,35 @@ use crate::engine::http_client::HttpClient;
 use crate::stats::{Metric, SharedAggregator};
 use crossbeam_channel::Sender;
 use rand::Rng;
-use rquickjs::{Ctx, Function, Result};
+use rquickjs::{Ctx, Function, Object, Result, Value};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
+
+/// Log level for console.* API
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum LogLevel {
+    Debug = 0,
+    Info = 1,
+    Warn = 2,
+    Error = 3,
+}
+
+thread_local! {
+    static LOG_LEVEL: RefCell<LogLevel> = const { RefCell::new(LogLevel::Info) };
+}
+
+/// Set the global log level for console.* API
+pub fn set_log_level(level: LogLevel) {
+    LOG_LEVEL.with(|l| *l.borrow_mut() = level);
+}
+
+/// Get the current log level
+pub fn get_log_level() -> LogLevel {
+    LOG_LEVEL.with(|l| *l.borrow())
+}
 
 /// When true, suppress stdout output (TUI is active on the alternate screen)
 pub static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -60,6 +83,250 @@ fn print(tx: Sender<Metric>, msg: String) {
     }
     // Send to metrics channel for aggregation
     let _ = tx.send(Metric::Log { message: msg });
+}
+
+/// Format a JS value for console output
+fn format_value(v: &Value) -> String {
+    if v.is_undefined() {
+        "undefined".to_string()
+    } else if v.is_null() {
+        "null".to_string()
+    } else if let Some(s) = v.as_string() {
+        s.to_string().unwrap_or_default()
+    } else if let Some(n) = v.as_int() {
+        n.to_string()
+    } else if let Some(n) = v.as_float() {
+        n.to_string()
+    } else if let Some(b) = v.as_bool() {
+        b.to_string()
+    } else if v.is_object() || v.is_array() {
+        // Try to get string representation for objects/arrays
+        if let Some(s) = v.as_string() {
+            s.to_string().unwrap_or_else(|_| "[object]".to_string())
+        } else {
+            // Fallback
+            "[object]".to_string()
+        }
+    } else {
+        "[value]".to_string()
+    }
+}
+
+/// Log with level filtering
+fn log_with_level(tx: &Sender<Metric>, level: LogLevel, args: Vec<Value>) {
+    LOG_LEVEL.with(|current| {
+        if level >= *current.borrow() {
+            // Format args
+            let msg = args.iter().map(format_value).collect::<Vec<_>>().join(" ");
+
+            let prefix = match level {
+                LogLevel::Debug => "[DEBUG]",
+                LogLevel::Info => "",
+                LogLevel::Warn => "[WARN]",
+                LogLevel::Error => "[ERROR]",
+            };
+
+            let full_msg = if prefix.is_empty() {
+                msg
+            } else {
+                format!("{} {}", prefix, msg)
+            };
+
+            if !TUI_ACTIVE.load(Ordering::Relaxed) {
+                println!("{}", full_msg);
+            }
+            let _ = tx.send(Metric::Log { message: full_msg });
+        }
+    });
+}
+
+/// Format table data for console.table
+fn format_table(args: Vec<Value>) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+
+    let first = &args[0];
+    if !first.is_array() {
+        return format_value(first);
+    }
+
+    // Try to format as table
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut headers: Vec<String> = Vec::new();
+
+    if let Some(arr) = first.as_array() {
+        for i in 0..arr.len() {
+            if let Ok(item) = arr.get::<Value>(i) {
+                if let Some(obj) = item.as_object() {
+                    if headers.is_empty() {
+                        // Extract headers from first object
+                        headers = obj.keys::<String>().flatten().collect();
+                    }
+                    let mut row = Vec::new();
+                    for h in &headers {
+                        if let Ok(val) = obj.get::<_, Value>(h.as_str()) {
+                            row.push(format_value(&val));
+                        } else {
+                            row.push(String::new());
+                        }
+                    }
+                    rows.push(row);
+                } else {
+                    // Not an object, just format the value
+                    rows.push(vec![format_value(&item)]);
+                }
+            }
+        }
+    }
+
+    if headers.is_empty() && rows.is_empty() {
+        return format_value(first);
+    }
+
+    // Calculate column widths
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+
+    // Build table output
+    let mut output = String::new();
+
+    // Header row
+    if !headers.is_empty() {
+        let header_line: Vec<String> = headers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| format!("{:width$}", h, width = widths.get(i).copied().unwrap_or(0)))
+            .collect();
+        output.push_str(&header_line.join(" | "));
+        output.push('\n');
+
+        // Separator
+        let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+        output.push_str(&sep.join("-+-"));
+        output.push('\n');
+    }
+
+    // Data rows
+    for row in &rows {
+        let row_line: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| {
+                format!(
+                    "{:width$}",
+                    cell,
+                    width = widths.get(i).copied().unwrap_or(0)
+                )
+            })
+            .collect();
+        output.push_str(&row_line.join(" | "));
+        output.push('\n');
+    }
+
+    output
+}
+
+/// Register the console object with log, info, warn, error, debug, table methods
+fn register_console(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
+    let console = Object::new(ctx.clone())?;
+
+    // console.log - info level
+    let tx_log = tx.clone();
+    console.set(
+        "log",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx, args: rquickjs::function::Rest<Value>| {
+                let _ = ctx; // suppress unused warning
+                log_with_level(&tx_log, LogLevel::Info, args.0);
+            },
+        ),
+    )?;
+
+    // console.info - info level (same as log)
+    let tx_info = tx.clone();
+    console.set(
+        "info",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx, args: rquickjs::function::Rest<Value>| {
+                let _ = ctx;
+                log_with_level(&tx_info, LogLevel::Info, args.0);
+            },
+        ),
+    )?;
+
+    // console.warn - warning level
+    let tx_warn = tx.clone();
+    console.set(
+        "warn",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx, args: rquickjs::function::Rest<Value>| {
+                let _ = ctx;
+                log_with_level(&tx_warn, LogLevel::Warn, args.0);
+            },
+        ),
+    )?;
+
+    // console.error - error level
+    let tx_error = tx.clone();
+    console.set(
+        "error",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx, args: rquickjs::function::Rest<Value>| {
+                let _ = ctx;
+                log_with_level(&tx_error, LogLevel::Error, args.0);
+            },
+        ),
+    )?;
+
+    // console.debug - debug level (only shown with --log-level debug)
+    let tx_debug = tx.clone();
+    console.set(
+        "debug",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx, args: rquickjs::function::Rest<Value>| {
+                let _ = ctx;
+                log_with_level(&tx_debug, LogLevel::Debug, args.0);
+            },
+        ),
+    )?;
+
+    // console.table - tabular format
+    let tx_table = tx;
+    console.set(
+        "table",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx, args: rquickjs::function::Rest<Value>| {
+                let _ = ctx;
+                LOG_LEVEL.with(|current| {
+                    if LogLevel::Info >= *current.borrow() {
+                        let table_output = format_table(args.0);
+                        if !TUI_ACTIVE.load(Ordering::Relaxed) {
+                            println!("{}", table_output);
+                        }
+                        let _ = tx_table.send(Metric::Log {
+                            message: table_output,
+                        });
+                    }
+                });
+            },
+        ),
+    )?;
+
+    ctx.globals().set("console", console)?;
+    Ok(())
 }
 
 pub fn register_env(ctx: &Ctx) -> Result<()> {
@@ -118,6 +385,10 @@ pub fn register_globals_sync<'js>(
 
     globals.set("__WORKER_ID", worker_id)?;
 
+    // Create empty __VU_STATE object that persists across iterations
+    let vu_state = Object::new(ctx.clone())?;
+    globals.set("__VU_STATE", vu_state)?;
+
     // Register internal modules
     http::register_sync(
         ctx,
@@ -143,7 +414,8 @@ pub fn register_globals_sync<'js>(
     test::register_sync(ctx)?;
     browser::register_sync(ctx, tx.clone())?;
     sse::register_sync(ctx, tx.clone())?;
-    metrics::register_sync(ctx, tx)?;
+    metrics::register_sync(ctx, tx.clone())?;
+    register_console(ctx, tx)?;
     register_env(ctx)?;
 
     Ok(())
@@ -196,6 +468,10 @@ pub fn register_globals_sync_fast<'js>(
 
     globals.set("__WORKER_ID", worker_id)?;
 
+    // Create empty __VU_STATE object that persists across iterations
+    let vu_state = Object::new(ctx.clone())?;
+    globals.set("__VU_STATE", vu_state)?;
+
     // Use sync HTTP (ureq) - no Tokio overhead
     http_sync::register_sync_http(ctx, tx.clone(), response_sink)?;
     check::register_sync(ctx, tx.clone())?;
@@ -209,7 +485,8 @@ pub fn register_globals_sync_fast<'js>(
     crypto::register_sync(ctx)?;
     test::register_sync(ctx)?;
     browser::register_sync(ctx, tx.clone())?;
-    metrics::register_sync(ctx, tx)?;
+    metrics::register_sync(ctx, tx.clone())?;
+    register_console(ctx, tx)?;
     register_env(ctx)?;
 
     Ok(())
