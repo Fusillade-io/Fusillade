@@ -1,3 +1,5 @@
+use crate::stats::{Metric, RequestTimings};
+use crossbeam_channel::Sender;
 use futures_lite::StreamExt;
 use lapin::{
     options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties,
@@ -6,11 +8,35 @@ use rquickjs::{
     class::{Trace, Tracer},
     Ctx, JsLifetime, Object, Result, Value,
 };
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
+
+fn make_metric(name: &str, start: Instant, error: Option<String>) -> Metric {
+    let duration = start.elapsed();
+    let timings = RequestTimings {
+        duration,
+        waiting: duration,
+        ..Default::default()
+    };
+    let status = if error.is_none() { 200 } else { 0 };
+    Metric::Request {
+        name: name.to_string(),
+        timings,
+        status,
+        error,
+        tags: HashMap::new(),
+    }
+}
+
+#[derive(Clone)]
+struct MetricSender(Sender<Metric>);
+unsafe impl<'js> JsLifetime<'js> for MetricSender {
+    type Changed<'to> = MetricSender;
+}
 
 /// Message received from AMQP consumer
 struct AmqpMessage {
@@ -26,6 +52,7 @@ pub struct JsAmqpClient {
     message_rx: Option<crossbeam_channel::Receiver<AmqpMessage>>,
     running: Arc<AtomicBool>,
     _background_handle: Option<JoinHandle<()>>,
+    tx: Option<Sender<Metric>>,
 }
 
 unsafe impl<'js> JsLifetime<'js> for JsAmqpClient {
@@ -39,7 +66,8 @@ impl<'js> Trace<'js> for JsAmqpClient {
 #[rquickjs::methods]
 impl JsAmqpClient {
     #[qjs(constructor)]
-    pub fn new() -> Self {
+    pub fn new(ctx: Ctx<'_>) -> Self {
+        let tx = ctx.userdata::<MetricSender>().map(|w| w.0.clone());
         // Create a dedicated runtime for AMQP tasks since bridge is sync
         let rt = Runtime::new().expect("Failed to create AMQP runtime");
         Self {
@@ -49,28 +77,46 @@ impl JsAmqpClient {
             message_rx: None,
             running: Arc::new(AtomicBool::new(false)),
             _background_handle: None,
+            tx,
         }
     }
 
     pub fn connect(&mut self, url: String) -> Result<()> {
+        let start = Instant::now();
         let rt = self.runtime.clone();
         let connection = rt
             .block_on(async { Connection::connect(&url, ConnectionProperties::default()).await })
-            .map_err(|_e| rquickjs::Error::new_from_js("AMQP Connect failed", "NetworkError"))?;
+            .map_err(|e| {
+                let err_msg = format!("AMQP Connect failed: {}", e);
+                if let Some(ref mtx) = self.tx {
+                    let _ = mtx.send(make_metric("amqp::connect", start, Some(err_msg)));
+                }
+                rquickjs::Error::new_from_js("AMQP Connect failed", "NetworkError")
+            })?;
 
         let channel = rt
             .block_on(async { connection.create_channel().await })
-            .map_err(|_e| {
+            .map_err(|e| {
+                let err_msg = format!("AMQP Channel creation failed: {}", e);
+                if let Some(ref mtx) = self.tx {
+                    let _ = mtx.send(make_metric("amqp::connect", start, Some(err_msg)));
+                }
                 rquickjs::Error::new_from_js("AMQP Channel creation failed", "NetworkError")
             })?;
 
         self.connection = Some(connection);
         self.channel = Some(channel);
+
+        if let Some(ref mtx) = self.tx {
+            let _ = mtx.send(make_metric("amqp::connect", start, None));
+        }
+
         Ok(())
     }
 
     /// Subscribe to a queue and start consuming messages
     pub fn subscribe(&mut self, queue: String) -> Result<()> {
+        let start = Instant::now();
         let channel = self.channel.as_ref().ok_or_else(|| {
             rquickjs::Error::new_from_js("AMQP Client not connected", "StateError")
         })?;
@@ -154,15 +200,23 @@ impl JsAmqpClient {
         self.message_rx = Some(rx);
         self._background_handle = Some(handle);
 
+        if let Some(ref mtx) = self.tx {
+            let _ = mtx.send(make_metric("amqp::subscribe", start, None));
+        }
+
         Ok(())
     }
 
     /// Receive the next message from the queue
     /// Returns { body, deliveryTag } or null if no message/disconnected
     pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        let start = Instant::now();
         if let Some(ref rx) = self.message_rx {
             match rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(msg) => {
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("amqp::recv", start, None));
+                    }
                     let obj = Object::new(ctx.clone())?;
                     // Try to decode body as UTF-8 string
                     let body_str = String::from_utf8_lossy(&msg.body).into_owned();
@@ -224,9 +278,10 @@ impl JsAmqpClient {
         routing_key: String,
         payload: String,
     ) -> Result<()> {
+        let start = Instant::now();
         if let Some(ref channel) = self.channel {
             let rt = self.runtime.clone();
-            rt.block_on(async {
+            match rt.block_on(async {
                 channel
                     .basic_publish(
                         &exchange,
@@ -236,9 +291,24 @@ impl JsAmqpClient {
                         BasicProperties::default(),
                     )
                     .await
-            })
-            .map_err(|_| rquickjs::Error::new_from_js("AMQP Publish failed", "NetworkError"))?;
-            Ok(())
+            }) {
+                Ok(_) => {
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("amqp::publish", start, None));
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    let err_msg = format!("AMQP Publish failed: {}", e);
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("amqp::publish", start, Some(err_msg)));
+                    }
+                    Err(rquickjs::Error::new_from_js(
+                        "AMQP Publish failed",
+                        "NetworkError",
+                    ))
+                }
+            }
         } else {
             Err(rquickjs::Error::new_from_js(
                 "AMQP Client not connected",
@@ -259,7 +329,8 @@ impl JsAmqpClient {
     }
 }
 
-pub fn register_sync<'js>(ctx: &Ctx<'js>) -> Result<()> {
+pub fn register_sync<'js>(ctx: &Ctx<'js>, tx: Sender<Metric>) -> Result<()> {
+    ctx.store_userdata(MetricSender(tx))?;
     let globals = ctx.globals();
     rquickjs::Class::<JsAmqpClient>::define(&globals)?;
     Ok(())

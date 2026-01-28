@@ -28,6 +28,7 @@ impl<'js> IntoJs<'js> for SyncHttpResponse {
         let body_string = body_str.to_string();
         obj.set("body", body_str.as_ref())?;
 
+        let headers_clone = self.headers.clone();
         let headers_obj = Object::new(ctx.clone())?;
         for (k, v) in self.headers {
             headers_obj.set(k, v)?;
@@ -52,6 +53,50 @@ impl<'js> IntoJs<'js> for SyncHttpResponse {
                 let json_global: Object = ctx_clone.globals().get("JSON")?;
                 let parse: Function = json_global.get("parse")?;
                 parse.call((body_string.clone(),))
+            }),
+        )?;
+
+        // Add bodyContains(str) method
+        let body_for_contains = body_str.to_string();
+        obj.set(
+            "bodyContains",
+            Function::new(ctx.clone(), move |needle: String| -> Result<bool> {
+                Ok(body_for_contains.contains(&needle))
+            }),
+        )?;
+
+        // Add bodyMatches(regex) method
+        let body_for_matches = body_str.to_string();
+        obj.set(
+            "bodyMatches",
+            Function::new(ctx.clone(), move |pattern: String| -> Result<bool> {
+                match regex::Regex::new(&pattern) {
+                    Ok(re) => Ok(re.is_match(&body_for_matches)),
+                    Err(_) => Ok(false),
+                }
+            }),
+        )?;
+
+        // Add hasHeader(name) method
+        let headers_for_check = headers_clone.clone();
+        obj.set(
+            "hasHeader",
+            Function::new(ctx.clone(), move |name: String| -> Result<bool> {
+                Ok(headers_for_check.contains_key(&name.to_lowercase())
+                    || headers_for_check.contains_key(&name))
+            }),
+        )?;
+
+        // Add isJson() method
+        let headers_for_json = headers_clone;
+        obj.set(
+            "isJson",
+            Function::new(ctx.clone(), move || -> Result<bool> {
+                Ok(headers_for_json
+                    .get("content-type")
+                    .or_else(|| headers_for_json.get("Content-Type"))
+                    .map(|ct| ct.contains("application/json"))
+                    .unwrap_or(false))
             }),
         )?;
 
@@ -92,10 +137,22 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .and_then(|obj| obj.get("tags").ok())
                     .unwrap_or_default();
 
+                let custom_headers: HashMap<String, String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get::<_, HashMap<String, String>>("headers").ok())
+                    .unwrap_or_default();
+
                 let tx = tx_get.clone();
                 let start = Instant::now();
 
-                let result = AGENT.with(|agent| agent.get(&url_str).call());
+                let result = AGENT.with(|agent| {
+                    let mut req = agent.get(&url_str);
+                    for (k, v) in &custom_headers {
+                        req = req.set(k, v);
+                    }
+                    req.call()
+                });
 
                 let waiting = start.elapsed();
 
@@ -445,10 +502,22 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .and_then(|obj| obj.get("tags").ok())
                     .unwrap_or_default();
 
+                let custom_headers: HashMap<String, String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get::<_, HashMap<String, String>>("headers").ok())
+                    .unwrap_or_default();
+
                 let tx = tx_del.clone();
                 let start = Instant::now();
 
-                let result = AGENT.with(|agent| agent.delete(&url_str).call());
+                let result = AGENT.with(|agent| {
+                    let mut req = agent.delete(&url_str);
+                    for (k, v) in &custom_headers {
+                        req = req.set(k, v);
+                    }
+                    req.call()
+                });
 
                 let duration = start.elapsed();
                 let timings = RequestTimings {
@@ -513,6 +582,369 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                             error: Some(error_msg.clone()),
                             tags,
                         });
+                        Ok(SyncHttpResponse {
+                            status: 0,
+                            body: error_msg.into_bytes(),
+                            headers: HashMap::new(),
+                            timings,
+                        })
+                    }
+                }
+            },
+        ),
+    )?;
+
+    // PATCH - like POST, takes url + body + rest args
+    let tx_patch = tx.clone();
+    let sink_patch = global_response_sink;
+    http.set(
+        "patch",
+        Function::new(
+            ctx.clone(),
+            move |url_str: String,
+                  body: String,
+                  rest: rquickjs::function::Rest<rquickjs::Value>|
+                  -> Result<SyncHttpResponse> {
+                let name_tag: Option<String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get::<_, String>("name").ok());
+
+                let tags: HashMap<String, String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get("tags").ok())
+                    .unwrap_or_default();
+
+                let content_type: String = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get::<_, HashMap<String, String>>("headers").ok())
+                    .and_then(|h| h.get("Content-Type").cloned())
+                    .unwrap_or_else(|| "application/json".to_string());
+
+                let tx = tx_patch.clone();
+                let start = Instant::now();
+
+                let result = AGENT.with(|agent| {
+                    agent
+                        .request("PATCH", &url_str)
+                        .set("Content-Type", &content_type)
+                        .send_string(&body)
+                });
+
+                let waiting = start.elapsed();
+
+                match result {
+                    Ok(response) => {
+                        let status = response.status();
+                        let mut headers = HashMap::new();
+                        for name in response.headers_names() {
+                            if let Some(val) = response.header(&name) {
+                                headers.insert(name, val.to_string());
+                            }
+                        }
+
+                        let body_start = Instant::now();
+                        let resp_body = if sink_patch {
+                            let _ = response.into_string();
+                            Vec::new()
+                        } else {
+                            response.into_string().unwrap_or_default().into_bytes()
+                        };
+                        let receiving = body_start.elapsed();
+                        let duration = start.elapsed();
+
+                        let timings = RequestTimings {
+                            duration,
+                            waiting,
+                            receiving,
+                            ..Default::default()
+                        };
+
+                        let metric_name: Cow<str> = match &name_tag {
+                            Some(n) => Cow::Borrowed(n.as_str()),
+                            None => Cow::Borrowed(&url_str),
+                        };
+
+                        let _ = tx.send(Metric::Request {
+                            name: format!(
+                                "{}{}",
+                                crate::bridge::group::get_current_group_prefix(),
+                                metric_name
+                            ),
+                            timings,
+                            status,
+                            error: None,
+                            tags,
+                        });
+
+                        Ok(SyncHttpResponse {
+                            status,
+                            body: resp_body,
+                            headers,
+                            timings,
+                        })
+                    }
+                    Err(e) => {
+                        let duration = start.elapsed();
+                        let timings = RequestTimings {
+                            duration,
+                            ..Default::default()
+                        };
+
+                        let metric_name: Cow<str> = match &name_tag {
+                            Some(n) => Cow::Borrowed(n.as_str()),
+                            None => Cow::Borrowed(&url_str),
+                        };
+
+                        let error_msg = e.to_string();
+                        let _ = tx.send(Metric::Request {
+                            name: format!(
+                                "{}{}",
+                                crate::bridge::group::get_current_group_prefix(),
+                                metric_name
+                            ),
+                            timings,
+                            status: 0,
+                            error: Some(error_msg.clone()),
+                            tags,
+                        });
+
+                        Ok(SyncHttpResponse {
+                            status: 0,
+                            body: error_msg.into_bytes(),
+                            headers: HashMap::new(),
+                            timings,
+                        })
+                    }
+                }
+            },
+        ),
+    )?;
+
+    // HEAD - like GET but uses .head() and doesn't read body
+    let tx_head = tx.clone();
+    http.set(
+        "head",
+        Function::new(
+            ctx.clone(),
+            move |url_str: String,
+                  rest: rquickjs::function::Rest<rquickjs::Value>|
+                  -> Result<SyncHttpResponse> {
+                let name_tag: Option<String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get::<_, String>("name").ok());
+
+                let tags: HashMap<String, String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get("tags").ok())
+                    .unwrap_or_default();
+
+                let custom_headers: HashMap<String, String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get::<_, HashMap<String, String>>("headers").ok())
+                    .unwrap_or_default();
+
+                let tx = tx_head.clone();
+                let start = Instant::now();
+
+                let result = AGENT.with(|agent| {
+                    let mut req = agent.head(&url_str);
+                    for (k, v) in &custom_headers {
+                        req = req.set(k, v);
+                    }
+                    req.call()
+                });
+
+                let duration = start.elapsed();
+                let timings = RequestTimings {
+                    duration,
+                    ..Default::default()
+                };
+
+                match result {
+                    Ok(response) => {
+                        let status = response.status();
+                        let mut headers = HashMap::new();
+                        for name in response.headers_names() {
+                            if let Some(val) = response.header(&name) {
+                                headers.insert(name, val.to_string());
+                            }
+                        }
+
+                        let metric_name: Cow<str> = match &name_tag {
+                            Some(n) => Cow::Borrowed(n.as_str()),
+                            None => Cow::Borrowed(&url_str),
+                        };
+
+                        let _ = tx.send(Metric::Request {
+                            name: format!(
+                                "{}{}",
+                                crate::bridge::group::get_current_group_prefix(),
+                                metric_name
+                            ),
+                            timings,
+                            status,
+                            error: None,
+                            tags,
+                        });
+
+                        Ok(SyncHttpResponse {
+                            status,
+                            body: Vec::new(),
+                            headers,
+                            timings,
+                        })
+                    }
+                    Err(e) => {
+                        let metric_name: Cow<str> = match &name_tag {
+                            Some(n) => Cow::Borrowed(n.as_str()),
+                            None => Cow::Borrowed(&url_str),
+                        };
+                        let error_msg = e.to_string();
+                        let _ = tx.send(Metric::Request {
+                            name: format!(
+                                "{}{}",
+                                crate::bridge::group::get_current_group_prefix(),
+                                metric_name
+                            ),
+                            timings,
+                            status: 0,
+                            error: Some(error_msg.clone()),
+                            tags,
+                        });
+                        Ok(SyncHttpResponse {
+                            status: 0,
+                            body: error_msg.into_bytes(),
+                            headers: HashMap::new(),
+                            timings,
+                        })
+                    }
+                }
+            },
+        ),
+    )?;
+
+    // OPTIONS - like GET but uses agent.request("OPTIONS", ...)
+    let tx_options = tx.clone();
+    let sink_options = global_response_sink;
+    http.set(
+        "options",
+        Function::new(
+            ctx.clone(),
+            move |url_str: String,
+                  rest: rquickjs::function::Rest<rquickjs::Value>|
+                  -> Result<SyncHttpResponse> {
+                let name_tag: Option<String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get::<_, String>("name").ok());
+
+                let tags: HashMap<String, String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get("tags").ok())
+                    .unwrap_or_default();
+
+                let custom_headers: HashMap<String, String> = rest
+                    .first()
+                    .and_then(|arg| arg.as_object())
+                    .and_then(|obj| obj.get::<_, HashMap<String, String>>("headers").ok())
+                    .unwrap_or_default();
+
+                let tx = tx_options.clone();
+                let start = Instant::now();
+
+                let result = AGENT.with(|agent| {
+                    let mut req = agent.request("OPTIONS", &url_str);
+                    for (k, v) in &custom_headers {
+                        req = req.set(k, v);
+                    }
+                    req.call()
+                });
+
+                let waiting = start.elapsed();
+
+                match result {
+                    Ok(response) => {
+                        let status = response.status();
+                        let mut headers = HashMap::new();
+                        for name in response.headers_names() {
+                            if let Some(val) = response.header(&name) {
+                                headers.insert(name, val.to_string());
+                            }
+                        }
+
+                        let body_start = Instant::now();
+                        let resp_body = if sink_options {
+                            let _ = response.into_string();
+                            Vec::new()
+                        } else {
+                            response.into_string().unwrap_or_default().into_bytes()
+                        };
+                        let receiving = body_start.elapsed();
+                        let duration = start.elapsed();
+
+                        let timings = RequestTimings {
+                            duration,
+                            waiting,
+                            receiving,
+                            ..Default::default()
+                        };
+
+                        let metric_name: Cow<str> = match &name_tag {
+                            Some(n) => Cow::Borrowed(n.as_str()),
+                            None => Cow::Borrowed(&url_str),
+                        };
+
+                        let _ = tx.send(Metric::Request {
+                            name: format!(
+                                "{}{}",
+                                crate::bridge::group::get_current_group_prefix(),
+                                metric_name
+                            ),
+                            timings,
+                            status,
+                            error: None,
+                            tags,
+                        });
+
+                        Ok(SyncHttpResponse {
+                            status,
+                            body: resp_body,
+                            headers,
+                            timings,
+                        })
+                    }
+                    Err(e) => {
+                        let duration = start.elapsed();
+                        let timings = RequestTimings {
+                            duration,
+                            ..Default::default()
+                        };
+
+                        let metric_name: Cow<str> = match &name_tag {
+                            Some(n) => Cow::Borrowed(n.as_str()),
+                            None => Cow::Borrowed(&url_str),
+                        };
+
+                        let error_msg = e.to_string();
+                        let _ = tx.send(Metric::Request {
+                            name: format!(
+                                "{}{}",
+                                crate::bridge::group::get_current_group_prefix(),
+                                metric_name
+                            ),
+                            timings,
+                            status: 0,
+                            error: Some(error_msg.clone()),
+                            tags,
+                        });
+
                         Ok(SyncHttpResponse {
                             status: 0,
                             body: error_msg.into_bytes(),

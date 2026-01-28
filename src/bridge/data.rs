@@ -9,6 +9,47 @@ use std::sync::{Arc, RwLock};
 // Shared data storage: Map<Name, Data>
 pub type SharedData = Arc<RwLock<HashMap<String, Arc<Vec<JsonValue>>>>>;
 
+/// RFC 4180 compliant CSV line parser.
+/// Handles quoted fields containing commas and escaped quotes ("").
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    // Escaped quote ""
+                    current.push('"');
+                    chars.next();
+                } else {
+                    // End of quoted field
+                    in_quotes = false;
+                }
+            } else {
+                current.push(c);
+            }
+        } else {
+            match c {
+                ',' => {
+                    fields.push(current.trim().to_string());
+                    current = String::new();
+                }
+                '"' => {
+                    in_quotes = true;
+                }
+                _ => {
+                    current.push(c);
+                }
+            }
+        }
+    }
+    fields.push(current.trim().to_string());
+    fields
+}
+
 // Wrapper for UserData to satisfy JsLifetime
 #[derive(Clone)]
 pub struct SharedDataWrapper(pub SharedData);
@@ -197,20 +238,14 @@ impl SharedCSV {
                 })?;
 
                 let mut lines = content.lines();
-                let headers: Vec<String> = lines
+                let header_line = lines
                     .next()
-                    .ok_or_else(|| rquickjs::Error::new_from_js("CSV file is empty", "Error"))?
-                    .split(',')
-                    .map(|s| s.trim().trim_matches('"').to_string())
-                    .collect();
+                    .ok_or_else(|| rquickjs::Error::new_from_js("CSV file is empty", "Error"))?;
+                let headers: Vec<String> = parse_csv_line(header_line);
 
                 let rows: Vec<Vec<String>> = lines
                     .filter(|line| !line.trim().is_empty())
-                    .map(|line| {
-                        line.split(',')
-                            .map(|s| s.trim().trim_matches('"').to_string())
-                            .collect()
-                    })
+                    .map(parse_csv_line)
                     .collect();
 
                 let arc_data = Arc::new((headers, rows));

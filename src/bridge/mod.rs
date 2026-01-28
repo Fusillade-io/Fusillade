@@ -133,16 +133,16 @@ pub fn register_globals_sync<'js>(
     file::register_sync(ctx)?;
     data::register_sync(ctx, shared_data)?;
     utils::register_sync(ctx, worker_id)?;
-    ws::register_sync(ctx)?;
-    grpc::register_sync(ctx)?;
+    ws::register_sync(ctx, tx.clone())?;
+    grpc::register_sync(ctx, tx.clone())?;
     stats::register_sync(ctx, aggregator)?;
     encoding::register_sync(ctx)?;
     crypto::register_sync(ctx)?;
-    mqtt::register_sync(ctx)?;
-    amqp::register_sync(ctx)?;
+    mqtt::register_sync(ctx, tx.clone())?;
+    amqp::register_sync(ctx, tx.clone())?;
     test::register_sync(ctx)?;
-    browser::register_sync(ctx)?;
-    sse::register_sync(ctx)?;
+    browser::register_sync(ctx, tx.clone())?;
+    sse::register_sync(ctx, tx.clone())?;
     metrics::register_sync(ctx, tx)?;
     register_env(ctx)?;
 
@@ -208,7 +208,7 @@ pub fn register_globals_sync_fast<'js>(
     encoding::register_sync(ctx)?;
     crypto::register_sync(ctx)?;
     test::register_sync(ctx)?;
-    browser::register_sync(ctx)?;
+    browser::register_sync(ctx, tx.clone())?;
     metrics::register_sync(ctx, tx)?;
     register_env(ctx)?;
 

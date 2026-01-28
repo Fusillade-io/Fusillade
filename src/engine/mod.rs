@@ -237,6 +237,82 @@ impl Engine {
 
         let setup_data = Arc::new(setup_data);
 
+        // Pre-validate script: compile and check for exec function before spawning workers
+        {
+            let (pre_rt, pre_ctx) = Self::create_runtime()?;
+            let validation_err = pre_ctx.with(|ctx| {
+                let (pre_tx, _) = crossbeam_channel::unbounded();
+                let pre_agg = Arc::new(std::sync::RwLock::new(StatsAggregator::new()));
+                let pre_tokio = Arc::new(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                );
+                let pre_client = {
+                    let _guard = pre_tokio.enter();
+                    HttpClient::new()
+                };
+                let pre_shared = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+                crate::bridge::register_globals_sync(
+                    &ctx, pre_tx, pre_client, pre_shared, 0, pre_agg, pre_tokio, None, None, false,
+                )
+                .ok();
+
+                let module = match rquickjs::Module::declare(
+                    ctx.clone(),
+                    script_path.to_string_lossy().to_string(),
+                    script_content.clone(),
+                )
+                .catch(&ctx)
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Some(format!(
+                            "Script compilation failed:\n{}",
+                            format_js_error(&e)
+                        ));
+                    }
+                };
+                let (module, _) = match module.eval().catch(&ctx) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Some(format!("Script evaluation failed:\n{}", format_js_error(&e)));
+                    }
+                };
+
+                // Check for default function (or scenario exec functions)
+                let has_default = module.get::<_, rquickjs::Function>("default").is_ok();
+                let has_scenarios = config.scenarios.is_some();
+                if !has_default && !has_scenarios {
+                    return Some(
+                        "Script error: 'default' function not found. Did you forget to export default function?".to_string(),
+                    );
+                }
+                if let Some(ref scenarios) = config.scenarios {
+                    for (name, sc) in scenarios {
+                        let exec_fn = sc.exec.clone().unwrap_or_else(|| "default".to_string());
+                        if module.get::<_, rquickjs::Function>(&exec_fn).is_err()
+                            && module.get::<_, rquickjs::Function>("default").is_err()
+                        {
+                            return Some(format!(
+                                "Scenario '{}': function '{}' not found and no 'default' fallback",
+                                name, exec_fn
+                            ));
+                        }
+                    }
+                }
+                None
+            });
+            pre_rt.run_gc();
+            drop(pre_ctx);
+            drop(pre_rt);
+
+            if let Some(err_msg) = validation_err {
+                return Err(anyhow::anyhow!("{}", err_msg));
+            }
+        }
+
         let handle = std::thread::spawn(move || {
             // Calculate total workers for scaling decisions
             let total_workers = if let Some(ref scenarios) = config.scenarios {
@@ -251,8 +327,13 @@ impl Engine {
             // Dynamic shard count: target ~100 workers per shard for optimal contention
             // At 10k workers: 100 shards = 100 workers/shard (vs old 625 workers/shard)
             let num_shards = (total_workers / 100).clamp(16, 256);
-            let sharded_aggregator =
-                shared_aggregator.unwrap_or_else(|| Arc::new(ShardedAggregator::new(num_shards)));
+            let sharded_aggregator = shared_aggregator.unwrap_or_else(|| {
+                if config.no_endpoint_tracking.unwrap_or(false) {
+                    Arc::new(ShardedAggregator::new_no_endpoint_tracking(num_shards))
+                } else {
+                    Arc::new(ShardedAggregator::new(num_shards))
+                }
+            });
 
             // Use crossbeam bounded channel for backpressure at extreme load
             // Scale buffer with workers, with higher limits for extreme concurrency
@@ -555,6 +636,7 @@ impl Engine {
 
                                         // Reset sleep tracker before each iteration
                                         crate::bridge::reset_sleep_tracker();
+                                        let _ = ctx.globals().set("__ITERATION", iteration_count);
                                         let iter_start = Instant::now();
                                         let call_result = func.call::<_, ()>((data_val.clone(),)).catch(&ctx);
                                         let elapsed = iter_start.elapsed(); // Total elapsed time including sleep
@@ -903,6 +985,7 @@ impl Engine {
 
                                         // Reset sleep tracker before each iteration
                                         crate::bridge::reset_sleep_tracker();
+                                        let _ = ctx.globals().set("__ITERATION", iteration_count);
                                         let iter_start = Instant::now();
                                         let call_result = func.call::<_, ()>((data_val.clone(),)).catch(&ctx);
                                         let elapsed = iter_start.elapsed(); // Total elapsed time including sleep
@@ -1182,11 +1265,22 @@ impl Engine {
             );
 
             // Validate thresholds if criteria are defined
-            let threshold_failures = if let Some(ref criteria) = config.criteria {
+            let mut threshold_failures = if let Some(ref criteria) = config.criteria {
                 merged_agg.validate_thresholds(criteria)
             } else {
                 Vec::new()
             };
+
+            // Per-scenario threshold evaluation
+            if let Some(ref scenarios) = config.scenarios {
+                for (scenario_name, scenario_config) in scenarios {
+                    if let Some(ref thresholds) = scenario_config.thresholds {
+                        let scenario_failures =
+                            merged_agg.validate_scenario_thresholds(scenario_name, thresholds);
+                        threshold_failures.extend(scenario_failures);
+                    }
+                }
+            }
 
             // If abort_on_fail is enabled and thresholds failed, print failures and return error
             if config.abort_on_fail.unwrap_or(false) && !threshold_failures.is_empty() {

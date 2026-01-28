@@ -366,12 +366,26 @@ pub fn register_sync(
                         for (name, val) in response.headers() {
                             if let Ok(val_str) = val.to_str() {
                                 let name_str = name.to_string();
-                                resp_headers.insert(name_str.clone(), val_str.to_string());
-                                let lower = name_str.to_lowercase();
-                                if lower == "set-cookie" {
+                                let name_lower = name_str.to_lowercase();
+                                if name_lower == "set-cookie" {
+                                    resp_headers
+                                        .entry(name_str.clone())
+                                        .and_modify(|v| {
+                                            v.push('\n');
+                                            v.push_str(val_str);
+                                        })
+                                        .or_insert_with(|| val_str.to_string());
                                     set_cookie_headers.push(val_str.to_string());
+                                } else {
+                                    resp_headers
+                                        .entry(name_str.clone())
+                                        .and_modify(|v| {
+                                            v.push_str(", ");
+                                            v.push_str(val_str);
+                                        })
+                                        .or_insert_with(|| val_str.to_string());
                                 }
-                                if lower == "location" {
+                                if name_lower == "location" {
                                     location_header = Some(val_str.to_string());
                                 }
                             }
@@ -477,6 +491,7 @@ pub fn register_sync(
     let cs_get = cookie_store.clone();
     let rt_get = runtime.clone();
     let sink_get = global_response_sink;
+    let defaults_get = defaults.clone();
 
     http.set(
         "get",
@@ -485,18 +500,49 @@ pub fn register_sync(
             move |url_str: String,
                   rest: rquickjs::function::Rest<rquickjs::Value>|
                   -> Result<HttpResponse> {
+                // Borrow defaults
+                let defs = defaults_get.borrow();
+
                 let mut name_tag = None;
-                let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+                let mut request_headers: Option<HashMap<String, String>> = None;
+                let mut timeout_duration: Option<Duration> = None;
+                let mut max_retries: u32 = 0;
+                let mut retry_delay_ms: u64 = 100;
                 if let Some(arg) = rest.first() {
                     if let Some(obj) = arg.as_object() {
                         name_tag = obj.get::<_, String>("name").ok();
+                        request_headers = obj.get("headers").ok();
                         if let Ok(timeout_str) = obj.get::<_, String>("timeout") {
                             timeout_duration = parse_duration_str(&timeout_str);
                         } else if let Ok(timeout_ms) = obj.get::<_, u64>("timeout") {
                             timeout_duration = Some(Duration::from_millis(timeout_ms));
                         }
+                        max_retries = obj.get("retry").unwrap_or(0);
+                        retry_delay_ms = obj.get("retryDelay").unwrap_or(100);
                     }
                 }
+
+                // Merge default headers with request headers (request headers take precedence)
+                let headers_map: Option<HashMap<String, String>> = if defs.headers.is_empty() {
+                    request_headers
+                } else {
+                    let mut merged = defs.headers.clone();
+                    if let Some(req_h) = request_headers {
+                        for (k, v) in req_h {
+                            merged.insert(k, v);
+                        }
+                    }
+                    Some(merged)
+                };
+
+                // Use default timeout if not specified in request
+                if timeout_duration.is_none() {
+                    timeout_duration = defs.timeout.or(Some(Duration::from_secs(60)));
+                }
+
+                // Drop the borrow before the async block
+                std::mem::drop(defs);
+
                 let tags: HashMap<String, String> = if let Some(arg) = rest.first() {
                     arg.as_object()
                         .and_then(|o| o.get("tags").ok())
@@ -514,6 +560,7 @@ pub fn register_sync(
 
                 let mut current_url = url_str.clone();
                 let mut redirects = 0;
+                let mut retry_count: u32 = 0;
 
                 loop {
                     let url_parsed = Url::parse(&current_url)
@@ -538,6 +585,12 @@ pub fn register_sync(
                     }
                     if !cookie_header_val.is_empty() {
                         req_builder = req_builder.header("Cookie", cookie_header_val);
+                    }
+                    // Apply merged headers
+                    if let Some(ref h) = headers_map {
+                        for (k, v) in h {
+                            req_builder = req_builder.header(k, v);
+                        }
                     }
 
                     let req = req_builder
@@ -588,12 +641,26 @@ pub fn register_sync(
                             for (name, val) in response.headers() {
                                 if let Ok(val_str) = val.to_str() {
                                     let name_str = name.to_string();
-                                    resp_headers.insert(name_str.clone(), val_str.to_string());
-                                    let lower = name_str.to_lowercase();
-                                    if lower == "set-cookie" {
+                                    let name_lower = name_str.to_lowercase();
+                                    if name_lower == "set-cookie" {
+                                        resp_headers
+                                            .entry(name_str.clone())
+                                            .and_modify(|v| {
+                                                v.push('\n');
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
                                         set_cookie_headers.push(val_str.to_string());
+                                    } else {
+                                        resp_headers
+                                            .entry(name_str.clone())
+                                            .and_modify(|v| {
+                                                v.push_str(", ");
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
                                     }
-                                    if lower == "location" {
+                                    if name_lower == "location" {
                                         location_header = Some(val_str.to_string());
                                     }
                                 }
@@ -643,6 +710,19 @@ pub fn register_sync(
                             });
                         }
                         Err(e) => {
+                            // Retry logic with exponential backoff
+                            if retry_count < max_retries {
+                                retry_count += 1;
+                                let delay = Duration::from_millis(
+                                    retry_delay_ms * (1 << (retry_count - 1).min(5)),
+                                );
+                                runtime.block_on(async {
+                                    tokio::time::sleep(delay).await;
+                                });
+                                redirects = 0;
+                                continue;
+                            }
+
                             let duration = start.elapsed();
                             let metric_name =
                                 name_tag.clone().unwrap_or_else(|| current_url.clone());
@@ -681,6 +761,7 @@ pub fn register_sync(
     let cs_post = cookie_store.clone();
     let rt_post = runtime.clone();
     let sink_post = global_response_sink;
+    let defaults_post = defaults.clone();
 
     http.set(
         "post",
@@ -690,20 +771,49 @@ pub fn register_sync(
                   body: String,
                   rest: rquickjs::function::Rest<rquickjs::Value>|
                   -> Result<HttpResponse> {
+                // Borrow defaults
+                let defs = defaults_post.borrow();
+
                 let mut name_tag = None;
-                let mut headers_map: Option<HashMap<String, String>> = None;
-                let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+                let mut request_headers: Option<HashMap<String, String>> = None;
+                let mut timeout_duration: Option<Duration> = None;
+                let mut max_retries: u32 = 0;
+                let mut retry_delay_ms: u64 = 100;
                 if let Some(arg) = rest.first() {
                     if let Some(obj) = arg.as_object() {
                         name_tag = obj.get::<_, String>("name").ok();
-                        headers_map = obj.get("headers").ok();
+                        request_headers = obj.get("headers").ok();
                         if let Ok(timeout_str) = obj.get::<_, String>("timeout") {
                             timeout_duration = parse_duration_str(&timeout_str);
                         } else if let Ok(timeout_ms) = obj.get::<_, u64>("timeout") {
                             timeout_duration = Some(Duration::from_millis(timeout_ms));
                         }
+                        max_retries = obj.get("retry").unwrap_or(0);
+                        retry_delay_ms = obj.get("retryDelay").unwrap_or(100);
                     }
                 }
+
+                // Merge default headers with request headers (request headers take precedence)
+                let headers_map: Option<HashMap<String, String>> = if defs.headers.is_empty() {
+                    request_headers
+                } else {
+                    let mut merged = defs.headers.clone();
+                    if let Some(req_h) = request_headers {
+                        for (k, v) in req_h {
+                            merged.insert(k, v);
+                        }
+                    }
+                    Some(merged)
+                };
+
+                // Use default timeout if not specified in request
+                if timeout_duration.is_none() {
+                    timeout_duration = defs.timeout.or(Some(Duration::from_secs(60)));
+                }
+
+                // Drop the borrow before the async block
+                std::mem::drop(defs);
+
                 let tags: HashMap<String, String> = if let Some(arg) = rest.first() {
                     arg.as_object()
                         .and_then(|o| o.get("tags").ok())
@@ -722,6 +832,7 @@ pub fn register_sync(
                 let mut current_url = url_str.clone();
                 let mut redirects = 0;
                 let mut current_method = Method::POST;
+                let mut retry_count: u32 = 0;
 
                 // Check if body contains file markers (FormData detection)
                 let is_multipart = body.contains("\"__fusillade_file\":true");
@@ -808,8 +919,25 @@ pub fn register_sync(
                                         HashMap::with_capacity(response.headers().len());
                                     for (name, val) in response.headers() {
                                         if let Ok(val_str) = val.to_str() {
-                                            resp_headers
-                                                .insert(name.to_string(), val_str.to_string());
+                                            let name_str = name.to_string();
+                                            let name_lower = name_str.to_lowercase();
+                                            if name_lower == "set-cookie" {
+                                                resp_headers
+                                                    .entry(name_str)
+                                                    .and_modify(|v| {
+                                                        v.push('\n');
+                                                        v.push_str(val_str);
+                                                    })
+                                                    .or_insert_with(|| val_str.to_string());
+                                            } else {
+                                                resp_headers
+                                                    .entry(name_str)
+                                                    .and_modify(|v| {
+                                                        v.push_str(", ");
+                                                        v.push_str(val_str);
+                                                    })
+                                                    .or_insert_with(|| val_str.to_string());
+                                            }
                                         }
                                     }
                                     let body_bytes = response.bytes().unwrap_or_default();
@@ -872,6 +1000,7 @@ pub fn register_sync(
                 }
 
                 // Standard POST (non-multipart)
+                let original_body = body.clone();
                 let mut current_body = Some(body);
 
                 loop {
@@ -953,12 +1082,26 @@ pub fn register_sync(
                             for (name, val) in response.headers() {
                                 if let Ok(val_str) = val.to_str() {
                                     let name_str = name.to_string();
-                                    resp_headers.insert(name_str.clone(), val_str.to_string());
-                                    let lower = name_str.to_lowercase();
-                                    if lower == "set-cookie" {
+                                    let name_lower = name_str.to_lowercase();
+                                    if name_lower == "set-cookie" {
+                                        resp_headers
+                                            .entry(name_str.clone())
+                                            .and_modify(|v| {
+                                                v.push('\n');
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
                                         set_cookie_headers.push(val_str.to_string());
+                                    } else {
+                                        resp_headers
+                                            .entry(name_str.clone())
+                                            .and_modify(|v| {
+                                                v.push_str(", ");
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
                                     }
-                                    if lower == "location" {
+                                    if name_lower == "location" {
                                         location_header = Some(val_str.to_string());
                                     }
                                 }
@@ -1011,6 +1154,21 @@ pub fn register_sync(
                             });
                         }
                         Err(e) => {
+                            // Retry logic with exponential backoff
+                            if retry_count < max_retries {
+                                retry_count += 1;
+                                let delay = Duration::from_millis(
+                                    retry_delay_ms * (1 << (retry_count - 1).min(5)),
+                                );
+                                runtime.block_on(async {
+                                    tokio::time::sleep(delay).await;
+                                });
+                                redirects = 0;
+                                current_method = Method::POST;
+                                current_body = Some(original_body.clone());
+                                continue;
+                            }
+
                             let duration = start.elapsed();
                             let metric_name =
                                 name_tag.clone().unwrap_or_else(|| current_url.clone());
@@ -1049,6 +1207,7 @@ pub fn register_sync(
     let cs_put = cookie_store.clone();
     let rt_put = runtime.clone();
     let sink_put = global_response_sink;
+    let defaults_put = defaults.clone();
 
     http.set(
         "put",
@@ -1058,20 +1217,49 @@ pub fn register_sync(
                   body: String,
                   rest: rquickjs::function::Rest<rquickjs::Value>|
                   -> Result<HttpResponse> {
+                // Borrow defaults
+                let defs = defaults_put.borrow();
+
                 let mut name_tag = None;
-                let mut headers_map: Option<HashMap<String, String>> = None;
-                let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+                let mut request_headers: Option<HashMap<String, String>> = None;
+                let mut timeout_duration: Option<Duration> = None;
+                let mut max_retries: u32 = 0;
+                let mut retry_delay_ms: u64 = 100;
                 if let Some(arg) = rest.first() {
                     if let Some(obj) = arg.as_object() {
                         name_tag = obj.get::<_, String>("name").ok();
-                        headers_map = obj.get("headers").ok();
+                        request_headers = obj.get("headers").ok();
                         if let Ok(timeout_str) = obj.get::<_, String>("timeout") {
                             timeout_duration = parse_duration_str(&timeout_str);
                         } else if let Ok(timeout_ms) = obj.get::<_, u64>("timeout") {
                             timeout_duration = Some(Duration::from_millis(timeout_ms));
                         }
+                        max_retries = obj.get("retry").unwrap_or(0);
+                        retry_delay_ms = obj.get("retryDelay").unwrap_or(100);
                     }
                 }
+
+                // Merge default headers with request headers (request headers take precedence)
+                let headers_map: Option<HashMap<String, String>> = if defs.headers.is_empty() {
+                    request_headers
+                } else {
+                    let mut merged = defs.headers.clone();
+                    if let Some(req_h) = request_headers {
+                        for (k, v) in req_h {
+                            merged.insert(k, v);
+                        }
+                    }
+                    Some(merged)
+                };
+
+                // Use default timeout if not specified in request
+                if timeout_duration.is_none() {
+                    timeout_duration = defs.timeout.or(Some(Duration::from_secs(60)));
+                }
+
+                // Drop the borrow before the async block
+                std::mem::drop(defs);
+
                 let tags: HashMap<String, String> = if let Some(arg) = rest.first() {
                     arg.as_object()
                         .and_then(|o| o.get("tags").ok())
@@ -1085,120 +1273,154 @@ pub fn register_sync(
                 let jitter = global_jitter;
                 let drop = global_drop;
                 let response_sink = sink_put;
-                let url_parsed = Url::parse(&url_str)
-                    .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
-                let mut req_builder = Request::builder()
-                    .method(Method::PUT)
-                    .uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
-                let mut cookie_header_val = String::new();
-                {
-                    let store = cs_put.borrow();
-                    for (name, value) in store.get_request_values(&url_parsed) {
-                        if !cookie_header_val.is_empty() {
-                            cookie_header_val.push_str("; ");
-                        }
-                        cookie_header_val.push_str(name);
-                        cookie_header_val.push('=');
-                        cookie_header_val.push_str(value);
-                    }
-                }
-                if !cookie_header_val.is_empty() {
-                    req_builder = req_builder.header("Cookie", cookie_header_val);
-                }
-                if let Some(h) = &headers_map {
-                    for (k, v) in h {
-                        req_builder = req_builder.header(k, v);
-                    }
-                }
-                let req = req_builder
-                    .body(body)
-                    .map_err(|_| rquickjs::Error::Exception)?;
-                let start = Instant::now();
-                // Execute request with optional timeout
-                let res_result = runtime.block_on(async {
-                    if let Some(d) = drop {
-                        if rand::thread_rng().gen::<f64>() < d {
-                            return Err(Box::new(std::io::Error::new(
-                                std::io::ErrorKind::ConnectionReset,
-                                "Simulated network drop",
-                            ))
-                                as Box<dyn std::error::Error + Send + Sync>);
-                        }
-                    }
-                    if let Some(j) = jitter {
-                        tokio::time::sleep(j).await;
-                    }
-                    let request_future = client.request(req, response_sink);
-                    if let Some(timeout) = timeout_duration {
-                        match tokio::time::timeout(timeout, request_future).await {
-                            Ok(result) => result,
-                            Err(_) => Err(Box::new(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "request timeout",
-                            ))
-                                as Box<dyn std::error::Error + Send + Sync>),
-                        }
-                    } else {
-                        request_future.await
-                    }
-                });
+                let mut retry_count: u32 = 0;
 
-                match res_result {
-                    Ok((response, timings)) => {
-                        let status = response.status().as_u16();
-                        let proto = version_to_proto(response.version());
-                        let mut resp_headers: HashMap<String, String> =
-                            HashMap::with_capacity(response.headers().len());
-                        for (name, val) in response.headers() {
-                            if let Ok(val_str) = val.to_str() {
-                                resp_headers.insert(name.to_string(), val_str.to_string());
+                loop {
+                    let url_parsed = Url::parse(&url_str)
+                        .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
+                    let mut req_builder = Request::builder()
+                        .method(Method::PUT)
+                        .uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
+                    let mut cookie_header_val = String::new();
+                    {
+                        let store = cs_put.borrow();
+                        for (name, value) in store.get_request_values(&url_parsed) {
+                            if !cookie_header_val.is_empty() {
+                                cookie_header_val.push_str("; ");
+                            }
+                            cookie_header_val.push_str(name);
+                            cookie_header_val.push('=');
+                            cookie_header_val.push_str(value);
+                        }
+                    }
+                    if !cookie_header_val.is_empty() {
+                        req_builder = req_builder.header("Cookie", cookie_header_val);
+                    }
+                    if let Some(h) = &headers_map {
+                        for (k, v) in h {
+                            req_builder = req_builder.header(k, v);
+                        }
+                    }
+                    let req = req_builder
+                        .body(body.clone())
+                        .map_err(|_| rquickjs::Error::Exception)?;
+                    let start = Instant::now();
+                    // Execute request with optional timeout
+                    let res_result = runtime.block_on(async {
+                        if let Some(d) = drop {
+                            if rand::thread_rng().gen::<f64>() < d {
+                                return Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "Simulated network drop",
+                                ))
+                                    as Box<dyn std::error::Error + Send + Sync>);
                             }
                         }
-                        let body = response.body().clone();
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
-                        let _ = tx.send(Metric::Request {
-                            name: format!(
-                                "{}{}",
-                                crate::bridge::group::get_current_group_prefix(),
-                                metric_name
-                            ),
-                            timings,
-                            status,
-                            error: None,
-                            tags: tags.clone(),
-                        });
-                        Ok(HttpResponse {
-                            status,
-                            body,
-                            headers: resp_headers,
-                            timings,
-                            proto,
-                        })
-                    }
-                    Err(e) => {
-                        let timings = RequestTimings {
-                            duration: start.elapsed(),
-                            ..Default::default()
-                        };
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
-                        let _ = tx.send(Metric::Request {
-                            name: format!(
-                                "{}{}",
-                                crate::bridge::group::get_current_group_prefix(),
-                                metric_name
-                            ),
-                            timings,
-                            status: 0,
-                            error: Some(e.to_string()),
-                            tags: tags.clone(),
-                        });
-                        Ok(HttpResponse {
-                            status: 0,
-                            body: Bytes::from(e.to_string()),
-                            headers: HashMap::new(),
-                            timings,
-                            proto: "h1".to_string(),
-                        })
+                        if let Some(j) = jitter {
+                            tokio::time::sleep(j).await;
+                        }
+                        let request_future = client.request(req, response_sink);
+                        if let Some(timeout) = timeout_duration {
+                            match tokio::time::timeout(timeout, request_future).await {
+                                Ok(result) => result,
+                                Err(_) => Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "request timeout",
+                                ))
+                                    as Box<dyn std::error::Error + Send + Sync>),
+                            }
+                        } else {
+                            request_future.await
+                        }
+                    });
+
+                    match res_result {
+                        Ok((response, timings)) => {
+                            let status = response.status().as_u16();
+                            let proto = version_to_proto(response.version());
+                            let mut resp_headers: HashMap<String, String> =
+                                HashMap::with_capacity(response.headers().len());
+                            for (name, val) in response.headers() {
+                                if let Ok(val_str) = val.to_str() {
+                                    let name_str = name.to_string();
+                                    let name_lower = name_str.to_lowercase();
+                                    if name_lower == "set-cookie" {
+                                        resp_headers
+                                            .entry(name_str)
+                                            .and_modify(|v| {
+                                                v.push('\n');
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
+                                    } else {
+                                        resp_headers
+                                            .entry(name_str)
+                                            .and_modify(|v| {
+                                                v.push_str(", ");
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
+                                    }
+                                }
+                            }
+                            let body = response.body().clone();
+                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status,
+                                error: None,
+                                tags: tags.clone(),
+                            });
+                            return Ok(HttpResponse {
+                                status,
+                                body,
+                                headers: resp_headers,
+                                timings,
+                                proto,
+                            });
+                        }
+                        Err(e) => {
+                            // Retry logic with exponential backoff
+                            if retry_count < max_retries {
+                                retry_count += 1;
+                                let delay = Duration::from_millis(
+                                    retry_delay_ms * (1 << (retry_count - 1).min(5)),
+                                );
+                                runtime.block_on(async {
+                                    tokio::time::sleep(delay).await;
+                                });
+                                continue;
+                            }
+
+                            let timings = RequestTimings {
+                                duration: start.elapsed(),
+                                ..Default::default()
+                            };
+                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.to_string()),
+                                tags: tags.clone(),
+                            });
+                            return Ok(HttpResponse {
+                                status: 0,
+                                body: Bytes::from(e.to_string()),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                            });
+                        }
                     }
                 }
             },
@@ -1211,6 +1433,7 @@ pub fn register_sync(
     let cs_del = cookie_store.clone();
     let rt_del = runtime.clone();
     let sink_del = global_response_sink;
+    let defaults_del = defaults.clone();
 
     http.set(
         "del",
@@ -1219,20 +1442,49 @@ pub fn register_sync(
             move |url_str: String,
                   rest: rquickjs::function::Rest<rquickjs::Value>|
                   -> Result<HttpResponse> {
+                // Borrow defaults
+                let defs = defaults_del.borrow();
+
                 let mut name_tag: Option<String> = None;
-                let mut headers_map: Option<HashMap<String, String>> = None;
-                let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+                let mut request_headers: Option<HashMap<String, String>> = None;
+                let mut timeout_duration: Option<Duration> = None;
+                let mut max_retries: u32 = 0;
+                let mut retry_delay_ms: u64 = 100;
                 if let Some(arg) = rest.first() {
                     if let Some(obj) = arg.as_object() {
                         name_tag = obj.get::<_, String>("name").ok();
-                        headers_map = obj.get("headers").ok();
+                        request_headers = obj.get("headers").ok();
                         if let Ok(timeout_str) = obj.get::<_, String>("timeout") {
                             timeout_duration = parse_duration_str(&timeout_str);
                         } else if let Ok(timeout_ms) = obj.get::<_, u64>("timeout") {
                             timeout_duration = Some(Duration::from_millis(timeout_ms));
                         }
+                        max_retries = obj.get("retry").unwrap_or(0);
+                        retry_delay_ms = obj.get("retryDelay").unwrap_or(100);
                     }
                 }
+
+                // Merge default headers with request headers (request headers take precedence)
+                let headers_map: Option<HashMap<String, String>> = if defs.headers.is_empty() {
+                    request_headers
+                } else {
+                    let mut merged = defs.headers.clone();
+                    if let Some(req_h) = request_headers {
+                        for (k, v) in req_h {
+                            merged.insert(k, v);
+                        }
+                    }
+                    Some(merged)
+                };
+
+                // Use default timeout if not specified in request
+                if timeout_duration.is_none() {
+                    timeout_duration = defs.timeout.or(Some(Duration::from_secs(60)));
+                }
+
+                // Drop the borrow before the async block
+                std::mem::drop(defs);
+
                 let tags: HashMap<String, String> = if let Some(arg) = rest.first() {
                     arg.as_object()
                         .and_then(|o| o.get("tags").ok())
@@ -1246,120 +1498,154 @@ pub fn register_sync(
                 let jitter = global_jitter;
                 let drop = global_drop;
                 let response_sink = sink_del;
-                let url_parsed = Url::parse(&url_str)
-                    .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
-                let mut req_builder = Request::builder()
-                    .method(Method::DELETE)
-                    .uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
-                let mut cookie_header_val = String::new();
-                {
-                    let store = cs_del.borrow();
-                    for (name, value) in store.get_request_values(&url_parsed) {
-                        if !cookie_header_val.is_empty() {
-                            cookie_header_val.push_str("; ");
-                        }
-                        cookie_header_val.push_str(name);
-                        cookie_header_val.push('=');
-                        cookie_header_val.push_str(value);
-                    }
-                }
-                if !cookie_header_val.is_empty() {
-                    req_builder = req_builder.header("Cookie", cookie_header_val);
-                }
-                if let Some(h) = &headers_map {
-                    for (k, v) in h {
-                        req_builder = req_builder.header(k, v);
-                    }
-                }
-                let req = req_builder
-                    .body(String::new())
-                    .map_err(|_| rquickjs::Error::Exception)?;
-                let start = Instant::now();
-                // Execute request with optional timeout
-                let res_result = runtime.block_on(async {
-                    if let Some(d) = drop {
-                        if rand::thread_rng().gen::<f64>() < d {
-                            return Err(Box::new(std::io::Error::new(
-                                std::io::ErrorKind::ConnectionReset,
-                                "Simulated network drop",
-                            ))
-                                as Box<dyn std::error::Error + Send + Sync>);
-                        }
-                    }
-                    if let Some(j) = jitter {
-                        tokio::time::sleep(j).await;
-                    }
-                    let request_future = client.request(req, response_sink);
-                    if let Some(timeout) = timeout_duration {
-                        match tokio::time::timeout(timeout, request_future).await {
-                            Ok(result) => result,
-                            Err(_) => Err(Box::new(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "request timeout",
-                            ))
-                                as Box<dyn std::error::Error + Send + Sync>),
-                        }
-                    } else {
-                        request_future.await
-                    }
-                });
+                let mut retry_count: u32 = 0;
 
-                match res_result {
-                    Ok((response, timings)) => {
-                        let status = response.status().as_u16();
-                        let proto = version_to_proto(response.version());
-                        let mut resp_headers: HashMap<String, String> =
-                            HashMap::with_capacity(response.headers().len());
-                        for (name, val) in response.headers() {
-                            if let Ok(val_str) = val.to_str() {
-                                resp_headers.insert(name.to_string(), val_str.to_string());
+                loop {
+                    let url_parsed = Url::parse(&url_str)
+                        .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
+                    let mut req_builder = Request::builder()
+                        .method(Method::DELETE)
+                        .uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
+                    let mut cookie_header_val = String::new();
+                    {
+                        let store = cs_del.borrow();
+                        for (name, value) in store.get_request_values(&url_parsed) {
+                            if !cookie_header_val.is_empty() {
+                                cookie_header_val.push_str("; ");
+                            }
+                            cookie_header_val.push_str(name);
+                            cookie_header_val.push('=');
+                            cookie_header_val.push_str(value);
+                        }
+                    }
+                    if !cookie_header_val.is_empty() {
+                        req_builder = req_builder.header("Cookie", cookie_header_val);
+                    }
+                    if let Some(h) = &headers_map {
+                        for (k, v) in h {
+                            req_builder = req_builder.header(k, v);
+                        }
+                    }
+                    let req = req_builder
+                        .body(String::new())
+                        .map_err(|_| rquickjs::Error::Exception)?;
+                    let start = Instant::now();
+                    // Execute request with optional timeout
+                    let res_result = runtime.block_on(async {
+                        if let Some(d) = drop {
+                            if rand::thread_rng().gen::<f64>() < d {
+                                return Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "Simulated network drop",
+                                ))
+                                    as Box<dyn std::error::Error + Send + Sync>);
                             }
                         }
-                        let body = response.body().clone();
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
-                        let _ = tx.send(Metric::Request {
-                            name: format!(
-                                "{}{}",
-                                crate::bridge::group::get_current_group_prefix(),
-                                metric_name
-                            ),
-                            timings,
-                            status,
-                            error: None,
-                            tags: tags.clone(),
-                        });
-                        Ok(HttpResponse {
-                            status,
-                            body,
-                            headers: resp_headers,
-                            timings,
-                            proto,
-                        })
-                    }
-                    Err(e) => {
-                        let timings = RequestTimings {
-                            duration: start.elapsed(),
-                            ..Default::default()
-                        };
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
-                        let _ = tx.send(Metric::Request {
-                            name: format!(
-                                "{}{}",
-                                crate::bridge::group::get_current_group_prefix(),
-                                metric_name
-                            ),
-                            timings,
-                            status: 0,
-                            error: Some(e.to_string()),
-                            tags: tags.clone(),
-                        });
-                        Ok(HttpResponse {
-                            status: 0,
-                            body: Bytes::from(e.to_string()),
-                            headers: HashMap::new(),
-                            timings,
-                            proto: "h1".to_string(),
-                        })
+                        if let Some(j) = jitter {
+                            tokio::time::sleep(j).await;
+                        }
+                        let request_future = client.request(req, response_sink);
+                        if let Some(timeout) = timeout_duration {
+                            match tokio::time::timeout(timeout, request_future).await {
+                                Ok(result) => result,
+                                Err(_) => Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "request timeout",
+                                ))
+                                    as Box<dyn std::error::Error + Send + Sync>),
+                            }
+                        } else {
+                            request_future.await
+                        }
+                    });
+
+                    match res_result {
+                        Ok((response, timings)) => {
+                            let status = response.status().as_u16();
+                            let proto = version_to_proto(response.version());
+                            let mut resp_headers: HashMap<String, String> =
+                                HashMap::with_capacity(response.headers().len());
+                            for (name, val) in response.headers() {
+                                if let Ok(val_str) = val.to_str() {
+                                    let name_str = name.to_string();
+                                    let name_lower = name_str.to_lowercase();
+                                    if name_lower == "set-cookie" {
+                                        resp_headers
+                                            .entry(name_str)
+                                            .and_modify(|v| {
+                                                v.push('\n');
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
+                                    } else {
+                                        resp_headers
+                                            .entry(name_str)
+                                            .and_modify(|v| {
+                                                v.push_str(", ");
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
+                                    }
+                                }
+                            }
+                            let body = response.body().clone();
+                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status,
+                                error: None,
+                                tags: tags.clone(),
+                            });
+                            return Ok(HttpResponse {
+                                status,
+                                body,
+                                headers: resp_headers,
+                                timings,
+                                proto,
+                            });
+                        }
+                        Err(e) => {
+                            // Retry logic with exponential backoff
+                            if retry_count < max_retries {
+                                retry_count += 1;
+                                let delay = Duration::from_millis(
+                                    retry_delay_ms * (1 << (retry_count - 1).min(5)),
+                                );
+                                runtime.block_on(async {
+                                    tokio::time::sleep(delay).await;
+                                });
+                                continue;
+                            }
+
+                            let timings = RequestTimings {
+                                duration: start.elapsed(),
+                                ..Default::default()
+                            };
+                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.to_string()),
+                                tags: tags.clone(),
+                            });
+                            return Ok(HttpResponse {
+                                status: 0,
+                                body: Bytes::from(e.to_string()),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                            });
+                        }
                     }
                 }
             },
@@ -1372,6 +1658,7 @@ pub fn register_sync(
     let cs_patch = cookie_store.clone();
     let rt_patch = runtime.clone();
     let sink_patch = global_response_sink;
+    let defaults_patch = defaults.clone();
 
     http.set(
         "patch",
@@ -1381,20 +1668,49 @@ pub fn register_sync(
                   body: String,
                   rest: rquickjs::function::Rest<rquickjs::Value>|
                   -> Result<HttpResponse> {
+                // Borrow defaults
+                let defs = defaults_patch.borrow();
+
                 let mut name_tag: Option<String> = None;
-                let mut headers_map: Option<HashMap<String, String>> = None;
-                let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+                let mut request_headers: Option<HashMap<String, String>> = None;
+                let mut timeout_duration: Option<Duration> = None;
+                let mut max_retries: u32 = 0;
+                let mut retry_delay_ms: u64 = 100;
                 if let Some(arg) = rest.first() {
                     if let Some(obj) = arg.as_object() {
                         name_tag = obj.get::<_, String>("name").ok();
-                        headers_map = obj.get("headers").ok();
+                        request_headers = obj.get("headers").ok();
                         if let Ok(timeout_str) = obj.get::<_, String>("timeout") {
                             timeout_duration = parse_duration_str(&timeout_str);
                         } else if let Ok(timeout_ms) = obj.get::<_, u64>("timeout") {
                             timeout_duration = Some(Duration::from_millis(timeout_ms));
                         }
+                        max_retries = obj.get("retry").unwrap_or(0);
+                        retry_delay_ms = obj.get("retryDelay").unwrap_or(100);
                     }
                 }
+
+                // Merge default headers with request headers (request headers take precedence)
+                let headers_map: Option<HashMap<String, String>> = if defs.headers.is_empty() {
+                    request_headers
+                } else {
+                    let mut merged = defs.headers.clone();
+                    if let Some(req_h) = request_headers {
+                        for (k, v) in req_h {
+                            merged.insert(k, v);
+                        }
+                    }
+                    Some(merged)
+                };
+
+                // Use default timeout if not specified in request
+                if timeout_duration.is_none() {
+                    timeout_duration = defs.timeout.or(Some(Duration::from_secs(60)));
+                }
+
+                // Drop the borrow before the async block
+                std::mem::drop(defs);
+
                 let tags: HashMap<String, String> = if let Some(arg) = rest.first() {
                     arg.as_object()
                         .and_then(|o| o.get("tags").ok())
@@ -1408,120 +1724,154 @@ pub fn register_sync(
                 let jitter = global_jitter;
                 let drop = global_drop;
                 let response_sink = sink_patch;
-                let url_parsed = Url::parse(&url_str)
-                    .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
-                let mut req_builder = Request::builder()
-                    .method(Method::PATCH)
-                    .uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
-                let mut cookie_header_val = String::new();
-                {
-                    let store = cs_patch.borrow();
-                    for (name, value) in store.get_request_values(&url_parsed) {
-                        if !cookie_header_val.is_empty() {
-                            cookie_header_val.push_str("; ");
-                        }
-                        cookie_header_val.push_str(name);
-                        cookie_header_val.push('=');
-                        cookie_header_val.push_str(value);
-                    }
-                }
-                if !cookie_header_val.is_empty() {
-                    req_builder = req_builder.header("Cookie", cookie_header_val);
-                }
-                if let Some(h) = &headers_map {
-                    for (k, v) in h {
-                        req_builder = req_builder.header(k, v);
-                    }
-                }
-                let req = req_builder
-                    .body(body)
-                    .map_err(|_| rquickjs::Error::Exception)?;
-                let start = Instant::now();
-                // Execute request with optional timeout
-                let res_result = runtime.block_on(async {
-                    if let Some(d) = drop {
-                        if rand::thread_rng().gen::<f64>() < d {
-                            return Err(Box::new(std::io::Error::new(
-                                std::io::ErrorKind::ConnectionReset,
-                                "Simulated network drop",
-                            ))
-                                as Box<dyn std::error::Error + Send + Sync>);
-                        }
-                    }
-                    if let Some(j) = jitter {
-                        tokio::time::sleep(j).await;
-                    }
-                    let request_future = client.request(req, response_sink);
-                    if let Some(timeout) = timeout_duration {
-                        match tokio::time::timeout(timeout, request_future).await {
-                            Ok(result) => result,
-                            Err(_) => Err(Box::new(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "request timeout",
-                            ))
-                                as Box<dyn std::error::Error + Send + Sync>),
-                        }
-                    } else {
-                        request_future.await
-                    }
-                });
+                let mut retry_count: u32 = 0;
 
-                match res_result {
-                    Ok((response, timings)) => {
-                        let status = response.status().as_u16();
-                        let proto = version_to_proto(response.version());
-                        let mut resp_headers: HashMap<String, String> =
-                            HashMap::with_capacity(response.headers().len());
-                        for (name, val) in response.headers() {
-                            if let Ok(val_str) = val.to_str() {
-                                resp_headers.insert(name.to_string(), val_str.to_string());
+                loop {
+                    let url_parsed = Url::parse(&url_str)
+                        .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
+                    let mut req_builder = Request::builder()
+                        .method(Method::PATCH)
+                        .uri(url_to_uri(&url_parsed).ok_or(rquickjs::Error::Exception)?);
+                    let mut cookie_header_val = String::new();
+                    {
+                        let store = cs_patch.borrow();
+                        for (name, value) in store.get_request_values(&url_parsed) {
+                            if !cookie_header_val.is_empty() {
+                                cookie_header_val.push_str("; ");
+                            }
+                            cookie_header_val.push_str(name);
+                            cookie_header_val.push('=');
+                            cookie_header_val.push_str(value);
+                        }
+                    }
+                    if !cookie_header_val.is_empty() {
+                        req_builder = req_builder.header("Cookie", cookie_header_val);
+                    }
+                    if let Some(h) = &headers_map {
+                        for (k, v) in h {
+                            req_builder = req_builder.header(k, v);
+                        }
+                    }
+                    let req = req_builder
+                        .body(body.clone())
+                        .map_err(|_| rquickjs::Error::Exception)?;
+                    let start = Instant::now();
+                    // Execute request with optional timeout
+                    let res_result = runtime.block_on(async {
+                        if let Some(d) = drop {
+                            if rand::thread_rng().gen::<f64>() < d {
+                                return Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "Simulated network drop",
+                                ))
+                                    as Box<dyn std::error::Error + Send + Sync>);
                             }
                         }
-                        let body = response.body().clone();
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
-                        let _ = tx.send(Metric::Request {
-                            name: format!(
-                                "{}{}",
-                                crate::bridge::group::get_current_group_prefix(),
-                                metric_name
-                            ),
-                            timings,
-                            status,
-                            error: None,
-                            tags: tags.clone(),
-                        });
-                        Ok(HttpResponse {
-                            status,
-                            body,
-                            headers: resp_headers,
-                            timings,
-                            proto,
-                        })
-                    }
-                    Err(e) => {
-                        let timings = RequestTimings {
-                            duration: start.elapsed(),
-                            ..Default::default()
-                        };
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
-                        let _ = tx.send(Metric::Request {
-                            name: format!(
-                                "{}{}",
-                                crate::bridge::group::get_current_group_prefix(),
-                                metric_name
-                            ),
-                            timings,
-                            status: 0,
-                            error: Some(e.to_string()),
-                            tags: tags.clone(),
-                        });
-                        Ok(HttpResponse {
-                            status: 0,
-                            body: Bytes::from(e.to_string()),
-                            headers: HashMap::new(),
-                            timings,
-                            proto: "h1".to_string(),
-                        })
+                        if let Some(j) = jitter {
+                            tokio::time::sleep(j).await;
+                        }
+                        let request_future = client.request(req, response_sink);
+                        if let Some(timeout) = timeout_duration {
+                            match tokio::time::timeout(timeout, request_future).await {
+                                Ok(result) => result,
+                                Err(_) => Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "request timeout",
+                                ))
+                                    as Box<dyn std::error::Error + Send + Sync>),
+                            }
+                        } else {
+                            request_future.await
+                        }
+                    });
+
+                    match res_result {
+                        Ok((response, timings)) => {
+                            let status = response.status().as_u16();
+                            let proto = version_to_proto(response.version());
+                            let mut resp_headers: HashMap<String, String> =
+                                HashMap::with_capacity(response.headers().len());
+                            for (name, val) in response.headers() {
+                                if let Ok(val_str) = val.to_str() {
+                                    let name_str = name.to_string();
+                                    let name_lower = name_str.to_lowercase();
+                                    if name_lower == "set-cookie" {
+                                        resp_headers
+                                            .entry(name_str)
+                                            .and_modify(|v| {
+                                                v.push('\n');
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
+                                    } else {
+                                        resp_headers
+                                            .entry(name_str)
+                                            .and_modify(|v| {
+                                                v.push_str(", ");
+                                                v.push_str(val_str);
+                                            })
+                                            .or_insert_with(|| val_str.to_string());
+                                    }
+                                }
+                            }
+                            let body = response.body().clone();
+                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status,
+                                error: None,
+                                tags: tags.clone(),
+                            });
+                            return Ok(HttpResponse {
+                                status,
+                                body,
+                                headers: resp_headers,
+                                timings,
+                                proto,
+                            });
+                        }
+                        Err(e) => {
+                            // Retry logic with exponential backoff
+                            if retry_count < max_retries {
+                                retry_count += 1;
+                                let delay = Duration::from_millis(
+                                    retry_delay_ms * (1 << (retry_count - 1).min(5)),
+                                );
+                                runtime.block_on(async {
+                                    tokio::time::sleep(delay).await;
+                                });
+                                continue;
+                            }
+
+                            let timings = RequestTimings {
+                                duration: start.elapsed(),
+                                ..Default::default()
+                            };
+                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.to_string()),
+                                tags: tags.clone(),
+                            });
+                            return Ok(HttpResponse {
+                                status: 0,
+                                body: Bytes::from(e.to_string()),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                            });
+                        }
                     }
                 }
             },
@@ -1534,6 +1884,7 @@ pub fn register_sync(
     let cs_head = cookie_store.clone();
     let rt_head = runtime.clone();
     let sink_head = global_response_sink;
+    let defaults_head = defaults.clone();
 
     http.set(
         "head",
@@ -1542,11 +1893,16 @@ pub fn register_sync(
             move |url_str: String,
                   rest: rquickjs::function::Rest<rquickjs::Value>|
                   -> Result<HttpResponse> {
+                // Borrow defaults
+                let defs = defaults_head.borrow();
+
                 let mut name_tag: Option<String> = None;
-                let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+                let mut request_headers: Option<HashMap<String, String>> = None;
+                let mut timeout_duration: Option<Duration> = None;
                 if let Some(arg) = rest.first() {
                     if let Some(obj) = arg.as_object() {
                         name_tag = obj.get::<_, String>("name").ok();
+                        request_headers = obj.get("headers").ok();
                         if let Ok(timeout_str) = obj.get::<_, String>("timeout") {
                             timeout_duration = parse_duration_str(&timeout_str);
                         } else if let Ok(timeout_ms) = obj.get::<_, u64>("timeout") {
@@ -1554,6 +1910,28 @@ pub fn register_sync(
                         }
                     }
                 }
+
+                // Merge default headers with request headers (request headers take precedence)
+                let headers_map: Option<HashMap<String, String>> = if defs.headers.is_empty() {
+                    request_headers
+                } else {
+                    let mut merged = defs.headers.clone();
+                    if let Some(req_h) = request_headers {
+                        for (k, v) in req_h {
+                            merged.insert(k, v);
+                        }
+                    }
+                    Some(merged)
+                };
+
+                // Use default timeout if not specified in request
+                if timeout_duration.is_none() {
+                    timeout_duration = defs.timeout.or(Some(Duration::from_secs(60)));
+                }
+
+                // Drop the borrow before the async block
+                std::mem::drop(defs);
+
                 let tags: HashMap<String, String> = if let Some(arg) = rest.first() {
                     arg.as_object()
                         .and_then(|o| o.get("tags").ok())
@@ -1585,6 +1963,12 @@ pub fn register_sync(
                 if !cookie_header_val.is_empty() {
                     req_builder = req_builder.header("Cookie", cookie_header_val);
                 }
+                // Apply merged headers
+                if let Some(ref h) = headers_map {
+                    for (k, v) in h {
+                        req_builder = req_builder.header(k, v);
+                    }
+                }
                 let req = req_builder
                     .body(String::new())
                     .map_err(|_| rquickjs::Error::Exception)?;
@@ -1614,7 +1998,25 @@ pub fn register_sync(
                             HashMap::with_capacity(response.headers().len());
                         for (name, val) in response.headers() {
                             if let Ok(val_str) = val.to_str() {
-                                resp_headers.insert(name.to_string(), val_str.to_string());
+                                let name_str = name.to_string();
+                                let name_lower = name_str.to_lowercase();
+                                if name_lower == "set-cookie" {
+                                    resp_headers
+                                        .entry(name_str)
+                                        .and_modify(|v| {
+                                            v.push('\n');
+                                            v.push_str(val_str);
+                                        })
+                                        .or_insert_with(|| val_str.to_string());
+                                } else {
+                                    resp_headers
+                                        .entry(name_str)
+                                        .and_modify(|v| {
+                                            v.push_str(", ");
+                                            v.push_str(val_str);
+                                        })
+                                        .or_insert_with(|| val_str.to_string());
+                                }
                             }
                         }
                         let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
@@ -1673,6 +2075,7 @@ pub fn register_sync(
     let cs_opts = cookie_store.clone();
     let rt_opts = runtime.clone();
     let sink_opts = global_response_sink;
+    let defaults_opts = defaults.clone();
 
     http.set(
         "options",
@@ -1681,11 +2084,16 @@ pub fn register_sync(
             move |url_str: String,
                   rest: rquickjs::function::Rest<rquickjs::Value>|
                   -> Result<HttpResponse> {
+                // Borrow defaults
+                let defs = defaults_opts.borrow();
+
                 let mut name_tag: Option<String> = None;
-                let mut timeout_duration: Option<Duration> = Some(Duration::from_secs(60));
+                let mut request_headers: Option<HashMap<String, String>> = None;
+                let mut timeout_duration: Option<Duration> = None;
                 if let Some(arg) = rest.first() {
                     if let Some(obj) = arg.as_object() {
                         name_tag = obj.get::<_, String>("name").ok();
+                        request_headers = obj.get("headers").ok();
                         if let Ok(timeout_str) = obj.get::<_, String>("timeout") {
                             timeout_duration = parse_duration_str(&timeout_str);
                         } else if let Ok(timeout_ms) = obj.get::<_, u64>("timeout") {
@@ -1693,6 +2101,28 @@ pub fn register_sync(
                         }
                     }
                 }
+
+                // Merge default headers with request headers (request headers take precedence)
+                let headers_map: Option<HashMap<String, String>> = if defs.headers.is_empty() {
+                    request_headers
+                } else {
+                    let mut merged = defs.headers.clone();
+                    if let Some(req_h) = request_headers {
+                        for (k, v) in req_h {
+                            merged.insert(k, v);
+                        }
+                    }
+                    Some(merged)
+                };
+
+                // Use default timeout if not specified in request
+                if timeout_duration.is_none() {
+                    timeout_duration = defs.timeout.or(Some(Duration::from_secs(60)));
+                }
+
+                // Drop the borrow before the async block
+                std::mem::drop(defs);
+
                 let tags: HashMap<String, String> = if let Some(arg) = rest.first() {
                     arg.as_object()
                         .and_then(|o| o.get("tags").ok())
@@ -1724,6 +2154,12 @@ pub fn register_sync(
                 if !cookie_header_val.is_empty() {
                     req_builder = req_builder.header("Cookie", cookie_header_val);
                 }
+                // Apply merged headers
+                if let Some(ref h) = headers_map {
+                    for (k, v) in h {
+                        req_builder = req_builder.header(k, v);
+                    }
+                }
                 let req = req_builder
                     .body(String::new())
                     .map_err(|_| rquickjs::Error::Exception)?;
@@ -1753,7 +2189,25 @@ pub fn register_sync(
                             HashMap::with_capacity(response.headers().len());
                         for (name, val) in response.headers() {
                             if let Ok(val_str) = val.to_str() {
-                                resp_headers.insert(name.to_string(), val_str.to_string());
+                                let name_str = name.to_string();
+                                let name_lower = name_str.to_lowercase();
+                                if name_lower == "set-cookie" {
+                                    resp_headers
+                                        .entry(name_str)
+                                        .and_modify(|v| {
+                                            v.push('\n');
+                                            v.push_str(val_str);
+                                        })
+                                        .or_insert_with(|| val_str.to_string());
+                                } else {
+                                    resp_headers
+                                        .entry(name_str)
+                                        .and_modify(|v| {
+                                            v.push_str(", ");
+                                            v.push_str(val_str);
+                                        })
+                                        .or_insert_with(|| val_str.to_string());
+                                }
                             }
                         }
                         let body = response.body().clone();
@@ -2032,7 +2486,17 @@ pub fn register_sync(
                             let mut resp_headers: HashMap<String, String> = HashMap::with_capacity(response.headers().len());
                             for (name, val) in response.headers() {
                                 if let Ok(val_str) = val.to_str() {
-                                    resp_headers.insert(name.to_string(), val_str.to_string());
+                                    let name_str = name.to_string();
+                                let name_lower = name_str.to_lowercase();
+                                if name_lower == "set-cookie" {
+                                    resp_headers.entry(name_str)
+                                        .and_modify(|v| { v.push('\n'); v.push_str(val_str); })
+                                        .or_insert_with(|| val_str.to_string());
+                                } else {
+                                    resp_headers.entry(name_str)
+                                        .and_modify(|v| { v.push_str(", "); v.push_str(val_str); })
+                                        .or_insert_with(|| val_str.to_string());
+                                }
                                 }
                             }
                             let body = response.body().clone();

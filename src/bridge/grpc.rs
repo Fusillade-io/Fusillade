@@ -1,3 +1,5 @@
+use crate::stats::{Metric, RequestTimings};
+use crossbeam_channel::Sender;
 use futures_lite::StreamExt;
 use prost::bytes::Buf;
 use prost_reflect::{
@@ -5,9 +7,11 @@ use prost_reflect::{
 };
 use rquickjs::{class::Trace, Ctx, Function, JsLifetime, Object, Result, Value};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tonic::{
@@ -16,6 +20,29 @@ use tonic::{
     transport::{Channel, Endpoint},
     Request, Status, Streaming,
 };
+
+fn make_metric(name: &str, start: Instant, error: Option<String>) -> Metric {
+    let duration = start.elapsed();
+    let timings = RequestTimings {
+        duration,
+        waiting: duration,
+        ..Default::default()
+    };
+    let status = if error.is_none() { 200 } else { 0 };
+    Metric::Request {
+        name: name.to_string(),
+        timings,
+        status,
+        error,
+        tags: HashMap::new(),
+    }
+}
+
+#[derive(Clone)]
+struct GrpcMetricSender(Sender<Metric>);
+unsafe impl<'js> JsLifetime<'js> for GrpcMetricSender {
+    type Changed<'to> = GrpcMetricSender;
+}
 
 // --- Helper: JSON -> DynamicMessage ---
 
@@ -469,6 +496,8 @@ pub struct GrpcClient {
     channel: RefCell<Option<Channel>>,
     #[qjs(skip_trace)]
     runtime: Arc<Runtime>,
+    #[qjs(skip_trace)]
+    tx: Option<Sender<Metric>>,
 }
 
 unsafe impl<'js> JsLifetime<'js> for GrpcClient {
@@ -521,12 +550,14 @@ impl GrpcClient {
 #[rquickjs::methods]
 impl GrpcClient {
     #[qjs(constructor)]
-    pub fn new() -> Self {
+    pub fn new(ctx: Ctx<'_>) -> Self {
+        let tx = ctx.userdata::<GrpcMetricSender>().map(|w| w.0.clone());
         let rt = Runtime::new().expect("Failed to create gRPC runtime");
         Self {
             pool: RefCell::new(None),
             channel: RefCell::new(None),
             runtime: Arc::new(rt),
+            tx,
         }
     }
 
@@ -550,10 +581,18 @@ impl GrpcClient {
     }
 
     pub fn connect(&self, url: String) -> Result<()> {
+        let start = Instant::now();
         let rt = self.runtime.clone();
 
         let endpoint = Endpoint::from_shared(url).map_err(|e| {
             eprintln!("Endpoint error: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric(
+                    "grpc::connect",
+                    start,
+                    Some(format!("Endpoint error: {}", e)),
+                ));
+            }
             rquickjs::Error::new_from_js("UrlError", "GrpcError")
         })?;
 
@@ -561,10 +600,22 @@ impl GrpcClient {
             .block_on(async { endpoint.connect().await })
             .map_err(|e| {
                 eprintln!("Connect error: {}", e);
+                if let Some(ref tx) = self.tx {
+                    let _ = tx.send(make_metric(
+                        "grpc::connect",
+                        start,
+                        Some(format!("Connect error: {}", e)),
+                    ));
+                }
                 rquickjs::Error::new_from_js("ConnectError", "GrpcError")
             })?;
 
         *self.channel.borrow_mut() = Some(channel);
+
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("grpc::connect", start, None));
+        }
+
         Ok(())
     }
 
@@ -574,6 +625,8 @@ impl GrpcClient {
         method_name: String,
         request_val: Value<'js>,
     ) -> Result<Value<'js>> {
+        let start = Instant::now();
+        let metric_name = format!("grpc::invoke/{}", method_name);
         let (method_desc, service_name, method_short_name) = self.get_method(&method_name)?;
         let json_obj = js_to_json(&ctx, request_val)?;
 
@@ -606,8 +659,19 @@ impl GrpcClient {
             })
             .map_err(|e| {
                 eprintln!("gRPC Request failed: {}", e);
+                if let Some(ref tx) = self.tx {
+                    let _ = tx.send(make_metric(
+                        &metric_name,
+                        start,
+                        Some(format!("gRPC error: {}", e)),
+                    ));
+                }
                 rquickjs::Error::new_from_js("GrpcError", "NetworkError")
             })?;
+
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric(&metric_name, start, None));
+        }
 
         let response_msg = response.into_inner();
         dynamic_message_to_js(&ctx, &response_msg)
@@ -856,7 +920,8 @@ impl GrpcClient {
     }
 }
 
-pub fn register_sync(ctx: &Ctx) -> Result<()> {
+pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
+    ctx.store_userdata(GrpcMetricSender(tx))?;
     rquickjs::Class::<GrpcClient>::define(&ctx.globals())?;
     rquickjs::Class::<GrpcServerStream>::define(&ctx.globals())?;
     rquickjs::Class::<GrpcClientStream>::define(&ctx.globals())?;
