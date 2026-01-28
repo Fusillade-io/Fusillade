@@ -55,6 +55,19 @@ pub fn get_log_level() -> LogLevel {
 /// When true, suppress stdout output (TUI is active on the alternate screen)
 pub static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+// Global capture errors path - set once at startup, read by HTTP module
+static CAPTURE_ERRORS_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the capture errors file path (called once at startup)
+pub fn set_capture_errors_path(path: String) {
+    let _ = CAPTURE_ERRORS_PATH.set(path);
+}
+
+/// Get the capture errors file path if set
+pub fn get_capture_errors_path() -> Option<&'static str> {
+    CAPTURE_ERRORS_PATH.get().map(|s| s.as_str())
+}
+
 // Thread-local sleep tracker for accurate iteration timing
 // This tracks cumulative sleep time during an iteration so it can be excluded from response time metrics
 thread_local! {
@@ -76,13 +89,36 @@ fn track_sleep(duration: Duration) {
     SLEEP_ACCUMULATED.with(|s| *s.borrow_mut() += duration);
 }
 
+// Thread-local counter for dropped metrics (when channel disconnects)
+thread_local! {
+    static DROPPED_METRICS: RefCell<u64> = const { RefCell::new(0) };
+}
+
+/// Get the count of dropped metrics for the current thread
+pub fn get_dropped_metrics_count() -> u64 {
+    DROPPED_METRICS.with(|c| *c.borrow())
+}
+
+/// Reset dropped metrics counter (call at start of test)
+pub fn reset_dropped_metrics_count() {
+    DROPPED_METRICS.with(|c| *c.borrow_mut() = 0);
+}
+
+/// Send a metric to the aggregator, logging if the channel is disconnected
+#[inline]
+pub fn send_metric(tx: &Sender<Metric>, metric: Metric) {
+    if tx.send(metric).is_err() {
+        DROPPED_METRICS.with(|c| *c.borrow_mut() += 1);
+    }
+}
+
 fn print(tx: Sender<Metric>, msg: String) {
     // Only print to stdout when TUI is not active
     if !TUI_ACTIVE.load(Ordering::Relaxed) {
         println!("{}", msg);
     }
     // Send to metrics channel for aggregation
-    let _ = tx.send(Metric::Log { message: msg });
+    send_metric(&tx, Metric::Log { message: msg });
 }
 
 /// Format a JS value for console output
@@ -135,7 +171,7 @@ fn log_with_level(tx: &Sender<Metric>, level: LogLevel, args: Vec<Value>) {
             if !TUI_ACTIVE.load(Ordering::Relaxed) {
                 println!("{}", full_msg);
             }
-            let _ = tx.send(Metric::Log { message: full_msg });
+            send_metric(tx, Metric::Log { message: full_msg });
         }
     });
 }
@@ -316,9 +352,12 @@ fn register_console(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
                         if !TUI_ACTIVE.load(Ordering::Relaxed) {
                             println!("{}", table_output);
                         }
-                        let _ = tx_table.send(Metric::Log {
-                            message: table_output,
-                        });
+                        send_metric(
+                            &tx_table,
+                            Metric::Log {
+                                message: table_output,
+                            },
+                        );
                     }
                 });
             },
@@ -490,4 +529,67 @@ pub fn register_globals_sync_fast<'js>(
     register_env(ctx)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dropped_metrics_counter() {
+        // Reset counter
+        reset_dropped_metrics_count();
+        assert_eq!(get_dropped_metrics_count(), 0);
+
+        // Create a channel and drop the receiver to simulate disconnection
+        let (tx, rx) = crossbeam_channel::unbounded::<Metric>();
+        drop(rx);
+
+        // Send should fail since receiver is dropped
+        send_metric(
+            &tx,
+            Metric::Log {
+                message: "test".to_string(),
+            },
+        );
+
+        // Counter should be incremented
+        assert_eq!(get_dropped_metrics_count(), 1);
+
+        // Send again
+        send_metric(
+            &tx,
+            Metric::Log {
+                message: "test2".to_string(),
+            },
+        );
+        assert_eq!(get_dropped_metrics_count(), 2);
+
+        // Reset should clear the counter
+        reset_dropped_metrics_count();
+        assert_eq!(get_dropped_metrics_count(), 0);
+    }
+
+    #[test]
+    fn test_send_metric_success() {
+        // Reset counter
+        reset_dropped_metrics_count();
+
+        // Create a channel with active receiver
+        let (tx, rx) = crossbeam_channel::unbounded::<Metric>();
+
+        // Send should succeed
+        send_metric(
+            &tx,
+            Metric::Log {
+                message: "test".to_string(),
+            },
+        );
+
+        // Counter should remain 0
+        assert_eq!(get_dropped_metrics_count(), 0);
+
+        // Verify the message was received
+        assert!(rx.try_recv().is_ok());
+    }
 }

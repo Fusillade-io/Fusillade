@@ -222,4 +222,67 @@ mod tests {
             _ => panic!("Expected Counter metric"),
         }
     }
+
+    #[test]
+    fn test_histogram_with_tags() {
+        let (tx, rx) = unbounded();
+        let mut tags = HashMap::new();
+        tags.insert("endpoint".to_string(), "/api/users".to_string());
+        tags.insert("method".to_string(), "GET".to_string());
+
+        send_histogram(&tx, "response_time".to_string(), 100.0, tags);
+
+        let metric = rx.recv().unwrap();
+        match metric {
+            Metric::Histogram { name, value, tags } => {
+                assert_eq!(name, "response_time");
+                assert!((value - 100.0).abs() < f64::EPSILON);
+                assert_eq!(tags.get("endpoint"), Some(&"/api/users".to_string()));
+                assert_eq!(tags.get("method"), Some(&"GET".to_string()));
+            }
+            _ => panic!("Expected Histogram metric"),
+        }
+    }
+
+    #[test]
+    fn test_counter_with_tags() {
+        let (tx, rx) = unbounded();
+        let mut tags = HashMap::new();
+        tags.insert("type".to_string(), "error".to_string());
+
+        send_counter(&tx, "errors".to_string(), 1.0, tags);
+
+        let metric = rx.recv().unwrap();
+        match metric {
+            Metric::Counter { name, value, tags } => {
+                assert_eq!(name, "errors");
+                assert!((value - 1.0).abs() < f64::EPSILON);
+                assert_eq!(tags.get("type"), Some(&"error".to_string()));
+            }
+            _ => panic!("Expected Counter metric"),
+        }
+    }
+
+    #[test]
+    fn test_rate_with_tags() {
+        let (tx, rx) = unbounded();
+        let mut tags = HashMap::new();
+        tags.insert("check".to_string(), "login".to_string());
+
+        send_rate(&tx, "success_rate".to_string(), true, tags);
+
+        let metric = rx.recv().unwrap();
+        match metric {
+            Metric::Rate {
+                name,
+                success,
+                tags,
+            } => {
+                assert_eq!(name, "success_rate");
+                assert!(success);
+                assert_eq!(tags.get("check"), Some(&"login".to_string()));
+            }
+            _ => panic!("Expected Rate metric"),
+        }
+    }
 }

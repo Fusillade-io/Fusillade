@@ -155,3 +155,70 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
     ctx.globals().set("ws", ws_mod)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_make_metric_success() {
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        let metric = make_metric("ws::connect", start, None);
+
+        match metric {
+            Metric::Request {
+                name,
+                timings,
+                status,
+                error,
+                tags,
+            } => {
+                assert_eq!(name, "ws::connect");
+                assert_eq!(status, 200);
+                assert!(error.is_none());
+                assert!(timings.duration >= Duration::from_millis(5));
+                assert!(tags.is_empty());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_make_metric_error() {
+        let start = Instant::now();
+        let error_msg = "Connection refused".to_string();
+        let metric = make_metric("ws::connect", start, Some(error_msg.clone()));
+
+        match metric {
+            Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "ws::connect");
+                assert_eq!(status, 0);
+                assert_eq!(error, Some(error_msg));
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_ws_metrics_sent_to_channel() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let start = Instant::now();
+        let metric = make_metric("ws::send", start, None);
+        tx.send(metric).unwrap();
+
+        let received = rx.recv().unwrap();
+        match received {
+            Metric::Request { name, .. } => {
+                assert_eq!(name, "ws::send");
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+}

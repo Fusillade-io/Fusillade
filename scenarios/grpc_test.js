@@ -28,13 +28,13 @@ export default function () {
         client.connect('http://localhost:50051');
 
         let response = client.invoke('helloworld.Greeter/SayHello', {
-            name: 'Thruster'
+            name: 'Fusillade'
         });
 
         print('Greeting: ' + response.message);
 
         assertion(response.message, {
-            'greeting is correct': (m) => m === 'Hello Thruster'
+            'greeting is correct': (m) => m === 'Hello Fusillade'
         });
     } catch (e) {
         print('gRPC Error (server likely unavailable): ' + e);

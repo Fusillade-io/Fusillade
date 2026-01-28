@@ -27,19 +27,19 @@ export default function () {
     print('Value assertions completed');
 
     // Test 3: String checks
-    let testString = 'Thruster Load Testing';
+    let testString = 'Fusillade Load Testing';
     assertion(testString, {
-        'contains Thruster': (s) => s.includes('Thruster'),
+        'contains Fusillade': (s) => s.includes('Fusillade'),
         'length is correct': (s) => s.length === 21,
         'starts with T': (s) => s.startsWith('T')
     });
     print('String assertions completed');
 
     // Test 4: Object checks
-    let testObject = { name: 'Thruster', version: '0.1.0' };
+    let testObject = { name: 'Fusillade', version: '0.1.0' };
     assertion(testObject, {
         'has name property': (o) => o.name !== undefined,
-        'name is Thruster': (o) => o.name === 'Thruster',
+        'name is Fusillade': (o) => o.name === 'Fusillade',
         'has version': (o) => o.version !== undefined
     });
     print('Object assertions completed');

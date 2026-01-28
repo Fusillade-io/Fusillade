@@ -18,6 +18,44 @@ use std::time::Instant;
 use tokio::runtime::Runtime;
 use url::Url;
 
+/// Create an error response and optionally capture it for replay
+fn create_error_response_with_capture(
+    method: &str,
+    url: &str,
+    headers: Option<&HashMap<String, String>>,
+    body: Option<&str>,
+    error_msg: &str,
+    timings: RequestTimings,
+) -> HttpResponse {
+    // Capture if enabled
+    if let Some(path) = crate::bridge::get_capture_errors_path() {
+        let captured = crate::bridge::replay::CapturedRequest {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            method: method.to_string(),
+            url: url.to_string(),
+            headers: headers.cloned().unwrap_or_default(),
+            body: body.map(|s| s.to_string()),
+            status: 0,
+            error: Some(error_msg.to_string()),
+            response_body: Some(error_msg.to_string()),
+        };
+        crate::bridge::replay::capture_failed_request(&captured, path);
+    }
+
+    let (error_type, error_code) = categorize_error(error_msg);
+    HttpResponse {
+        status: 0,
+        status_text: status_text_for_code(0),
+        body: Bytes::from(error_msg.to_string()),
+        headers: HashMap::new(),
+        timings,
+        proto: "h1".to_string(),
+        set_cookie_headers: Vec::new(),
+        error: Some(error_type),
+        error_code: Some(error_code),
+    }
+}
+
 /// Call all beforeRequest hooks with the request object (via JS shim)
 fn call_before_request_hooks<'js>(ctx: &Ctx<'js>, req_obj: &Object<'js>) {
     if let Ok(call_hooks_fn) = ctx
@@ -121,7 +159,6 @@ fn normalize_url_for_metrics(url: &str) -> String {
 }
 
 /// JavaScript-exposed CookieJar class for manual cookie manipulation
-/// Similar to k6's cookie jar API
 #[derive(Clone)]
 pub struct JsCookieJar {
     store: Rc<RefCell<CookieStore>>,
@@ -360,7 +397,7 @@ impl<'js> IntoJs<'js> for HttpResponse {
         }
         obj.set("headers", headers_obj)?;
 
-        // Add timings object (k6-compatible)
+        // Add timings object
         let timings_obj = Object::new(ctx.clone())?;
         timings_obj.set("duration", self.timings.duration.as_secs_f64() * 1000.0)?;
         timings_obj.set("blocked", self.timings.blocked.as_secs_f64() * 1000.0)?;
@@ -875,18 +912,14 @@ pub fn register_sync(
                             error: Some(e.to_string()),
                             tags: tags.clone(),
                         });
-                        let (error_type, error_code) = categorize_error(&e.to_string());
-                        return Ok(HttpResponse {
-                            status: 0,
-                            status_text: status_text_for_code(0),
-                            body: Bytes::from(e.to_string()),
-                            headers: HashMap::new(),
+                        return Ok(create_error_response_with_capture(
+                            &method_str,
+                            &url_str,
+                            headers_map.as_ref(),
+                            body.as_deref(),
+                            &e.to_string(),
                             timings,
-                            proto: "h1".to_string(),
-                            set_cookie_headers: Vec::new(),
-                            error: Some(error_type),
-                            error_code: Some(error_code),
-                        });
+                        ));
                     }
                 }
             }
@@ -1155,18 +1188,14 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
-                            let (error_type, error_code) = categorize_error(&e.to_string());
-                            return Ok(HttpResponse {
-                                status: 0,
-                                status_text: status_text_for_code(0),
-                                body: Bytes::from(e.to_string()),
-                                headers: HashMap::new(),
+                            return Ok(create_error_response_with_capture(
+                                "GET",
+                                &current_url,
+                                headers_map.as_ref(),
+                                None,
+                                &e.to_string(),
                                 timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers: Vec::new(),
-                                error: Some(error_type),
-                                error_code: Some(error_code),
-                            });
+                            ));
                         }
                     }
                 }
@@ -1419,18 +1448,14 @@ pub fn register_sync(
                                         error: Some(e.to_string()),
                                         tags: tags.clone(),
                                     });
-                                    let (error_type, error_code) = categorize_error(&e.to_string());
-                                    return Ok(HttpResponse {
-                                        status: 0,
-                                        status_text: status_text_for_code(0),
-                                        body: Bytes::from(e.to_string()),
-                                        headers: HashMap::new(),
+                                    return Ok(create_error_response_with_capture(
+                                        "POST",
+                                        &current_url,
+                                        headers_map.as_ref(),
+                                        Some(&body),
+                                        &e.to_string(),
                                         timings,
-                                        proto: "h1".to_string(),
-                                        set_cookie_headers: Vec::new(),
-                                        error: Some(error_type),
-                                        error_code: Some(error_code),
-                                    });
+                                    ));
                                 }
                             }
                         }
@@ -1631,18 +1656,14 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
-                            let (error_type, error_code) = categorize_error(&e.to_string());
-                            return Ok(HttpResponse {
-                                status: 0,
-                                status_text: status_text_for_code(0),
-                                body: Bytes::from(e.to_string()),
-                                headers: HashMap::new(),
+                            return Ok(create_error_response_with_capture(
+                                "POST",
+                                &current_url,
+                                headers_map.as_ref(),
+                                Some(&original_body),
+                                &e.to_string(),
                                 timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers: Vec::new(),
-                                error: Some(error_type),
-                                error_code: Some(error_code),
-                            });
+                            ));
                         }
                     }
                 }
@@ -1872,18 +1893,14 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
-                            let (error_type, error_code) = categorize_error(&e.to_string());
-                            return Ok(HttpResponse {
-                                status: 0,
-                                status_text: status_text_for_code(0),
-                                body: Bytes::from(e.to_string()),
-                                headers: HashMap::new(),
+                            return Ok(create_error_response_with_capture(
+                                "PUT",
+                                &url_str,
+                                headers_map.as_ref(),
+                                Some(&body),
+                                &e.to_string(),
                                 timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers: Vec::new(),
-                                error: Some(error_type),
-                                error_code: Some(error_code),
-                            });
+                            ));
                         }
                     }
                 }
@@ -2112,18 +2129,14 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
-                            let (error_type, error_code) = categorize_error(&e.to_string());
-                            return Ok(HttpResponse {
-                                status: 0,
-                                status_text: status_text_for_code(0),
-                                body: Bytes::from(e.to_string()),
-                                headers: HashMap::new(),
+                            return Ok(create_error_response_with_capture(
+                                "DELETE",
+                                &url_str,
+                                headers_map.as_ref(),
+                                None,
+                                &e.to_string(),
                                 timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers: Vec::new(),
-                                error: Some(error_type),
-                                error_code: Some(error_code),
-                            });
+                            ));
                         }
                     }
                 }
@@ -2353,18 +2366,14 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
-                            let (error_type, error_code) = categorize_error(&e.to_string());
-                            return Ok(HttpResponse {
-                                status: 0,
-                                status_text: status_text_for_code(0),
-                                body: Bytes::from(e.to_string()),
-                                headers: HashMap::new(),
+                            return Ok(create_error_response_with_capture(
+                                "PATCH",
+                                &url_str,
+                                headers_map.as_ref(),
+                                Some(&body),
+                                &e.to_string(),
                                 timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers: Vec::new(),
-                                error: Some(error_type),
-                                error_code: Some(error_code),
-                            });
+                            ));
                         }
                     }
                 }
@@ -2560,18 +2569,14 @@ pub fn register_sync(
                             error: Some(e.to_string()),
                             tags: tags.clone(),
                         });
-                        let (error_type, error_code) = categorize_error(&e.to_string());
-                        Ok(HttpResponse {
-                            status: 0,
-                            status_text: status_text_for_code(0),
-                            body: Bytes::from(e.to_string()),
-                            headers: HashMap::new(),
+                        Ok(create_error_response_with_capture(
+                            "HEAD",
+                            &url_str,
+                            headers_map.as_ref(),
+                            None,
+                            &e.to_string(),
                             timings,
-                            proto: "h1".to_string(),
-                            set_cookie_headers: Vec::new(),
-                            error: Some(error_type),
-                            error_code: Some(error_code),
-                        })
+                        ))
                     }
                 }
             },
@@ -2767,18 +2772,14 @@ pub fn register_sync(
                             error: Some(e.to_string()),
                             tags: tags.clone(),
                         });
-                        let (error_type, error_code) = categorize_error(&e.to_string());
-                        Ok(HttpResponse {
-                            status: 0,
-                            status_text: status_text_for_code(0),
-                            body: Bytes::from(e.to_string()),
-                            headers: HashMap::new(),
+                        Ok(create_error_response_with_capture(
+                            "OPTIONS",
+                            &url_str,
+                            headers_map.as_ref(),
+                            None,
+                            &e.to_string(),
                             timings,
-                            proto: "h1".to_string(),
-                            set_cookie_headers: Vec::new(),
-                            error: Some(error_type),
-                            error_code: Some(error_code),
-                        })
+                        ))
                     }
                 }
             },

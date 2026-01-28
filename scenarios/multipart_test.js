@@ -13,7 +13,7 @@ export default function () {
     const file = http.file('./scenarios/users.json', 'users.json', 'application/json');
 
     // Submit as multipart
-    // Note: http.post expects a string body. Thruster automatically detects multipart
+    // Note: http.post expects a string body. Fusillade automatically detects multipart
     // if the JSON string contains the file marker return by http.file().
     const res = http.post('https://httpbin.org/post', JSON.stringify({
         'file': file,

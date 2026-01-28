@@ -329,6 +329,9 @@ Fusillade is configured via the `export const options` object in your script.
 | `drop` | Number | Chaos: Drop probability 0.0-1.0 for simulating packet loss. | `0.05` |
 | `no_endpoint_tracking` | Boolean | Disable per-URL metrics tracking to reduce memory for high-cardinality URLs. | `true` |
 | `memory_safe` | Boolean | Throttle worker spawning when memory usage is high (85% pause, 95% stop). | `true` |
+| `insecure` | Boolean | Skip TLS certificate verification. Use for self-signed certificates. **Warning:** Insecure, only use for testing. | `true` |
+| `max_redirects` | Number | Maximum HTTP redirects to follow. Default: 10. Set to 0 to disable. | `5` |
+| `user_agent` | String | Default User-Agent header for all HTTP requests. | `'MyApp/1.0'` |
 
 ### Config Aliases
 
@@ -342,6 +345,8 @@ Alternative option names are supported:
 | `timeUnit` | `time_unit` |
 | `responseSink` | `response_sink` |
 | `startTime` | `start_time` |
+| `maxRedirects` | `max_redirects` |
+| `userAgent` | `user_agent` |
 
 Both naming conventions work interchangeably.
 
@@ -1349,10 +1354,12 @@ Fusillade allows you to define custom business-level metrics beyond standard HTT
 
 **Available Metric Types:**
 
-* `metrics.histogramAdd(name, value)`: Tracks distribution of values (min, max, avg, p95, p99). Ideal for custom timings.
-* `metrics.counterAdd(name, value)`: Cumulative sum. Ideal for counting events.
-* `metrics.gaugeSet(name, value)`: Stores the most recent value. Ideal for current state (e.g., queue size).
-* `metrics.rateAdd(name, success)`: Tracks success rate as a percentage. Ideal for custom success/failure tracking.
+All metric functions accept an optional `tags` object as the last parameter for fine-grained filtering and grouping.
+
+* `metrics.histogramAdd(name, value, tags?)`: Tracks distribution of values (min, max, avg, p95, p99). Ideal for custom timings.
+* `metrics.counterAdd(name, value, tags?)`: Cumulative sum. Ideal for counting events.
+* `metrics.gaugeSet(name, value, tags?)`: Stores the most recent value. Ideal for current state (e.g., queue size).
+* `metrics.rateAdd(name, success, tags?)`: Tracks success rate as a percentage. Ideal for custom success/failure tracking.
 
 **Example:**
 
@@ -1368,18 +1375,18 @@ export const options = {
 
 export default function () {
     let start = Date.now();
-    
+
     // ... business logic ...
-    
-    // Record how long the checkout took
-    metrics.histogramAdd('checkout_duration', Date.now() - start);
-    
+
+    // Record how long the checkout took (with optional tags)
+    metrics.histogramAdd('checkout_duration', Date.now() - start, { region: 'us-east' });
+
     // Count items sold
-    metrics.counterAdd('items_sold', 3);
-    
+    metrics.counterAdd('items_sold', 3, { category: 'electronics' });
+
     // Track success rate
-    metrics.rateAdd('payment_success', true);
-    
+    metrics.rateAdd('payment_success', true, { provider: 'stripe' });
+
     // Track current queue depth
     metrics.gaugeSet('queue_depth', 42);
 }
@@ -1457,6 +1464,7 @@ Executes a load test script.
   * `--out otlp=<URL>`: Export to OTLP endpoint (e.g., `otlp=http://localhost:4318/v1/metrics`)
   * `--out csv=<FILE>`: Export to CSV file
   * `--out junit=<FILE>`: Export to JUnit XML format (for CI/CD integration)
+  * `--out statsd=<HOST:PORT>`: Export to StatsD endpoint (e.g., `statsd=localhost:8125`). Compatible with StatsD, Datadog, Graphite.
 * `--metrics-url <URL>`: Stream real-time metrics to a URL during test execution. Sends periodic JSON payloads with RPS, latency, errors, etc. At test completion, sends a summary to `<URL>/summary` with endpoint breakdown and HTTP status code counts.
 * `--metrics-auth <HEADER>`: Authentication header for metrics URL (format: `HeaderName: value`).
 * `-i, --interactive`: Enable interactive control mode (pause, resume, ramp workers).
@@ -1471,6 +1479,9 @@ Executes a load test script.
 * `--memory-safe`: Enable memory-safe mode: throttle worker spawning if memory usage is high.
 * `--save-history`: Save test results to local SQLite database (`fusillade_history.db`). View with `fusillade history`.
 * `--capture-errors [FILE]`: Capture failed requests to file for later replay. Default: `fusillade-errors.json`.
+* `--insecure`: Skip TLS certificate verification. Use for self-signed certificates. **Warning:** This is insecure and should only be used for testing.
+* `--max-redirects <NUM>`: Maximum number of HTTP redirects to follow. Default: 10. Set to 0 to disable redirects entirely.
+* `--user-agent <STRING>`: Set default User-Agent header for all HTTP requests.
 
 ### `fusillade history`
 View test run history from the local database.
@@ -2173,4 +2184,38 @@ If you're hitting memory limits, consider:
    # On controller
    fusillade run script.js --execution distributed --workers node1:8080,node2:8080
    ```
+
+### Internal Memory Safety
+
+Fusillade uses specific memory patterns to ensure stability during high-concurrency tests:
+
+**QuickJS Runtime Cleanup**
+
+The QuickJS JavaScript engine can trigger assertion failures during runtime cleanup when closures are stored in global objects. To prevent crashes during worker shutdown, Fusillade uses `std::mem::forget(runtime)` to intentionally leak the runtime memory:
+
+```rust
+// Cleanup: run GC and then forget the runtime to prevent cleanup assertion failures
+// This leaks memory but prevents crashes during runtime shutdown
+runtime.run_gc();
+drop(context);
+std::mem::forget(runtime);
+```
+
+This is an intentional trade-off:
+- **Trade-off:** Small memory leak per worker thread (~100KB)
+- **Benefit:** Prevents assertion failures and crashes during test completion
+- **Impact:** Negligible for typical test durations; memory is reclaimed when the process exits
+
+**Dropped Metrics Tracking**
+
+Metrics sent to the aggregator channel are tracked for potential drops during test shutdown. If the receiver is disconnected before all metrics are sent, the dropped count is available via:
+
+```rust
+// Get count of dropped metrics (per thread)
+fusillade::bridge::get_dropped_metrics_count()
+```
+
+**Channel Backpressure**
+
+Metric channels use bounded capacity with automatic scaling based on worker count. When channels are full, worker threads block (backpressure) rather than dropping metrics. This ensures all metrics are captured at the cost of potential throughput reduction under extreme load.
 

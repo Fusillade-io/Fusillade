@@ -32,13 +32,13 @@ pub struct ScheduleStep {
 pub struct ScenarioConfig {
     /// Executor type (constant-vus, ramping-vus, constant-arrival-rate, per-vu-iterations)
     pub executor: Option<ExecutorType>,
-    /// Number of concurrent workers (k6: vus)
+    /// Number of concurrent workers (alias: vus)
     pub workers: Option<usize>,
     /// Duration of the scenario
     pub duration: Option<String>,
     /// Fixed iterations per worker (for per-vu-iterations executor)
     pub iterations: Option<u64>,
-    /// Ramping schedule (k6: stages)
+    /// Ramping schedule (alias: stages)
     pub schedule: Option<Vec<ScheduleStep>>,
     /// Rate for arrival-rate executors
     pub rate: Option<u64>,
@@ -49,7 +49,7 @@ pub struct ScenarioConfig {
     /// Delay before starting this scenario (e.g., "30s")
     #[serde(alias = "startTime")]
     pub start_time: Option<String>,
-    /// Per-scenario thresholds (k6: thresholds)
+    /// Per-scenario thresholds (alias: thresholds)
     #[serde(alias = "thresholds")]
     pub thresholds: Option<HashMap<String, Vec<String>>>,
     /// Worker thread stack size in bytes (default: 32KB). Increase if encountering stack overflows.
@@ -114,6 +114,15 @@ pub struct Config {
     /// When memory exceeds 95%, existing workers are gradually stopped.
     #[serde(alias = "memorySafe")]
     pub memory_safe: Option<bool>,
+    /// Skip TLS certificate verification. Use for self-signed certificates.
+    /// WARNING: This is insecure and should only be used for testing.
+    pub insecure: Option<bool>,
+    /// Maximum number of HTTP redirects to follow (default: 10, 0 to disable)
+    #[serde(alias = "maxRedirects")]
+    pub max_redirects: Option<u32>,
+    /// Default User-Agent header for all HTTP requests
+    #[serde(alias = "userAgent")]
+    pub user_agent: Option<String>,
 }
 
 impl Config {}
@@ -564,5 +573,75 @@ scenarios:
         assert_eq!(scenario.executor, Some(ExecutorType::ConstantArrivalRate));
         assert_eq!(scenario.rate, Some(100));
         assert_eq!(scenario.workers, Some(50));
+    }
+
+    #[test]
+    fn test_config_insecure_flag() {
+        let yaml = r#"
+workers: 5
+duration: "30s"
+insecure: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.insecure, Some(true));
+    }
+
+    #[test]
+    fn test_config_max_redirects() {
+        let yaml = r#"
+workers: 5
+duration: "30s"
+max_redirects: 5
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.max_redirects, Some(5));
+    }
+
+    #[test]
+    fn test_config_max_redirects_zero_disables() {
+        let yaml = r#"
+workers: 5
+duration: "30s"
+maxRedirects: 0
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.max_redirects, Some(0));
+    }
+
+    #[test]
+    fn test_config_user_agent() {
+        let yaml = r#"
+workers: 5
+duration: "30s"
+user_agent: "FusilladeTester/1.0"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.user_agent, Some("FusilladeTester/1.0".to_string()));
+    }
+
+    #[test]
+    fn test_config_user_agent_camel_case() {
+        let yaml = r#"
+workers: 5
+duration: "30s"
+userAgent: "CustomAgent/2.0"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.user_agent, Some("CustomAgent/2.0".to_string()));
+    }
+
+    #[test]
+    fn test_config_all_new_http_options() {
+        let yaml = r#"
+workers: 10
+duration: "1m"
+insecure: true
+max_redirects: 3
+user_agent: "Fusillade/1.0.2"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.insecure, Some(true));
+        assert_eq!(config.max_redirects, Some(3));
+        assert_eq!(config.user_agent, Some("Fusillade/1.0.2".to_string()));
     }
 }

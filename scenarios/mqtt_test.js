@@ -9,10 +9,10 @@ export default function() {
     print('Connecting to MQTT...');
     // test.mosquitto.org is a public broker
     try {
-        client.connect('test.mosquitto.org', 1883, 'thruster-test-client-' + utils.uuid());
+        client.connect('test.mosquitto.org', 1883, 'fusillade-test-client-' + utils.uuid());
         print('MQTT Connected');
 
-        client.publish('thruster/test/topic', 'Hello from Thruster!');
+        client.publish('fusillade/test/topic', 'Hello from Fusillade!');
         print('MQTT Message Published');
 
         client.close();

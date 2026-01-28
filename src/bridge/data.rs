@@ -319,3 +319,57 @@ pub fn register_sync(ctx: &Ctx, shared_data: SharedData) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_csv_simple() {
+        let result = parse_csv_line("a,b,c");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_csv_quoted_field() {
+        let result = parse_csv_line("\"Smith, Jr.\",John,30");
+        assert_eq!(result, vec!["Smith, Jr.", "John", "30"]);
+    }
+
+    #[test]
+    fn test_parse_csv_escaped_quotes() {
+        let result = parse_csv_line("\"He said \"\"hello\"\"\",test");
+        assert_eq!(result, vec!["He said \"hello\"", "test"]);
+    }
+
+    #[test]
+    fn test_parse_csv_empty_fields() {
+        let result = parse_csv_line("a,,c");
+        assert_eq!(result, vec!["a", "", "c"]);
+    }
+
+    #[test]
+    fn test_parse_csv_quoted_empty() {
+        let result = parse_csv_line("\"\",b,\"\"");
+        assert_eq!(result, vec!["", "b", ""]);
+    }
+
+    #[test]
+    fn test_parse_csv_spaces_trimmed() {
+        let result = parse_csv_line("  a  ,  b  ,  c  ");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_csv_quoted_newline_chars() {
+        // Within a single line, literal backslash-n (not actual newline)
+        let result = parse_csv_line("\"line1\\nline2\",b");
+        assert_eq!(result, vec!["line1\\nline2", "b"]);
+    }
+
+    #[test]
+    fn test_parse_csv_multiple_commas_in_quotes() {
+        let result = parse_csv_line("\"a,b,c,d\",e");
+        assert_eq!(result, vec!["a,b,c,d", "e"]);
+    }
+}

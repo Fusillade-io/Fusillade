@@ -325,4 +325,45 @@ mod tests {
             Ok(len)
         }
     }
+
+    #[test]
+    fn test_sse_make_metric_success() {
+        let start = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let metric = make_metric("sse::connect", start, None);
+
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "sse::connect");
+                assert_eq!(status, 200);
+                assert!(error.is_none());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_sse_make_metric_error() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("sse::recv", start, Some("Connection closed".to_string()));
+
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "sse::recv");
+                assert_eq!(status, 0);
+                assert!(error.is_some());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
 }
