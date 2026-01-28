@@ -2,9 +2,30 @@
 //!
 //! Exposes SSE client functionality to JavaScript for load testing SSE endpoints.
 
+use crate::stats::{Metric, RequestTimings};
+use crossbeam_channel::Sender;
 use rquickjs::{class::Trace, Ctx, Function, IntoJs, JsLifetime, Object, Result, Value};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
+use std::time::Instant;
+
+fn make_metric(name: &str, start: Instant, error: Option<String>) -> Metric {
+    let duration = start.elapsed();
+    let timings = RequestTimings {
+        duration,
+        waiting: duration,
+        ..Default::default()
+    };
+    let status = if error.is_none() { 200 } else { 0 };
+    Metric::Request {
+        name: name.to_string(),
+        timings,
+        status,
+        error,
+        tags: HashMap::new(),
+    }
+}
 
 /// SSE Client wrapping a reqwest blocking response
 #[derive(Trace)]
@@ -14,6 +35,8 @@ pub struct JsSseClient {
     inner: RefCell<Option<SseStream>>,
     #[qjs(skip_trace)]
     url: String,
+    #[qjs(skip_trace)]
+    tx: Sender<Metric>,
 }
 
 struct SseStream {
@@ -30,11 +53,13 @@ impl JsSseClient {
     /// Receive the next SSE event
     /// Returns an object { event, data, id } or null if disconnected
     pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        let start = Instant::now();
         let mut borrow = self.inner.borrow_mut();
         if let Some(stream) = borrow.as_mut() {
             let event = read_sse_event(&mut stream.reader);
             match event {
                 Ok(Some(sse_event)) => {
+                    let _ = self.tx.send(make_metric("sse::recv", start, None));
                     if let Some(id) = &sse_event.id {
                         stream.last_event_id = Some(id.clone());
                     }
@@ -56,7 +81,11 @@ impl JsSseClient {
                     Ok(Value::new_null(ctx))
                 }
                 Err(e) => {
-                    eprintln!("SSE Read Error: {}", e);
+                    let err_msg = format!("SSE Read Error: {}", e);
+                    let _ = self
+                        .tx
+                        .send(make_metric("sse::recv", start, Some(err_msg.clone())));
+                    eprintln!("{}", err_msg);
                     *borrow = None;
                     Ok(Value::new_null(ctx))
                 }
@@ -142,8 +171,16 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent
     }
 }
 
+#[derive(Clone)]
+struct SseMetricSender(Sender<Metric>);
+unsafe impl<'js> JsLifetime<'js> for SseMetricSender {
+    type Changed<'to> = SseMetricSender;
+}
+
 /// Connect to an SSE endpoint
 fn sse_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
+    let tx = ctx.userdata::<SseMetricSender>().map(|w| w.0.clone());
+    let start = Instant::now();
     let client = reqwest::blocking::Client::new();
 
     let response = client
@@ -156,8 +193,15 @@ fn sse_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
         Ok(resp) => {
             if !resp.status().is_success() {
                 let msg = format!("SSE connection failed: HTTP {}", resp.status());
+                if let Some(ref tx) = tx {
+                    let _ = tx.send(make_metric("sse::connect", start, Some(msg.clone())));
+                }
                 let err_val = msg.into_js(&ctx)?;
                 return Err(ctx.throw(err_val));
+            }
+
+            if let Some(ref tx) = tx {
+                let _ = tx.send(make_metric("sse::connect", start, None));
             }
 
             let stream = SseStream {
@@ -165,9 +209,15 @@ fn sse_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
                 last_event_id: None,
             };
 
+            let metric_tx = tx.unwrap_or_else(|| {
+                let (s, _) = crossbeam_channel::unbounded();
+                s
+            });
+
             let client = JsSseClient {
                 inner: RefCell::new(Some(stream)),
                 url: url.clone(),
+                tx: metric_tx,
             };
 
             let instance = rquickjs::Class::<JsSseClient>::instance(ctx.clone(), client)?;
@@ -175,13 +225,17 @@ fn sse_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
         }
         Err(e) => {
             let msg = format!("SSE connection failed: {}", e);
+            if let Some(ref tx) = tx {
+                let _ = tx.send(make_metric("sse::connect", start, Some(msg.clone())));
+            }
             let err_val = msg.into_js(&ctx)?;
             Err(ctx.throw(err_val))
         }
     }
 }
 
-pub fn register_sync(ctx: &Ctx) -> Result<()> {
+pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
+    ctx.store_userdata(SseMetricSender(tx))?;
     rquickjs::Class::<JsSseClient>::define(&ctx.globals())?;
 
     let sse_mod = Object::new(ctx.clone())?;

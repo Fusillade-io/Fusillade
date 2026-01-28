@@ -265,6 +265,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("[s] Stop  ", Style::default().fg(Color::Red)),
                 Span::styled("[+/-] Workers ±10  ", Style::default().fg(Color::Cyan)),
                 Span::styled("[r] Ramp  ", Style::default().fg(Color::Green)),
+                Span::styled("[a] Auto  ", Style::default().fg(Color::Green)),
                 Span::styled("[t] Tag  ", Style::default().fg(Color::Magenta)),
                 Span::styled("[↑/↓] Scroll  ", Style::default().fg(Color::White)),
                 Span::styled("[q] Quit", Style::default().fg(Color::Gray)),
