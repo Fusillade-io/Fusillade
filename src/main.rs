@@ -173,6 +173,24 @@ enum Commands {
         /// Capture failed requests to file for later replay (default: fusillade-errors.json)
         #[arg(long)]
         capture_errors: Option<Option<PathBuf>>,
+        /// Fixed iterations per worker (per-vu-iterations)
+        #[arg(long)]
+        iterations: Option<u64>,
+        /// Warmup URL to hit before test starts
+        #[arg(long)]
+        warmup: Option<String>,
+        /// Discard response bodies to save memory
+        #[arg(long)]
+        response_sink: bool,
+        /// Threshold criterion (can be repeated: --threshold 'http_req_duration:p95<500')
+        #[arg(long = "threshold", value_name = "METRIC:CONDITION")]
+        thresholds: Vec<String>,
+        /// Abort test if any threshold fails
+        #[arg(long)]
+        abort_on_fail: bool,
+        /// Log level: debug, info, warn, error
+        #[arg(long, default_value = "info")]
+        log_level: String,
     },
     /// Initialize a new test script with starter template
     Init {
@@ -305,7 +323,21 @@ fn main() -> Result<()> {
             memory_safe,
             save_history,
             capture_errors,
+            iterations,
+            warmup,
+            response_sink,
+            thresholds,
+            abort_on_fail,
+            log_level,
         } => {
+            // Set log level for console.* API
+            let log_level_enum = match log_level.to_lowercase().as_str() {
+                "debug" => fusillade::bridge::LogLevel::Debug,
+                "warn" | "warning" => fusillade::bridge::LogLevel::Warn,
+                "error" => fusillade::bridge::LogLevel::Error,
+                _ => fusillade::bridge::LogLevel::Info,
+            };
+            fusillade::bridge::set_log_level(log_level_enum);
             // Load .env file if present (check script directory, then current directory)
             let script_dir = scenario.parent().unwrap_or(std::path::Path::new("."));
             let env_paths = [script_dir.join(".env"), PathBuf::from(".env")];
@@ -521,6 +553,32 @@ fn main() -> Result<()> {
             }
             if memory_safe {
                 final_config.memory_safe = Some(true);
+            }
+            if let Some(iters) = iterations {
+                final_config.iterations = Some(iters);
+            }
+            if let Some(ref w) = warmup {
+                final_config.warmup = Some(w.clone());
+            }
+            if response_sink {
+                final_config.response_sink = Some(true);
+            }
+            if abort_on_fail {
+                final_config.abort_on_fail = Some(true);
+            }
+            // Parse --threshold flags into criteria map
+            if !thresholds.is_empty() {
+                let mut criteria = final_config.criteria.unwrap_or_default();
+                for t in &thresholds {
+                    // Parse "metric:condition" format
+                    if let Some((metric, condition)) = t.split_once(':') {
+                        criteria
+                            .entry(metric.to_string())
+                            .or_default()
+                            .push(condition.to_string());
+                    }
+                }
+                final_config.criteria = Some(criteria);
             }
 
             // Pre-flight memory check (unless disabled)

@@ -153,10 +153,105 @@ export function teardown(data) {
 
 **Lifecycle Flow:**
 ```
-setup() → [VU iterations run in parallel] → teardown(data)
-   ↓              ↓                              ↓
- 1x only    N workers × M iterations         1x only
+setup() → [VU iterations run in parallel] → teardown(data) → handleSummary(data)
+   ↓              ↓                              ↓                    ↓
+ 1x only    N workers × M iterations         1x only              1x only
 ```
+
+#### `handleSummary(data)` - Custom Summary Output
+
+The `handleSummary` function runs after the test completes and receives the full test report data. It can generate custom output files (JSON, HTML, CSV, etc.):
+
+```javascript
+export function handleSummary(data) {
+    // data contains:
+    // - data.duration_secs: test duration
+    // - data.total_requests: total request count
+    // - data.total_errors: total error count
+    // - data.avg_latency, data.p50, data.p95, data.p99: latency metrics
+    // - data.rps: requests per second
+    // - data.endpoints: per-endpoint breakdown
+
+    return {
+        // Write to stdout
+        'stdout': `Test completed: ${data.total_requests} requests, ${data.rps} RPS`,
+
+        // Write JSON summary
+        'summary.json': JSON.stringify(data, null, 2),
+
+        // Write custom HTML report
+        'report.html': `<html><body><h1>Test Results</h1><p>RPS: ${data.rps}</p></body></html>`,
+    };
+}
+```
+
+**Return Value:**
+- Keys are filenames (use `'stdout'` for console output)
+- Values are the content to write
+- Multiple files can be generated in a single return
+
+This enables custom reporting formats, integration with external systems, and automated CI/CD result publishing.
+
+### Executor Types
+
+Fusillade supports multiple executor types for different load patterns:
+
+| Executor | Description | Use Case |
+|----------|-------------|----------|
+| `constant-vus` | Maintain a fixed number of virtual users (default) | Baseline load testing |
+| `ramping-vus` | Gradually adjust VU count through stages | Load ramp-up/down |
+| `constant-arrival-rate` | Maintain a fixed request rate (RPS) | API rate limit testing |
+| `ramping-arrival-rate` | Adjust request rate through stages | Variable RPS testing |
+| `per-vu-iterations` | Each VU runs a fixed number of iterations | Iteration-based testing |
+| `shared-iterations` | All VUs share a pool of iterations | Fixed total iterations |
+
+```javascript
+export const options = {
+    // Constant VUs (default)
+    executor: 'constant-vus',
+    workers: 10,
+    duration: '1m',
+};
+
+// Ramping VUs - gradually scale VU count
+export const options = {
+    executor: 'ramping-vus',
+    stages: [
+        { duration: '30s', target: 20 },  // Ramp to 20 VUs
+        { duration: '1m', target: 50 },   // Ramp to 50 VUs
+        { duration: '30s', target: 0 },   // Ramp down
+    ],
+};
+
+// Constant Arrival Rate - fixed RPS
+export const options = {
+    executor: 'constant-arrival-rate',
+    rate: 100,           // 100 requests per second
+    timeUnit: '1s',      // Rate denominator
+    workers: 20,         // Worker pool to sustain rate
+    duration: '2m',
+};
+
+// Ramping Arrival Rate - variable RPS
+export const options = {
+    executor: 'ramping-arrival-rate',
+    stages: [
+        { duration: '30s', target: 50 },   // Ramp to 50 RPS
+        { duration: '1m', target: 200 },   // Ramp to 200 RPS
+        { duration: '30s', target: 0 },    // Ramp down
+    ],
+    workers: 50,         // Worker pool
+};
+
+// Per-VU Iterations - fixed iterations per VU
+export const options = {
+    executor: 'per-vu-iterations',
+    workers: 10,
+    iterations: 100,     // Each VU runs exactly 100 iterations
+};
+```
+
+**Note:** For arrival rate executors, workers act as a pool that picks up iteration requests. The engine spawns iterations at the target rate, and available workers execute them. If all workers are busy, iterations are dropped (tracked as `dropped_iterations` metric).
 
 ### Execution Modes
 
@@ -581,6 +676,9 @@ criteria:
 * `http.setDefaults(options)`: Set global defaults for all requests (timeout, headers).
 * `http.request({ method, url, body, headers, name, timeout })`: Generic request builder.
 * `http.batch(requests)`: Execute multiple requests in parallel. Returns array of responses.
+* `http.cookieJar()`: Returns the cookie jar for manual cookie management.
+* `http.addHook(hookType, fn)`: Register a request/response hook.
+* `http.clearHooks()`: Clear all registered hooks.
 
 ```javascript
 // http.url() example
@@ -622,6 +720,29 @@ http.setDefaults({
 });
 // All subsequent requests will use these defaults
 http.get('https://api.example.com/data');  // Uses 10s timeout and default headers
+
+// http.addHook() example - intercept requests and responses
+http.addHook('beforeRequest', (req) => {
+    console.log(`Making ${req.method} request to ${req.url}`);
+    // req contains: method, url, body, headers
+});
+
+http.addHook('afterResponse', (res) => {
+    console.log(`Got status ${res.status} in ${res.timings?.duration}ms`);
+    // res contains: status, body, headers, proto
+});
+
+// Clear hooks when done
+http.clearHooks();
+
+// FormData example - multipart form uploads
+const fd = new FormData();
+fd.append('field', 'value');
+fd.append('file', http.file('./upload.txt', 'upload.txt', 'text/plain'));
+
+http.post('https://api.example.com/upload', fd.body(), {
+    headers: { 'Content-Type': fd.contentType() }
+});
 ```
 
 ### Request Options
@@ -633,6 +754,8 @@ The optional `options` argument supports:
 * `timeout` (String): Request timeout duration (e.g., `'10s'`, `'500ms'`). Defaults to `'60s'`. Returns status `0` and error `"request timeout"` on failure.
 * `retry` (Number): Number of retry attempts on failure. Defaults to `0`. Uses exponential backoff.
 * `retryDelay` (Number): Initial retry delay in milliseconds. Defaults to `100`. Doubles each retry (up to 32x).
+* `retryOn` (Function): Custom function to determine if request should be retried. Receives response object, returns boolean.
+* `retryDelayFn` (Function): Custom function to calculate retry delay. Receives retry count (1-based), returns delay in milliseconds.
 * `followRedirects` (Boolean): Whether to follow HTTP redirects (3xx). Defaults to `true`.
 * `maxRedirects` (Number): Maximum number of redirects to follow. Defaults to `5`.
 
@@ -644,12 +767,22 @@ const res = http.request({
     retry: 3,        // Retry up to 3 times
     retryDelay: 200  // Start with 200ms, then 400ms, 800ms
 });
+
+// Custom retry conditions - retry on rate limit or server errors
+const res = http.request({
+    method: 'GET',
+    url: 'https://api.example.com/data',
+    retry: 5,
+    retryOn: (r) => r.status === 429 || r.status >= 500,  // Retry on 429 or 5xx
+    retryDelayFn: (count) => count * 1000  // Linear backoff: 1s, 2s, 3s...
+});
 ```
 
 ### Response Object
 
 The `Response` object returned by requests contains:
 * `status` (Number): HTTP status code (e.g., 200, 404). `0` for network/timeout errors.
+* `statusText` (String): HTTP status text (e.g., "OK", "Not Found", "Network Error").
 * `body` (String): Response body as text. **Note:** Will be `null`/empty when `response_sink` is enabled.
 * `json()` (Function): Parses body as JSON and returns the result. Equivalent to `JSON.parse(res.body)`.
 * `bodyContains(str)` (Function): Returns `true` if body contains the given string.
@@ -657,6 +790,9 @@ The `Response` object returned by requests contains:
 * `hasHeader(name, [value])` (Function): Returns `true` if header exists. If `value` is provided, also checks the header value matches.
 * `isJson()` (Function): Returns `true` if body is valid JSON.
 * `headers` (Object): Response headers.
+* `cookies` (Object): Response cookies (parsed from Set-Cookie headers).
+* `error` (String): Error type for failed requests: `TIMEOUT`, `DNS`, `TLS`, `CONNECT`, `RESET`, `NETWORK`.
+* `errorCode` (String): Error code for failed requests: `ETIMEDOUT`, `ENOTFOUND`, `ECERT`, `ECONNREFUSED`, `ECONNRESET`, `EPIPE`, `ENETWORK`.
 * `proto` (String): HTTP protocol version:
     * `"h1"`: HTTP/0.9, HTTP/1.0, HTTP/1.1
     * `"h2"`: HTTP/2
@@ -687,7 +823,21 @@ check(res, {
 });
 ```
 
-**Note:** Use the `name` tag in options to group dynamic URLs (e.g., `/products/1` -> `/products/:id`) for cleaner metrics.
+**Automatic URL Naming:**
+
+Fusillade automatically normalizes URLs for metrics by replacing numeric and UUID segments with `:id`:
+
+```javascript
+// These requests will all be grouped under the same metric name:
+http.get('/users/123');           // Metric: GET /users/:id
+http.get('/users/456');           // Metric: GET /users/:id
+http.get('/orders/abc-def-123');  // Metric: GET /orders/:id (UUID detected)
+
+// Override with explicit name if needed:
+http.get('/users/123', { name: 'GetSpecificUser' });
+```
+
+This auto-naming reduces metric cardinality for APIs with dynamic IDs, making reports cleaner without manual `name` tags.
 
 ### Automatic Cookie Handling
 
@@ -699,6 +849,64 @@ http.post('https://api.example.com/login', { user: 'test', pass: 'secret' });
 
 // Subsequent requests automatically include the session cookie
 http.get('https://api.example.com/dashboard');  // Cookie header sent automatically
+```
+
+### Cookie Manipulation API
+
+For advanced scenarios, you can programmatically manage cookies:
+
+```javascript
+// Get the cookie jar
+const jar = http.cookieJar();
+
+// Set a cookie manually
+jar.set('https://api.example.com', 'session', 'abc123', {
+    domain: 'api.example.com',
+    path: '/',
+    secure: true,
+    httpOnly: true,
+});
+
+// Get a specific cookie
+const session = jar.get('https://api.example.com', 'session');
+print(session.value);  // "abc123"
+
+// Get all cookies for a URL
+const cookies = jar.cookiesForUrl('https://api.example.com/dashboard');
+// Returns array: [{name: 'session', value: 'abc123', ...}, ...]
+
+// Delete a specific cookie
+jar.delete('https://api.example.com', 'session');
+
+// Clear all cookies
+jar.clear();
+```
+
+**Cookie Properties:**
+| Property | Type | Description |
+|----------|------|-------------|
+| `name` | String | Cookie name |
+| `value` | String | Cookie value |
+| `domain` | String | Cookie domain |
+| `path` | String | Cookie path |
+| `expires` | Number | Expiration timestamp (Unix epoch) |
+| `maxAge` | Number | Max age in seconds |
+| `secure` | Boolean | HTTPS only |
+| `httpOnly` | Boolean | HTTP only (no JS access) |
+| `sameSite` | String | SameSite policy (Strict/Lax/None) |
+
+**Response Cookies:**
+
+Cookies from responses are also accessible via `response.cookies`:
+
+```javascript
+const res = http.post('https://api.example.com/login', credentials);
+
+// Access response cookies
+const sessionCookie = res.cookies['session'];
+if (sessionCookie) {
+    print(`Session: ${sessionCookie.value}, expires: ${sessionCookie.expires}`);
+}
 ```
 
 ### ws Module
@@ -734,6 +942,26 @@ check(response, {
 });
 ```
 
+**Custom Failure Messages:**
+
+Check functions can return a string instead of a boolean to provide custom failure messages:
+
+```javascript
+check(response, {
+    'status is 200': (r) => r.status === 200 || `Expected 200, got ${r.status}`,
+    'has valid data': (r) => {
+        const data = r.json();
+        if (!data.items) return 'Missing items array';
+        if (data.items.length === 0) return 'Items array is empty';
+        return true;
+    },
+});
+```
+
+- Return `true` = check passed
+- Return `false` = check failed (generic message)
+- Return `string` = check failed with custom message (the returned string)
+
 * `sleep(seconds)`: Pauses the virtual user for the specified duration (fractional seconds supported). Sleep time is automatically excluded from iteration response time metrics.
 * `sleepRandom(min, max)`: Pauses for a random duration between `min` and `max` seconds. Useful for realistic think times. Sleep time is automatically excluded from iteration response time metrics.
 * `print(message)`: Logs a message to stdout and the worker logs file.
@@ -752,11 +980,45 @@ segment('Login Flow', () => {
 });
 ```
 
+### Console API
+
+Fusillade provides a `console` object with log levels for structured logging:
+
+* `console.log(msg)`: Log at INFO level (default)
+* `console.info(msg)`: Log at INFO level
+* `console.warn(msg)`: Log at WARN level
+* `console.error(msg)`: Log at ERROR level
+* `console.debug(msg)`: Log at DEBUG level (hidden by default)
+* `console.table(array)`: Display array of objects as a table
+
+```javascript
+console.debug('Detailed debugging info');  // Only shown with --log-level debug
+console.log('Normal info message');
+console.warn('Warning: rate limit approaching');
+console.error('Error: request failed');
+
+// Pretty-print tabular data
+console.table([
+    { name: 'Alice', score: 95 },
+    { name: 'Bob', score: 87 },
+]);
+```
+
+**Log Level CLI Flag:**
+
+```bash
+fusillade run test.js --log-level debug   # Show all logs including debug
+fusillade run test.js --log-level warn    # Only show warn and error
+fusillade run test.js --log-level error   # Only show errors
+```
+
 ### Environment & Context
 
 * `__ENV`: Object containing all environment variables. Access via `__ENV.API_KEY`.
 * `__WORKER_ID`: The current worker's numeric ID (0-indexed). Useful for partitioning data across workers.
 * `__SCENARIO`: Name of the currently executing scenario (in multi-scenario tests).
+* `__ITERATION`: The current iteration number for this worker (0-indexed).
+* `__VU_STATE`: Per-VU state object that persists across iterations. Use for storing session data, counters, or any state that should survive between iterations.
 
 ```javascript
 // Use worker ID to partition test data
@@ -764,6 +1026,18 @@ const userId = users[__WORKER_ID % users.length];
 
 // Access environment variables
 const apiKey = __ENV.API_KEY || 'default-key';
+
+// Track per-VU state across iterations
+__VU_STATE.loginCount = (__VU_STATE.loginCount || 0) + 1;
+console.log(`VU ${__WORKER_ID} iteration ${__ITERATION}, logins: ${__VU_STATE.loginCount}`);
+
+// Store session data that persists
+if (!__VU_STATE.token) {
+    const res = http.post('/login', credentials);
+    __VU_STATE.token = res.json().token;
+}
+// Use cached token in subsequent iterations
+http.get('/api/data', { headers: { 'Authorization': `Bearer ${__VU_STATE.token}` } });
 ```
 
 **Automatic `.env` File Loading:**
@@ -1169,6 +1443,12 @@ Executes a load test script.
 **Options:**
 * `-w, --workers <NUM>`: Override the number of concurrent workers (VUs).
 * `-d, --duration <DURATION>`: Override the test duration (e.g., `30s`, `5m`).
+* `--iterations <NUM>`: Override iterations per worker (per-vu-iterations mode).
+* `--warmup <URL>`: Hit this URL before test starts to warm up connection pools.
+* `--response-sink`: Discard response bodies to save memory (enables response sink mode).
+* `--threshold <EXPR>`: Add a threshold expression (repeatable, e.g., `--threshold 'http_req_duration:p95<500'`).
+* `--abort-on-fail`: Abort immediately if any threshold is breached.
+* `--log-level <LEVEL>`: Set console log level: `debug`, `info`, `warn`, `error` (default: `info`).
 * `--headless`: Run in headless mode (no TUI, suitable for CI/CD).
 * `--json`: Output metrics in newline-delimited JSON format to stdout.
 * `--export-json <FILE>`: Save the final summary report to a JSON file.

@@ -1,6 +1,7 @@
 use crate::engine::http_client::HttpClient;
 use crate::stats::{Metric, RequestTimings};
 use crate::utils::parse_duration_str;
+use cookie::{time::OffsetDateTime, Cookie, SameSite};
 use cookie_store::CookieStore;
 use crossbeam_channel::Sender;
 use http::{Method, Request, Uri};
@@ -10,11 +11,234 @@ use rquickjs::{Ctx, Function, IntoJs, Object, Result, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 use url::Url;
+
+/// Call all beforeRequest hooks with the request object (via JS shim)
+fn call_before_request_hooks<'js>(ctx: &Ctx<'js>, req_obj: &Object<'js>) {
+    if let Ok(call_hooks_fn) = ctx
+        .globals()
+        .get::<_, Function>("__http_callBeforeRequestHooks")
+    {
+        let _ = call_hooks_fn.call::<_, ()>((req_obj.clone(),));
+    }
+}
+
+/// Call all afterResponse hooks with the response object (via JS shim)
+fn call_after_response_hooks<'js>(ctx: &Ctx<'js>, res_obj: &Object<'js>) {
+    if let Ok(call_hooks_fn) = ctx
+        .globals()
+        .get::<_, Function>("__http_callAfterResponseHooks")
+    {
+        let _ = call_hooks_fn.call::<_, ()>((res_obj.clone(),));
+    }
+}
+
+/// Check if a path segment looks like an ID (numeric, UUID, hex, etc.)
+fn is_id_segment(segment: &str) -> bool {
+    // Pure numeric
+    if segment.chars().all(|c| c.is_ascii_digit()) && !segment.is_empty() {
+        return true;
+    }
+
+    // UUID pattern: 8-4-4-4-12 hex chars with dashes
+    // e.g., 550e8400-e29b-41d4-a716-446655440000
+    if segment.len() == 36 && segment.chars().filter(|c| *c == '-').count() == 4 {
+        let parts: Vec<&str> = segment.split('-').collect();
+        if parts.len() == 5
+            && parts[0].len() == 8
+            && parts[1].len() == 4
+            && parts[2].len() == 4
+            && parts[3].len() == 4
+            && parts[4].len() == 12
+            && parts
+                .iter()
+                .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return true;
+        }
+    }
+
+    // UUID without dashes (32 hex chars)
+    if segment.len() == 32 && segment.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+
+    // Short IDs that are mostly alphanumeric with mixed case/numbers
+    // e.g., "abc123", "X7yZ9" - but not common words
+    if segment.len() >= 4 && segment.len() <= 24 {
+        let has_digit = segment.chars().any(|c| c.is_ascii_digit());
+        let all_alnum = segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if has_digit && all_alnum {
+            // Likely an ID if it has digits mixed with letters
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Normalize a URL path for metric naming by replacing variable segments with :id
+fn normalize_url_for_metrics(url: &str) -> String {
+    // Parse URL
+    let parsed = match Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return url.to_string(),
+    };
+
+    let host = parsed.host_str().unwrap_or("unknown");
+    let path = parsed.path();
+
+    // Build host with port if non-standard
+    let host_with_port = if let Some(port) = parsed.port() {
+        format!("{}:{}", host, port)
+    } else {
+        host.to_string()
+    };
+
+    // Replace segments that look like IDs with :id
+    let normalized_path = path
+        .split('/')
+        .map(|segment| {
+            if segment.is_empty() {
+                segment.to_string()
+            } else if is_id_segment(segment) {
+                ":id".to_string()
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    format!("{}{}", host_with_port, normalized_path)
+}
+
+/// JavaScript-exposed CookieJar class for manual cookie manipulation
+/// Similar to k6's cookie jar API
+#[derive(Clone)]
+pub struct JsCookieJar {
+    store: Rc<RefCell<CookieStore>>,
+}
+
+impl JsCookieJar {
+    /// Set a cookie for a URL
+    pub fn set<'js>(
+        &self,
+        url: String,
+        name: String,
+        value: String,
+        opts: Option<Object<'js>>,
+    ) -> Result<()> {
+        let url_parsed = Url::parse(&url)
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
+
+        let mut cookie = Cookie::new(name.clone(), value);
+
+        if let Some(opts) = opts {
+            // Domain
+            if let Ok(domain) = opts.get::<_, String>("domain") {
+                cookie.set_domain(domain);
+            }
+
+            // Path
+            if let Ok(path) = opts.get::<_, String>("path") {
+                cookie.set_path(path);
+            }
+
+            // Secure
+            if let Ok(secure) = opts.get::<_, bool>("secure") {
+                cookie.set_secure(secure);
+            }
+
+            // HttpOnly
+            if let Ok(http_only) = opts.get::<_, bool>("httpOnly") {
+                cookie.set_http_only(http_only);
+            }
+
+            // SameSite
+            if let Ok(same_site) = opts.get::<_, String>("sameSite") {
+                let ss = match same_site.to_lowercase().as_str() {
+                    "strict" => SameSite::Strict,
+                    "lax" => SameSite::Lax,
+                    "none" => SameSite::None,
+                    _ => SameSite::Lax,
+                };
+                cookie.set_same_site(ss);
+            }
+
+            // Expires (Unix timestamp in seconds)
+            if let Ok(expires) = opts.get::<_, i64>("expires") {
+                if let Ok(dt) = OffsetDateTime::from_unix_timestamp(expires) {
+                    cookie.set_expires(dt);
+                }
+            }
+
+            // MaxAge (in seconds)
+            if let Ok(max_age) = opts.get::<_, i64>("maxAge") {
+                cookie.set_max_age(cookie::time::Duration::seconds(max_age));
+            }
+        }
+
+        let mut store = self.store.borrow_mut();
+        let _ = store.insert_raw(&cookie, &url_parsed);
+        Ok(())
+    }
+
+    /// Get a cookie value by name for a URL
+    pub fn get(&self, url: String, name: String) -> Result<Option<String>> {
+        let url_parsed = Url::parse(&url)
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
+
+        let store = self.store.borrow();
+        for cookie in store.matches(&url_parsed) {
+            if cookie.name() == name {
+                return Ok(Some(cookie.value().to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Get all cookies for a URL as a HashMap
+    pub fn cookies_for_url_map(&self, url: String) -> Result<HashMap<String, String>> {
+        let url_parsed = Url::parse(&url)
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
+
+        let mut cookies = HashMap::new();
+        let store = self.store.borrow();
+        for cookie in store.matches(&url_parsed) {
+            cookies.insert(cookie.name().to_string(), cookie.value().to_string());
+        }
+        Ok(cookies)
+    }
+
+    /// Clear all cookies
+    pub fn clear(&self) {
+        *self.store.borrow_mut() = CookieStore::default();
+    }
+
+    /// Delete a specific cookie by setting its expiry to the past
+    pub fn delete(&self, url: String, name: String) -> Result<()> {
+        let url_parsed = Url::parse(&url)
+            .map_err(|_| rquickjs::Error::new_from_js("Invalid URL", "UrlError"))?;
+
+        // To delete a cookie, insert one with the same name but expired
+        let mut cookie = Cookie::new(name, "");
+        // Set expiry to Unix epoch (1970-01-01)
+        cookie.set_expires(OffsetDateTime::UNIX_EPOCH);
+        cookie.set_max_age(cookie::time::Duration::ZERO);
+
+        let mut store = self.store.borrow_mut();
+        let _ = store.insert_raw(&cookie, &url_parsed);
+        Ok(())
+    }
+}
 
 /// Global HTTP request defaults that can be set via http.setDefaults()
 #[derive(Default, Clone)]
@@ -52,19 +276,72 @@ fn url_to_uri(url: &Url) -> Option<Uri> {
         .ok()
 }
 
+/// Map HTTP status code to status text
+fn status_text_for_code(code: u16) -> String {
+    match code {
+        200 => "OK".to_string(),
+        201 => "Created".to_string(),
+        204 => "No Content".to_string(),
+        301 => "Moved Permanently".to_string(),
+        302 => "Found".to_string(),
+        304 => "Not Modified".to_string(),
+        400 => "Bad Request".to_string(),
+        401 => "Unauthorized".to_string(),
+        403 => "Forbidden".to_string(),
+        404 => "Not Found".to_string(),
+        405 => "Method Not Allowed".to_string(),
+        408 => "Request Timeout".to_string(),
+        429 => "Too Many Requests".to_string(),
+        500 => "Internal Server Error".to_string(),
+        502 => "Bad Gateway".to_string(),
+        503 => "Service Unavailable".to_string(),
+        504 => "Gateway Timeout".to_string(),
+        0 => "Network Error".to_string(),
+        _ => "".to_string(),
+    }
+}
+
 #[derive(Debug)]
 pub struct HttpResponse {
     pub status: u16,
+    pub status_text: String,
     pub body: Bytes,
     pub headers: HashMap<String, String>,
     pub timings: RequestTimings,
     pub proto: String,
+    /// Raw Set-Cookie header values for parsing into cookies object
+    pub set_cookie_headers: Vec<String>,
+    /// Error type for failed requests (e.g., "TIMEOUT", "DNS", "TLS", "CONNECT", "RESET")
+    pub error: Option<String>,
+    /// Error code for failed requests (e.g., "ETIMEDOUT", "ENOTFOUND", "ECERT", "ECONNREFUSED")
+    pub error_code: Option<String>,
+}
+
+/// Categorize an error string into a type and code for better error handling in JS
+fn categorize_error(error: &str) -> (String, String) {
+    let lower = error.to_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        ("TIMEOUT".to_string(), "ETIMEDOUT".to_string())
+    } else if lower.contains("dns") || lower.contains("resolve") || lower.contains("getaddrinfo") {
+        ("DNS".to_string(), "ENOTFOUND".to_string())
+    } else if lower.contains("certificate") || lower.contains("ssl") || lower.contains("tls") {
+        ("TLS".to_string(), "ECERT".to_string())
+    } else if lower.contains("connection refused") {
+        ("CONNECT".to_string(), "ECONNREFUSED".to_string())
+    } else if lower.contains("reset") {
+        ("RESET".to_string(), "ECONNRESET".to_string())
+    } else if lower.contains("broken pipe") {
+        ("RESET".to_string(), "EPIPE".to_string())
+    } else {
+        ("NETWORK".to_string(), "ENETWORK".to_string())
+    }
 }
 
 impl<'js> IntoJs<'js> for HttpResponse {
     fn into_js(self, ctx: &Ctx<'js>) -> Result<Value<'js>> {
         let obj = Object::new(ctx.clone())?;
         obj.set("status", self.status)?;
+        obj.set("statusText", self.status_text)?;
         obj.set("proto", self.proto)?;
 
         // Defer String conversion to here (avoiding intermediate Rust String if possible by strictly using ref)
@@ -173,6 +450,50 @@ impl<'js> IntoJs<'js> for HttpResponse {
             }),
         )?;
 
+        // Add cookies property - parse Set-Cookie headers
+        // Format: { cookieName: { value, domain, path, expires, httpOnly, secure, sameSite }, ... }
+        let cookies_obj = Object::new(ctx.clone())?;
+        for set_cookie_str in &self.set_cookie_headers {
+            if let Ok(cookie) = Cookie::parse(set_cookie_str.as_str()) {
+                let cookie_info = Object::new(ctx.clone())?;
+                cookie_info.set("value", cookie.value())?;
+
+                if let Some(domain) = cookie.domain() {
+                    cookie_info.set("domain", domain)?;
+                }
+                if let Some(path) = cookie.path() {
+                    cookie_info.set("path", path)?;
+                }
+                if let Some(cookie::Expiration::DateTime(dt)) = cookie.expires() {
+                    cookie_info.set("expires", dt.unix_timestamp())?;
+                }
+                if let Some(max_age) = cookie.max_age() {
+                    cookie_info.set("maxAge", max_age.whole_seconds())?;
+                }
+                cookie_info.set("httpOnly", cookie.http_only().unwrap_or(false))?;
+                cookie_info.set("secure", cookie.secure().unwrap_or(false))?;
+                if let Some(same_site) = cookie.same_site() {
+                    let ss_str = match same_site {
+                        SameSite::Strict => "Strict",
+                        SameSite::Lax => "Lax",
+                        SameSite::None => "None",
+                    };
+                    cookie_info.set("sameSite", ss_str)?;
+                }
+
+                cookies_obj.set(cookie.name(), cookie_info)?;
+            }
+        }
+        obj.set("cookies", cookies_obj)?;
+
+        // Add error and errorCode fields for failed requests
+        if let Some(ref err) = self.error {
+            obj.set("error", err.clone())?;
+        }
+        if let Some(ref code) = self.error_code {
+            obj.set("errorCode", code.clone())?;
+        }
+
         Ok(obj.into_value())
     }
 }
@@ -270,9 +591,32 @@ pub fn register_sync(
             let retry_delay_ms: u64 = opts.get("retryDelay").unwrap_or(100);
             let mut retry_count: u32 = 0;
 
+            // Custom retry condition (retryOn function)
+            let retry_on_fn: Option<Function> = opts.get("retryOn").ok();
+            // Custom retry delay function (retryDelayFn function)
+            let retry_delay_fn: Option<Function> = opts.get("retryDelayFn").ok();
+
             // Redirect configuration
             let follow_redirects: bool = opts.get("followRedirects").unwrap_or(true);
             let max_redirects: u32 = opts.get("maxRedirects").unwrap_or(5);
+
+            // Call beforeRequest hooks
+            {
+                let req_obj = Object::new(ctx.clone())?;
+                req_obj.set("method", method_str.clone())?;
+                req_obj.set("url", url_str.clone())?;
+                if let Some(ref b) = body {
+                    req_obj.set("body", b.clone())?;
+                }
+                if let Some(ref h) = headers_map {
+                    let headers_obj = Object::new(ctx.clone())?;
+                    for (k, v) in h {
+                        headers_obj.set(k.as_str(), v.as_str())?;
+                    }
+                    req_obj.set("headers", headers_obj)?;
+                }
+                call_before_request_hooks(ctx, &req_obj);
+            }
 
             let mut redirects = 0;
             loop {
@@ -395,7 +739,9 @@ pub fn register_sync(
                         // When response_sink is enabled, body will be empty (Bytes::new())
                         let body = response.body().clone();
 
-                        let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
+                        let metric_name = name_opt
+                            .clone()
+                            .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                         let _ = tx.send(Metric::Request {
                             name: format!(
                                 "{}{}",
@@ -410,8 +756,8 @@ pub fn register_sync(
 
                         {
                             let mut store = cs_base.borrow_mut();
-                            for cookie_val in set_cookie_headers {
-                                let _ = store.parse(&cookie_val, &url_parsed);
+                            for cookie_val in &set_cookie_headers {
+                                let _ = store.parse(cookie_val, &url_parsed);
                             }
                         }
 
@@ -430,12 +776,67 @@ pub fn register_sync(
                             }
                         }
 
+                        // Check custom retry condition (retryOn)
+                        if let Some(ref retry_fn) = retry_on_fn {
+                            if retry_count < max_retries {
+                                // Create response object for retry check
+                                let res_obj = Object::new(ctx.clone())?;
+                                res_obj.set("status", status)?;
+                                res_obj.set("body", String::from_utf8_lossy(&body).to_string())?;
+                                let headers_obj = Object::new(ctx.clone())?;
+                                for (k, v) in &resp_headers {
+                                    headers_obj.set(k.as_str(), v.as_str())?;
+                                }
+                                res_obj.set("headers", headers_obj)?;
+
+                                if let Ok(should_retry) =
+                                    retry_fn.call::<_, rquickjs::Value>((res_obj,))
+                                {
+                                    if should_retry.as_bool().unwrap_or(false) {
+                                        retry_count += 1;
+                                        // Calculate delay using retryDelayFn if provided
+                                        let delay_ms = if let Some(ref delay_fn) = retry_delay_fn {
+                                            delay_fn.call::<_, u64>((retry_count,)).unwrap_or(
+                                                retry_delay_ms * (1 << (retry_count - 1).min(5)),
+                                            )
+                                        } else {
+                                            retry_delay_ms * (1 << (retry_count - 1).min(5))
+                                        };
+                                        runtime.block_on(async {
+                                            tokio::time::sleep(Duration::from_millis(delay_ms))
+                                                .await;
+                                        });
+                                        redirects = 0;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Call afterResponse hooks
+                        {
+                            let res_obj = Object::new(ctx.clone())?;
+                            res_obj.set("status", status)?;
+                            res_obj.set("body", String::from_utf8_lossy(&body).to_string())?;
+                            let headers_obj = Object::new(ctx.clone())?;
+                            for (k, v) in &resp_headers {
+                                headers_obj.set(k.as_str(), v.as_str())?;
+                            }
+                            res_obj.set("headers", headers_obj)?;
+                            res_obj.set("proto", proto.clone())?;
+                            call_after_response_hooks(ctx, &res_obj);
+                        }
+
                         return Ok(HttpResponse {
                             status,
+                            status_text: status_text_for_code(status),
                             body,
                             headers: resp_headers,
                             timings,
                             proto,
+                            set_cookie_headers,
+                            error: None,
+                            error_code: None,
                         });
                     }
                     Err(e) => {
@@ -453,7 +854,9 @@ pub fn register_sync(
                         }
 
                         let duration = start.elapsed();
-                        let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
+                        let metric_name = name_opt
+                            .clone()
+                            .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
 
                         // Fallback timings for error case
                         let timings = RequestTimings {
@@ -472,12 +875,17 @@ pub fn register_sync(
                             error: Some(e.to_string()),
                             tags: tags.clone(),
                         });
+                        let (error_type, error_code) = categorize_error(&e.to_string());
                         return Ok(HttpResponse {
                             status: 0,
+                            status_text: status_text_for_code(0),
                             body: Bytes::from(e.to_string()),
                             headers: HashMap::new(),
                             timings,
                             proto: "h1".to_string(),
+                            set_cookie_headers: Vec::new(),
+                            error: Some(error_type),
+                            error_code: Some(error_code),
                         });
                     }
                 }
@@ -667,8 +1075,9 @@ pub fn register_sync(
                             }
                             let body = response.body().clone();
 
-                            let metric_name =
-                                name_tag.clone().unwrap_or_else(|| current_url.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&current_url));
                             let _ = tx.send(Metric::Request {
                                 name: format!(
                                     "{}{}",
@@ -683,8 +1092,8 @@ pub fn register_sync(
 
                             {
                                 let mut store = cs_get.borrow_mut();
-                                for cookie_val in set_cookie_headers {
-                                    if store.parse(&cookie_val, &url_parsed).is_ok() {}
+                                for cookie_val in &set_cookie_headers {
+                                    if store.parse(cookie_val, &url_parsed).is_ok() {}
                                 }
                             }
 
@@ -703,10 +1112,14 @@ pub fn register_sync(
                             }
                             return Ok(HttpResponse {
                                 status,
+                                status_text: status_text_for_code(status),
                                 body,
                                 headers: resp_headers,
                                 timings,
                                 proto,
+                                set_cookie_headers,
+                                error: None,
+                                error_code: None,
                             });
                         }
                         Err(e) => {
@@ -724,8 +1137,9 @@ pub fn register_sync(
                             }
 
                             let duration = start.elapsed();
-                            let metric_name =
-                                name_tag.clone().unwrap_or_else(|| current_url.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&current_url));
                             let timings = RequestTimings {
                                 duration,
                                 ..Default::default()
@@ -741,12 +1155,17 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
+                            let (error_type, error_code) = categorize_error(&e.to_string());
                             return Ok(HttpResponse {
                                 status: 0,
+                                status_text: status_text_for_code(0),
                                 body: Bytes::from(e.to_string()),
                                 headers: HashMap::new(),
                                 timings,
                                 proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
                             });
                         }
                     }
@@ -946,8 +1365,9 @@ pub fn register_sync(
                                         duration,
                                         ..Default::default()
                                     };
-                                    let metric_name =
-                                        name_tag.clone().unwrap_or_else(|| current_url.clone());
+                                    let metric_name = name_tag
+                                        .clone()
+                                        .unwrap_or_else(|| normalize_url_for_metrics(&current_url));
                                     let _ = tx.send(Metric::Request {
                                         name: format!(
                                             "{}{}",
@@ -960,12 +1380,24 @@ pub fn register_sync(
                                         tags: tags.clone(),
                                     });
 
+                                    // For multipart, we don't have easy access to set-cookie headers from reqwest
+                                    // Extract from resp_headers if present
+                                    let mut multipart_set_cookie: Vec<String> = Vec::new();
+                                    if let Some(sc) = resp_headers.get("set-cookie") {
+                                        for line in sc.lines() {
+                                            multipart_set_cookie.push(line.to_string());
+                                        }
+                                    }
                                     return Ok(HttpResponse {
                                         status,
+                                        status_text: status_text_for_code(status),
                                         body: Bytes::from(body_bytes.to_vec()),
                                         headers: resp_headers,
                                         timings,
                                         proto,
+                                        set_cookie_headers: multipart_set_cookie,
+                                        error: None,
+                                        error_code: None,
                                     });
                                 }
                                 Err(e) => {
@@ -973,8 +1405,9 @@ pub fn register_sync(
                                         duration,
                                         ..Default::default()
                                     };
-                                    let metric_name =
-                                        name_tag.clone().unwrap_or_else(|| current_url.clone());
+                                    let metric_name = name_tag
+                                        .clone()
+                                        .unwrap_or_else(|| normalize_url_for_metrics(&current_url));
                                     let _ = tx.send(Metric::Request {
                                         name: format!(
                                             "{}{}",
@@ -986,12 +1419,17 @@ pub fn register_sync(
                                         error: Some(e.to_string()),
                                         tags: tags.clone(),
                                     });
+                                    let (error_type, error_code) = categorize_error(&e.to_string());
                                     return Ok(HttpResponse {
                                         status: 0,
+                                        status_text: status_text_for_code(0),
                                         body: Bytes::from(e.to_string()),
                                         headers: HashMap::new(),
                                         timings,
                                         proto: "h1".to_string(),
+                                        set_cookie_headers: Vec::new(),
+                                        error: Some(error_type),
+                                        error_code: Some(error_code),
                                     });
                                 }
                             }
@@ -1109,8 +1547,9 @@ pub fn register_sync(
 
                             let body = response.body().clone();
 
-                            let metric_name =
-                                name_tag.clone().unwrap_or_else(|| current_url.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&current_url));
                             let _ = tx.send(Metric::Request {
                                 name: format!(
                                     "{}{}",
@@ -1125,8 +1564,8 @@ pub fn register_sync(
 
                             {
                                 let mut store = cs_post.borrow_mut();
-                                for cookie_val in set_cookie_headers {
-                                    let _ = store.parse(&cookie_val, &url_parsed);
+                                for cookie_val in &set_cookie_headers {
+                                    let _ = store.parse(cookie_val, &url_parsed);
                                 }
                             }
 
@@ -1147,10 +1586,14 @@ pub fn register_sync(
                             }
                             return Ok(HttpResponse {
                                 status,
+                                status_text: status_text_for_code(status),
                                 body,
                                 headers: resp_headers,
                                 timings,
                                 proto,
+                                set_cookie_headers,
+                                error: None,
+                                error_code: None,
                             });
                         }
                         Err(e) => {
@@ -1170,8 +1613,9 @@ pub fn register_sync(
                             }
 
                             let duration = start.elapsed();
-                            let metric_name =
-                                name_tag.clone().unwrap_or_else(|| current_url.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&current_url));
                             let timings = RequestTimings {
                                 duration,
                                 ..Default::default()
@@ -1187,12 +1631,17 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
+                            let (error_type, error_code) = categorize_error(&e.to_string());
                             return Ok(HttpResponse {
                                 status: 0,
+                                status_text: status_text_for_code(0),
                                 body: Bytes::from(e.to_string()),
                                 headers: HashMap::new(),
                                 timings,
                                 proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
                             });
                         }
                     }
@@ -1340,6 +1789,7 @@ pub fn register_sync(
                             let proto = version_to_proto(response.version());
                             let mut resp_headers: HashMap<String, String> =
                                 HashMap::with_capacity(response.headers().len());
+                            let mut set_cookie_headers: Vec<String> = Vec::new();
                             for (name, val) in response.headers() {
                                 if let Ok(val_str) = val.to_str() {
                                     let name_str = name.to_string();
@@ -1352,6 +1802,7 @@ pub fn register_sync(
                                                 v.push_str(val_str);
                                             })
                                             .or_insert_with(|| val_str.to_string());
+                                        set_cookie_headers.push(val_str.to_string());
                                     } else {
                                         resp_headers
                                             .entry(name_str)
@@ -1364,7 +1815,9 @@ pub fn register_sync(
                                 }
                             }
                             let body = response.body().clone();
-                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                             let _ = tx.send(Metric::Request {
                                 name: format!(
                                     "{}{}",
@@ -1378,10 +1831,14 @@ pub fn register_sync(
                             });
                             return Ok(HttpResponse {
                                 status,
+                                status_text: status_text_for_code(status),
                                 body,
                                 headers: resp_headers,
                                 timings,
                                 proto,
+                                set_cookie_headers,
+                                error: None,
+                                error_code: None,
                             });
                         }
                         Err(e) => {
@@ -1401,7 +1858,9 @@ pub fn register_sync(
                                 duration: start.elapsed(),
                                 ..Default::default()
                             };
-                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                             let _ = tx.send(Metric::Request {
                                 name: format!(
                                     "{}{}",
@@ -1413,12 +1872,17 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
+                            let (error_type, error_code) = categorize_error(&e.to_string());
                             return Ok(HttpResponse {
                                 status: 0,
+                                status_text: status_text_for_code(0),
                                 body: Bytes::from(e.to_string()),
                                 headers: HashMap::new(),
                                 timings,
                                 proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
                             });
                         }
                     }
@@ -1565,6 +2029,7 @@ pub fn register_sync(
                             let proto = version_to_proto(response.version());
                             let mut resp_headers: HashMap<String, String> =
                                 HashMap::with_capacity(response.headers().len());
+                            let mut set_cookie_headers: Vec<String> = Vec::new();
                             for (name, val) in response.headers() {
                                 if let Ok(val_str) = val.to_str() {
                                     let name_str = name.to_string();
@@ -1577,6 +2042,7 @@ pub fn register_sync(
                                                 v.push_str(val_str);
                                             })
                                             .or_insert_with(|| val_str.to_string());
+                                        set_cookie_headers.push(val_str.to_string());
                                     } else {
                                         resp_headers
                                             .entry(name_str)
@@ -1589,7 +2055,9 @@ pub fn register_sync(
                                 }
                             }
                             let body = response.body().clone();
-                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                             let _ = tx.send(Metric::Request {
                                 name: format!(
                                     "{}{}",
@@ -1603,10 +2071,14 @@ pub fn register_sync(
                             });
                             return Ok(HttpResponse {
                                 status,
+                                status_text: status_text_for_code(status),
                                 body,
                                 headers: resp_headers,
                                 timings,
                                 proto,
+                                set_cookie_headers,
+                                error: None,
+                                error_code: None,
                             });
                         }
                         Err(e) => {
@@ -1626,7 +2098,9 @@ pub fn register_sync(
                                 duration: start.elapsed(),
                                 ..Default::default()
                             };
-                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                             let _ = tx.send(Metric::Request {
                                 name: format!(
                                     "{}{}",
@@ -1638,12 +2112,17 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
+                            let (error_type, error_code) = categorize_error(&e.to_string());
                             return Ok(HttpResponse {
                                 status: 0,
+                                status_text: status_text_for_code(0),
                                 body: Bytes::from(e.to_string()),
                                 headers: HashMap::new(),
                                 timings,
                                 proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
                             });
                         }
                     }
@@ -1791,6 +2270,7 @@ pub fn register_sync(
                             let proto = version_to_proto(response.version());
                             let mut resp_headers: HashMap<String, String> =
                                 HashMap::with_capacity(response.headers().len());
+                            let mut set_cookie_headers: Vec<String> = Vec::new();
                             for (name, val) in response.headers() {
                                 if let Ok(val_str) = val.to_str() {
                                     let name_str = name.to_string();
@@ -1803,6 +2283,7 @@ pub fn register_sync(
                                                 v.push_str(val_str);
                                             })
                                             .or_insert_with(|| val_str.to_string());
+                                        set_cookie_headers.push(val_str.to_string());
                                     } else {
                                         resp_headers
                                             .entry(name_str)
@@ -1815,7 +2296,9 @@ pub fn register_sync(
                                 }
                             }
                             let body = response.body().clone();
-                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                             let _ = tx.send(Metric::Request {
                                 name: format!(
                                     "{}{}",
@@ -1829,10 +2312,14 @@ pub fn register_sync(
                             });
                             return Ok(HttpResponse {
                                 status,
+                                status_text: status_text_for_code(status),
                                 body,
                                 headers: resp_headers,
                                 timings,
                                 proto,
+                                set_cookie_headers,
+                                error: None,
+                                error_code: None,
                             });
                         }
                         Err(e) => {
@@ -1852,7 +2339,9 @@ pub fn register_sync(
                                 duration: start.elapsed(),
                                 ..Default::default()
                             };
-                            let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                            let metric_name = name_tag
+                                .clone()
+                                .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                             let _ = tx.send(Metric::Request {
                                 name: format!(
                                     "{}{}",
@@ -1864,12 +2353,17 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
+                            let (error_type, error_code) = categorize_error(&e.to_string());
                             return Ok(HttpResponse {
                                 status: 0,
+                                status_text: status_text_for_code(0),
                                 body: Bytes::from(e.to_string()),
                                 headers: HashMap::new(),
                                 timings,
                                 proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
                             });
                         }
                     }
@@ -1996,6 +2490,7 @@ pub fn register_sync(
                         let proto = version_to_proto(response.version());
                         let mut resp_headers: HashMap<String, String> =
                             HashMap::with_capacity(response.headers().len());
+                        let mut set_cookie_headers: Vec<String> = Vec::new();
                         for (name, val) in response.headers() {
                             if let Ok(val_str) = val.to_str() {
                                 let name_str = name.to_string();
@@ -2008,6 +2503,7 @@ pub fn register_sync(
                                             v.push_str(val_str);
                                         })
                                         .or_insert_with(|| val_str.to_string());
+                                    set_cookie_headers.push(val_str.to_string());
                                 } else {
                                     resp_headers
                                         .entry(name_str)
@@ -2019,7 +2515,9 @@ pub fn register_sync(
                                 }
                             }
                         }
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                        let metric_name = name_tag
+                            .clone()
+                            .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                         let _ = tx.send(Metric::Request {
                             name: format!(
                                 "{}{}",
@@ -2033,10 +2531,14 @@ pub fn register_sync(
                         });
                         Ok(HttpResponse {
                             status,
+                            status_text: status_text_for_code(status),
                             body: Bytes::new(),
                             headers: resp_headers,
                             timings,
                             proto,
+                            set_cookie_headers,
+                            error: None,
+                            error_code: None,
                         })
                     }
                     Err(e) => {
@@ -2044,7 +2546,9 @@ pub fn register_sync(
                             duration: start.elapsed(),
                             ..Default::default()
                         };
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                        let metric_name = name_tag
+                            .clone()
+                            .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                         let _ = tx.send(Metric::Request {
                             name: format!(
                                 "{}{}",
@@ -2056,12 +2560,17 @@ pub fn register_sync(
                             error: Some(e.to_string()),
                             tags: tags.clone(),
                         });
+                        let (error_type, error_code) = categorize_error(&e.to_string());
                         Ok(HttpResponse {
                             status: 0,
+                            status_text: status_text_for_code(0),
                             body: Bytes::from(e.to_string()),
                             headers: HashMap::new(),
                             timings,
                             proto: "h1".to_string(),
+                            set_cookie_headers: Vec::new(),
+                            error: Some(error_type),
+                            error_code: Some(error_code),
                         })
                     }
                 }
@@ -2187,6 +2696,7 @@ pub fn register_sync(
                         let proto = version_to_proto(response.version());
                         let mut resp_headers: HashMap<String, String> =
                             HashMap::with_capacity(response.headers().len());
+                        let mut set_cookie_headers: Vec<String> = Vec::new();
                         for (name, val) in response.headers() {
                             if let Ok(val_str) = val.to_str() {
                                 let name_str = name.to_string();
@@ -2199,6 +2709,7 @@ pub fn register_sync(
                                             v.push_str(val_str);
                                         })
                                         .or_insert_with(|| val_str.to_string());
+                                    set_cookie_headers.push(val_str.to_string());
                                 } else {
                                     resp_headers
                                         .entry(name_str)
@@ -2211,7 +2722,9 @@ pub fn register_sync(
                             }
                         }
                         let body = response.body().clone();
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                        let metric_name = name_tag
+                            .clone()
+                            .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                         let _ = tx.send(Metric::Request {
                             name: format!(
                                 "{}{}",
@@ -2225,10 +2738,14 @@ pub fn register_sync(
                         });
                         Ok(HttpResponse {
                             status,
+                            status_text: status_text_for_code(status),
                             body,
                             headers: resp_headers,
                             timings,
                             proto,
+                            set_cookie_headers,
+                            error: None,
+                            error_code: None,
                         })
                     }
                     Err(e) => {
@@ -2236,7 +2753,9 @@ pub fn register_sync(
                             duration: start.elapsed(),
                             ..Default::default()
                         };
-                        let metric_name = name_tag.clone().unwrap_or_else(|| url_str.clone());
+                        let metric_name = name_tag
+                            .clone()
+                            .unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                         let _ = tx.send(Metric::Request {
                             name: format!(
                                 "{}{}",
@@ -2248,12 +2767,17 @@ pub fn register_sync(
                             error: Some(e.to_string()),
                             tags: tags.clone(),
                         });
+                        let (error_type, error_code) = categorize_error(&e.to_string());
                         Ok(HttpResponse {
                             status: 0,
+                            status_text: status_text_for_code(0),
                             body: Bytes::from(e.to_string()),
                             headers: HashMap::new(),
                             timings,
                             proto: "h1".to_string(),
+                            set_cookie_headers: Vec::new(),
+                            error: Some(error_type),
+                            error_code: Some(error_code),
                         })
                     }
                 }
@@ -2358,6 +2882,33 @@ pub fn register_sync(
         }),
     )?;
 
+    // Initialize HTTP hooks infrastructure in JavaScript
+    // This avoids Rust lifetime issues with storing JS functions
+    ctx.eval::<(), _>(
+        r#"
+        globalThis.__http_hooks = globalThis.__http_hooks || {
+            beforeRequest: [],
+            afterResponse: []
+        };
+        globalThis.__http_callBeforeRequestHooks = function(req) {
+            for (var i = 0; i < globalThis.__http_hooks.beforeRequest.length; i++) {
+                try {
+                    globalThis.__http_hooks.beforeRequest[i](req);
+                } catch(e) {}
+            }
+        };
+        globalThis.__http_callAfterResponseHooks = function(res) {
+            for (var i = 0; i < globalThis.__http_hooks.afterResponse.length; i++) {
+                try {
+                    globalThis.__http_hooks.afterResponse[i](res);
+                } catch(e) {}
+            }
+        };
+    "#,
+    )?;
+
+    // http.addHook and http.clearHooks are defined purely in JS (see end of function)
+
     // http.batch(requests) - Execute multiple requests in parallel
     // requests: Array of { method, url, body?, headers?, name?, tags? }
     let c_batch = client.clone();
@@ -2403,10 +2954,14 @@ pub fn register_sync(
                         Err(_) => {
                             return HttpResponse {
                                 status: 0,
+                                status_text: status_text_for_code(0),
                                 body: Bytes::from("Invalid URL"),
                                 headers: HashMap::new(),
                                 timings: RequestTimings::default(),
                                 proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some("NETWORK".to_string()),
+                                error_code: Some("EINVAL".to_string()),
                             };
                         }
                     };
@@ -2417,10 +2972,14 @@ pub fn register_sync(
                         None => {
                             return HttpResponse {
                                 status: 0,
+                                status_text: status_text_for_code(0),
                                 body: Bytes::from("Failed to convert URL to URI"),
                                 headers: HashMap::new(),
                                 timings: RequestTimings::default(),
                                 proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some("NETWORK".to_string()),
+                                error_code: Some("EINVAL".to_string()),
                             };
                         }
                     };
@@ -2441,10 +3000,14 @@ pub fn register_sync(
                         Err(_) => {
                             return HttpResponse {
                                 status: 0,
+                                status_text: status_text_for_code(0),
                                 body: Bytes::from("Failed to build request"),
                                 headers: HashMap::new(),
                                 timings: RequestTimings::default(),
                                 proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some("NETWORK".to_string()),
+                                error_code: Some("EINVAL".to_string()),
                             };
                         }
                     };
@@ -2458,7 +3021,7 @@ pub fn register_sync(
                             Err(_) => {
                                 let duration = start.elapsed();
                                 let timings = RequestTimings { duration, ..Default::default() };
-                                let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
+                                let metric_name = name_opt.clone().unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                                 let _ = tx.send(Metric::Request {
                                     name: format!("{}{}", crate::bridge::group::get_current_group_prefix(), metric_name),
                                     timings,
@@ -2468,10 +3031,14 @@ pub fn register_sync(
                                 });
                                 return HttpResponse {
                                     status: 0,
+                                    status_text: status_text_for_code(0),
                                     body: Bytes::from("request timeout"),
                                     headers: HashMap::new(),
                                     timings,
                                     proto: "h1".to_string(),
+                                    set_cookie_headers: Vec::new(),
+                                    error: Some("TIMEOUT".to_string()),
+                                    error_code: Some("ETIMEDOUT".to_string()),
                                 };
                             }
                         }
@@ -2484,6 +3051,7 @@ pub fn register_sync(
                             let status = response.status().as_u16();
                             let proto = version_to_proto(response.version());
                             let mut resp_headers: HashMap<String, String> = HashMap::with_capacity(response.headers().len());
+                            let mut set_cookie_headers: Vec<String> = Vec::new();
                             for (name, val) in response.headers() {
                                 if let Ok(val_str) = val.to_str() {
                                     let name_str = name.to_string();
@@ -2492,6 +3060,7 @@ pub fn register_sync(
                                     resp_headers.entry(name_str)
                                         .and_modify(|v| { v.push('\n'); v.push_str(val_str); })
                                         .or_insert_with(|| val_str.to_string());
+                                    set_cookie_headers.push(val_str.to_string());
                                 } else {
                                     resp_headers.entry(name_str)
                                         .and_modify(|v| { v.push_str(", "); v.push_str(val_str); })
@@ -2500,7 +3069,7 @@ pub fn register_sync(
                                 }
                             }
                             let body = response.body().clone();
-                            let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
+                            let metric_name = name_opt.clone().unwrap_or_else(|| normalize_url_for_metrics(&url_str));
                             let _ = tx.send(Metric::Request {
                                 name: format!("{}{}", crate::bridge::group::get_current_group_prefix(), metric_name),
                                 timings,
@@ -2508,12 +3077,13 @@ pub fn register_sync(
                                 error: None,
                                 tags: tags.clone(),
                             });
-                            HttpResponse { status, body, headers: resp_headers, timings, proto }
+                            HttpResponse { status, status_text: status_text_for_code(status), body, headers: resp_headers, timings, proto, set_cookie_headers, error: None, error_code: None }
                         },
                         Err(e) => {
                             let duration = start.elapsed();
                             let timings = RequestTimings { duration, ..Default::default() };
-                            let metric_name = name_opt.clone().unwrap_or_else(|| url_str.clone());
+                            let metric_name = name_opt.clone().unwrap_or_else(|| normalize_url_for_metrics(&url_str));
+                            let (error_type, err_code) = categorize_error(&e.to_string());
                             let _ = tx.send(Metric::Request {
                                 name: format!("{}{}", crate::bridge::group::get_current_group_prefix(), metric_name),
                                 timings,
@@ -2521,7 +3091,7 @@ pub fn register_sync(
                                 error: Some(e.to_string()),
                                 tags: tags.clone(),
                             });
-                            HttpResponse { status: 0, body: Bytes::from(e.to_string()), headers: HashMap::new(), timings, proto: "h1".to_string() }
+                            HttpResponse { status: 0, status_text: status_text_for_code(0), body: Bytes::from(e.to_string()), headers: HashMap::new(), timings, proto: "h1".to_string(), set_cookie_headers: Vec::new(), error: Some(error_type), error_code: Some(err_code) }
                         }
                     }
                 }
@@ -2572,7 +3142,148 @@ pub fn register_sync(
         ),
     )?;
 
+    // http.cookieJar() - Returns the cookie jar for manual cookie manipulation
+    // We need to create the jar object upfront and return a reference to it each time
+    let jar = JsCookieJar {
+        store: cookie_store.clone(),
+    };
+
+    // Pre-create the jar object with all methods
+    let jar_obj = Object::new(ctx.clone())?;
+
+    // jar.set(url, name, value, opts?)
+    let jar_set = jar.clone();
+    jar_obj.set(
+        "set",
+        Function::new(
+            ctx.clone(),
+            move |url: String,
+                  name: String,
+                  value: String,
+                  opts: Option<Object<'_>>|
+                  -> Result<()> { jar_set.set(url, name, value, opts) },
+        ),
+    )?;
+
+    // jar.get(url, name)
+    let jar_get = jar.clone();
+    jar_obj.set(
+        "get",
+        Function::new(
+            ctx.clone(),
+            move |url: String, name: String| -> Result<Option<String>> { jar_get.get(url, name) },
+        ),
+    )?;
+
+    // jar.cookiesForUrl(url) - returns a HashMap
+    let jar_cookies = jar.clone();
+    jar_obj.set(
+        "cookiesForUrl",
+        Function::new(
+            ctx.clone(),
+            move |url: String| -> Result<HashMap<String, String>> {
+                jar_cookies.cookies_for_url_map(url)
+            },
+        ),
+    )?;
+
+    // jar.clear()
+    let jar_clear = jar.clone();
+    jar_obj.set(
+        "clear",
+        Function::new(ctx.clone(), move || {
+            jar_clear.clear();
+        }),
+    )?;
+
+    // jar.delete(url, name)
+    let jar_delete = jar;
+    jar_obj.set(
+        "delete",
+        Function::new(
+            ctx.clone(),
+            move |url: String, name: String| -> Result<()> { jar_delete.delete(url, name) },
+        ),
+    )?;
+
+    // http.cookieJar() returns the pre-created jar object
+    http.set(
+        "cookieJar",
+        Function::new(ctx.clone(), move || -> Object<'_> { jar_obj.clone() }),
+    )?;
+
     ctx.globals().set("http", http)?;
+
+    // Register FormData class using JavaScript
+    // This creates a proper FormData builder that works with http.post()
+    ctx.eval::<(), _>(r#"
+        globalThis.FormData = function() {
+            this._fields = [];
+            this._boundary = '----FusilladeBoundary' + Math.random().toString(16).substring(2);
+        };
+
+        FormData.prototype.append = function(name, value) {
+            // Check if value is a file marker (from http.file())
+            var isFile = false;
+            var fileData = null;
+
+            if (typeof value === 'string' && value.indexOf('"__fusillade_file":true') !== -1) {
+                try {
+                    fileData = JSON.parse(value);
+                    isFile = true;
+                } catch(e) {}
+            }
+
+            this._fields.push({
+                name: name,
+                value: isFile ? fileData : String(value),
+                isFile: isFile
+            });
+        };
+
+        FormData.prototype.body = function() {
+            var body = '';
+            for (var i = 0; i < this._fields.length; i++) {
+                var field = this._fields[i];
+                body += '--' + this._boundary + '\r\n';
+
+                if (field.isFile && field.value) {
+                    body += 'Content-Disposition: form-data; name="' + field.name + '"; filename="' + (field.value.filename || 'file') + '"\r\n';
+                    body += 'Content-Type: ' + (field.value.contentType || 'application/octet-stream') + '\r\n\r\n';
+                    // Note: For binary data, this will be lossy. Use the JSON-based approach for true binary.
+                    body += atob(field.value.data || '');
+                } else {
+                    body += 'Content-Disposition: form-data; name="' + field.name + '"\r\n\r\n';
+                    body += field.value;
+                }
+                body += '\r\n';
+            }
+            body += '--' + this._boundary + '--\r\n';
+            return body;
+        };
+
+        FormData.prototype.contentType = function() {
+            return 'multipart/form-data; boundary=' + this._boundary;
+        };
+
+        FormData.prototype.hasFiles = function() {
+            return this._fields.some(function(f) { return f.isFile; });
+        };
+
+        // Add http.addHook and http.clearHooks methods
+        http.addHook = function(hookType, fn) {
+            if (hookType === 'beforeRequest') {
+                globalThis.__http_hooks.beforeRequest.push(fn);
+            } else if (hookType === 'afterResponse') {
+                globalThis.__http_hooks.afterResponse.push(fn);
+            }
+        };
+
+        http.clearHooks = function() {
+            globalThis.__http_hooks.beforeRequest = [];
+            globalThis.__http_hooks.afterResponse = [];
+        };
+    "#)?;
     Ok(())
 }
 
@@ -2601,10 +3312,14 @@ mod tests {
     fn test_http_response_default_proto() {
         let response = HttpResponse {
             status: 200,
+            status_text: status_text_for_code(200),
             body: Bytes::from("test"),
             headers: HashMap::new(),
             timings: RequestTimings::default(),
             proto: "h1".to_string(),
+            set_cookie_headers: Vec::new(),
+            error: None,
+            error_code: None,
         };
         assert_eq!(response.proto, "h1");
     }
@@ -2613,12 +3328,58 @@ mod tests {
     fn test_http_response_h2_proto() {
         let response = HttpResponse {
             status: 200,
+            status_text: status_text_for_code(200),
             body: Bytes::from("test"),
             headers: HashMap::new(),
             timings: RequestTimings::default(),
             proto: "h2".to_string(),
+            set_cookie_headers: Vec::new(),
+            error: None,
+            error_code: None,
         };
         assert_eq!(response.proto, "h2");
+    }
+
+    #[test]
+    fn test_categorize_error_timeout() {
+        let (error_type, error_code) = categorize_error("request timed out");
+        assert_eq!(error_type, "TIMEOUT");
+        assert_eq!(error_code, "ETIMEDOUT");
+    }
+
+    #[test]
+    fn test_categorize_error_dns() {
+        let (error_type, error_code) = categorize_error("failed to resolve DNS");
+        assert_eq!(error_type, "DNS");
+        assert_eq!(error_code, "ENOTFOUND");
+    }
+
+    #[test]
+    fn test_categorize_error_connection_refused() {
+        let (error_type, error_code) = categorize_error("connection refused");
+        assert_eq!(error_type, "CONNECT");
+        assert_eq!(error_code, "ECONNREFUSED");
+    }
+
+    #[test]
+    fn test_categorize_error_tls() {
+        let (error_type, error_code) = categorize_error("certificate error: invalid");
+        assert_eq!(error_type, "TLS");
+        assert_eq!(error_code, "ECERT");
+    }
+
+    #[test]
+    fn test_categorize_error_reset() {
+        let (error_type, error_code) = categorize_error("connection reset by peer");
+        assert_eq!(error_type, "RESET");
+        assert_eq!(error_code, "ECONNRESET");
+    }
+
+    #[test]
+    fn test_categorize_error_unknown() {
+        let (error_type, error_code) = categorize_error("some unknown error");
+        assert_eq!(error_type, "NETWORK");
+        assert_eq!(error_code, "ENETWORK");
     }
 
     // Note: parse_duration_str tests are in src/utils.rs
@@ -2644,5 +3405,120 @@ mod tests {
         let url = Url::parse("https://api.example.com/search?q=test&page=1").unwrap();
         let uri = url_to_uri(&url).unwrap();
         assert_eq!(uri.query(), Some("q=test&page=1"));
+    }
+
+    // Tests for is_id_segment
+
+    #[test]
+    fn test_is_id_segment_numeric() {
+        assert!(is_id_segment("123"));
+        assert!(is_id_segment("0"));
+        assert!(is_id_segment("999999"));
+    }
+
+    #[test]
+    fn test_is_id_segment_uuid_with_dashes() {
+        assert!(is_id_segment("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_id_segment("00000000-0000-0000-0000-000000000000"));
+        assert!(is_id_segment("ffffffff-ffff-ffff-ffff-ffffffffffff"));
+    }
+
+    #[test]
+    fn test_is_id_segment_uuid_without_dashes() {
+        assert!(is_id_segment("550e8400e29b41d4a716446655440000"));
+        assert!(is_id_segment("00000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn test_is_id_segment_alphanumeric_ids() {
+        assert!(is_id_segment("abc123"));
+        assert!(is_id_segment("X7yZ9"));
+        assert!(is_id_segment("user_123"));
+        assert!(is_id_segment("item-456"));
+    }
+
+    #[test]
+    fn test_is_id_segment_not_ids() {
+        // Common path segments that should NOT be treated as IDs
+        assert!(!is_id_segment("users"));
+        assert!(!is_id_segment("api"));
+        assert!(!is_id_segment("items"));
+        assert!(!is_id_segment("orders"));
+        assert!(!is_id_segment("v1")); // Short, but commonly version prefixes
+    }
+
+    #[test]
+    fn test_is_id_segment_empty() {
+        assert!(!is_id_segment(""));
+    }
+
+    // Tests for normalize_url_for_metrics
+
+    #[test]
+    fn test_normalize_url_numeric_id() {
+        assert_eq!(
+            normalize_url_for_metrics("https://api.com/users/123"),
+            "api.com/users/:id"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_multiple_ids() {
+        assert_eq!(
+            normalize_url_for_metrics("https://api.com/orders/abc-123-def/items/5"),
+            "api.com/orders/:id/items/:id"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_uuid() {
+        assert_eq!(
+            normalize_url_for_metrics(
+                "https://api.example.com/resources/550e8400-e29b-41d4-a716-446655440000"
+            ),
+            "api.example.com/resources/:id"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_no_ids() {
+        assert_eq!(
+            normalize_url_for_metrics("https://api.example.com/users/profile"),
+            "api.example.com/users/profile"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_with_port() {
+        assert_eq!(
+            normalize_url_for_metrics("https://api.example.com:8080/users/123"),
+            "api.example.com:8080/users/:id"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_preserves_query_stripped() {
+        // Query params are not included in the normalized URL (just host + path)
+        assert_eq!(
+            normalize_url_for_metrics("https://api.example.com/search?q=test"),
+            "api.example.com/search"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_invalid_url() {
+        // Invalid URLs should be returned as-is
+        assert_eq!(
+            normalize_url_for_metrics("not-a-valid-url"),
+            "not-a-valid-url"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_root_path() {
+        assert_eq!(
+            normalize_url_for_metrics("https://api.example.com/"),
+            "api.example.com/"
+        );
     }
 }

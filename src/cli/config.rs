@@ -2,6 +2,25 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Executor type determines how virtual users (VUs) are scheduled
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutorType {
+    /// Fixed number of VUs that loop continuously (closed model)
+    #[default]
+    ConstantVus,
+    /// VUs ramp up/down according to schedule stages (closed model)
+    RampingVus,
+    /// Fixed iteration rate regardless of response time (open model)
+    ConstantArrivalRate,
+    /// Iteration rate changes according to schedule stages (open model)
+    RampingArrivalRate,
+    /// Each VU runs a fixed number of iterations then stops
+    PerVuIterations,
+    /// All VUs share a fixed pool of iterations
+    SharedIterations,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct ScheduleStep {
     pub duration: String,
@@ -12,7 +31,7 @@ pub struct ScheduleStep {
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 pub struct ScenarioConfig {
     /// Executor type (constant-vus, ramping-vus, constant-arrival-rate, per-vu-iterations)
-    pub executor: Option<String>,
+    pub executor: Option<ExecutorType>,
     /// Number of concurrent workers (k6: vus)
     pub workers: Option<usize>,
     /// Duration of the scenario
@@ -52,7 +71,7 @@ pub struct Config {
     /// Ramping schedule (stages)
     pub schedule: Option<Vec<ScheduleStep>>,
     /// Executor type (constant-arrival-rate, ramping-vus, etc.)
-    pub executor: Option<String>,
+    pub executor: Option<ExecutorType>,
     /// Rate for arrival-rate executors
     pub rate: Option<u64>,
     /// Time unit for rate (e.g., "1s", "1m")
@@ -180,7 +199,7 @@ time_unit: "1s"
 duration: "1m"
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.executor, Some("constant-arrival-rate".to_string()));
+        assert_eq!(config.executor, Some(ExecutorType::ConstantArrivalRate));
         assert_eq!(config.rate, Some(100));
         assert_eq!(config.time_unit, Some("1s".to_string()));
     }
@@ -380,7 +399,7 @@ memory_safe: true
         assert_eq!(config.duration, Some("2m".to_string()));
         assert!(config.schedule.is_some());
         assert_eq!(config.schedule.as_ref().unwrap().len(), 2);
-        assert_eq!(config.executor, Some("ramping-vus".to_string()));
+        assert_eq!(config.executor, Some(ExecutorType::RampingVus));
         assert_eq!(config.rate, Some(100));
         assert_eq!(config.time_unit, Some("1s".to_string()));
         assert!(config.criteria.is_some());
@@ -463,7 +482,7 @@ scenarios:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         let scenario = &config.scenarios.unwrap()["test"];
-        assert_eq!(scenario.executor, Some("constant-vus".to_string()));
+        assert_eq!(scenario.executor, Some(ExecutorType::ConstantVus));
         assert_eq!(scenario.workers, Some(10));
         assert_eq!(scenario.duration, Some("1m".to_string()));
         assert_eq!(scenario.iterations, Some(50));
@@ -474,5 +493,76 @@ scenarios:
         assert_eq!(scenario.stack_size, Some(32768));
         assert_eq!(scenario.response_sink, Some(true));
         assert!(scenario.thresholds.is_some());
+    }
+
+    #[test]
+    fn test_executor_type_all_variants() {
+        // Test all executor type variants parse correctly from kebab-case
+        let test_cases = [
+            ("constant-vus", ExecutorType::ConstantVus),
+            ("ramping-vus", ExecutorType::RampingVus),
+            ("constant-arrival-rate", ExecutorType::ConstantArrivalRate),
+            ("ramping-arrival-rate", ExecutorType::RampingArrivalRate),
+            ("per-vu-iterations", ExecutorType::PerVuIterations),
+            ("shared-iterations", ExecutorType::SharedIterations),
+        ];
+
+        for (yaml_value, expected) in test_cases {
+            let yaml = format!("executor: {}", yaml_value);
+            let config: Config = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(config.executor, Some(expected), "Failed for {}", yaml_value);
+        }
+    }
+
+    #[test]
+    fn test_executor_type_default() {
+        // Default executor should be ConstantVus
+        assert_eq!(ExecutorType::default(), ExecutorType::ConstantVus);
+    }
+
+    #[test]
+    fn test_ramping_arrival_rate_config() {
+        let yaml = r#"
+executor: ramping-arrival-rate
+rate: 50
+time_unit: "1s"
+duration: "2m"
+schedule:
+  - duration: "30s"
+    target: 100
+  - duration: "1m"
+    target: 200
+  - duration: "30s"
+    target: 0
+workers: 10
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.executor, Some(ExecutorType::RampingArrivalRate));
+        assert_eq!(config.rate, Some(50));
+        assert_eq!(config.time_unit, Some("1s".to_string()));
+        assert!(config.schedule.is_some());
+        let schedule = config.schedule.unwrap();
+        assert_eq!(schedule.len(), 3);
+        assert_eq!(schedule[0].target, 100);
+        assert_eq!(schedule[1].target, 200);
+        assert_eq!(schedule[2].target, 0);
+    }
+
+    #[test]
+    fn test_scenario_with_arrival_rate() {
+        let yaml = r#"
+scenarios:
+  api_load:
+    executor: constant-arrival-rate
+    rate: 100
+    time_unit: "1s"
+    workers: 50
+    duration: "5m"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let scenario = &config.scenarios.unwrap()["api_load"];
+        assert_eq!(scenario.executor, Some(ExecutorType::ConstantArrivalRate));
+        assert_eq!(scenario.rate, Some(100));
+        assert_eq!(scenario.workers, Some(50));
     }
 }

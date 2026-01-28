@@ -188,6 +188,7 @@ pub enum Metric {
     Check {
         name: String,
         success: bool,
+        message: Option<String>,
     },
     Log {
         message: String,
@@ -463,7 +464,11 @@ impl StatsAggregator {
                     req_stats.total_request_size += timings.request_size as u64;
                 }
             }
-            Metric::Check { name, success } => {
+            Metric::Check {
+                name,
+                success,
+                message: _,
+            } => {
                 let entry = self.checks.entry(name).or_insert((0, 0));
                 entry.0 += 1;
                 if success {
@@ -1002,10 +1007,12 @@ mod tests {
         agg.add(Metric::Check {
             name: "status is 200".to_string(),
             success: true,
+            message: None,
         });
         agg.add(Metric::Check {
             name: "status is 200".to_string(),
             success: false,
+            message: Some("Custom failure message".to_string()),
         });
 
         let (total, passes) = agg.checks.get("status is 200").unwrap();
