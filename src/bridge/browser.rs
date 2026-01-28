@@ -259,3 +259,53 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
     ctx.globals().set("chromium", browser_mod)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_browser_make_metric_success() {
+        let start = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let metric = make_metric("browser::goto", start, None);
+
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "browser::goto");
+                assert_eq!(status, 200);
+                assert!(error.is_none());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_error() {
+        let start = std::time::Instant::now();
+        let metric = make_metric(
+            "browser::click",
+            start,
+            Some("Element not found".to_string()),
+        );
+
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "browser::click");
+                assert_eq!(status, 0);
+                assert!(error.is_some());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+}

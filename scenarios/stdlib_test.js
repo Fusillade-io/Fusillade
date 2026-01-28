@@ -5,7 +5,7 @@ export const options = {
 
 export default function() {
     // 1. Test Encoding
-    let original = "Thruster Load Test";
+    let original = "Fusillade Load Test";
     let encoded = encoding.b64encode(original);
     let decoded = encoding.b64decode(encoded);
     

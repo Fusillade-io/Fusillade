@@ -12,7 +12,7 @@ export default function() {
         client.connect('amqp://127.0.0.1:5672');
         print('AMQP Connected');
 
-        client.publish('', 'test_queue', 'Hello from Thruster AMQP!');
+        client.publish('', 'test_queue', 'Hello from Fusillade AMQP!');
         print('AMQP Message Published');
 
         client.close();

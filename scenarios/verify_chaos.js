@@ -1,5 +1,5 @@
 // Chaos Injection Verification Test
-// http and print are globals in Thruster
+// http and print are globals in Fusillade
 
 export const options = {
     workers: 1,

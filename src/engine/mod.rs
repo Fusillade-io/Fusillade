@@ -39,6 +39,29 @@ fn format_js_error(error: &CaughtError) -> String {
     }
 }
 
+/// Validate a scenario name for use in metrics and logging
+fn validate_scenario_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(anyhow::anyhow!("Scenario name cannot be empty"));
+    }
+    if name.len() > 64 {
+        return Err(anyhow::anyhow!(
+            "Scenario name '{}' is too long (max 64 characters)",
+            name
+        ));
+    }
+    // Check for characters that could cause issues in metrics or file paths
+    for c in name.chars() {
+        if !c.is_alphanumeric() && c != '_' && c != '-' && c != '.' {
+            return Err(anyhow::anyhow!(
+                "Scenario name '{}' contains invalid character '{}'. Use only alphanumeric, underscore, hyphen, or dot.",
+                name, c
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_duration_str(s: &str) -> Option<Duration> {
     if s.ends_with("ms") {
         s.trim_end_matches("ms")
@@ -121,8 +144,7 @@ impl Engine {
                 None,
                 None,
                 false,
-            )
-            .expect("Failed to register globals in config extraction");
+            )?;
             let module_name = script_path.to_string_lossy().to_string();
             let module = Module::declare(ctx.clone(), module_name, script_content)?;
             let (module, _) = module.eval()?;
@@ -153,12 +175,12 @@ impl Engine {
                             obj.insert("response_sink".to_string(), rs);
                         }
 
-                        // Handle scenarios with k6-compatible key mapping
+                        // Handle scenarios with alias key mapping
                         if let Some(scenarios) = obj.get_mut("scenarios") {
                             if let Some(scenarios_obj) = scenarios.as_object_mut() {
                                 for (_name, scenario) in scenarios_obj.iter_mut() {
                                     if let Some(scenario_obj) = scenario.as_object_mut() {
-                                        // Map k6 keys to Thruster keys
+                                        // Map alias keys to canonical keys
                                         if let Some(vus) = scenario_obj.remove("vus") {
                                             scenario_obj.insert("workers".to_string(), vus);
                                         }
@@ -503,6 +525,11 @@ impl Engine {
             let is_multi_scenario = config.scenarios.is_some();
 
             if let Some(ref scenarios) = config.scenarios {
+                // Validate all scenario names upfront
+                for name in scenarios.keys() {
+                    validate_scenario_name(name)?;
+                }
+
                 // Multi-scenario mode: spawn a worker pool per scenario
                 for (scenario_name, scenario_config) in scenarios.iter() {
                     let scenario_name = scenario_name.clone();
@@ -1199,14 +1226,16 @@ impl Engine {
                                 )> = Vec::new();
                                 let mut next_worker_id = 1;
 
-                                // For shared-iterations, create a counter (TODO: implement shared-iterations executor)
-                                let _shared_iteration_counter = Arc::new(AtomicU64::new(0));
-                                let _total_shared_iterations =
+                                // For shared-iterations, create a shared counter across all workers
+                                let shared_iteration_counter = Arc::new(AtomicU64::new(0));
+                                let total_shared_iterations =
                                     if executor == ExecutorType::SharedIterations {
                                         max_iterations.unwrap_or(workers as u64 * 10)
                                     } else {
                                         0
                                     };
+                                let is_shared_iterations =
+                                    executor == ExecutorType::SharedIterations;
 
                                 // Spawn all workers at once (constant-vus style)
                                 for _ in 0..workers {
@@ -1233,6 +1262,9 @@ impl Engine {
                                     let tokio_rt = shared_tokio_rt.clone();
                                     let client = shared_http_client.clone();
                                     let control_state = control_state.clone();
+                                    let shared_iter_counter = shared_iteration_counter.clone();
+                                    let total_shared_iter = total_shared_iterations;
+                                    let is_shared_iter = is_shared_iterations;
 
                                     // Spawn as may coroutine instead of OS thread
                                     // SAFETY: Stack size is configured to be sufficient for JS execution
@@ -1352,7 +1384,16 @@ impl Engine {
                                         }
 
                                         iteration_count += 1;
-                                        if let Some(max_iter) = max_iterations {
+
+                                        // Check iteration limits based on executor type
+                                        if is_shared_iter {
+                                            // SharedIterations: claim from shared counter
+                                            let claimed = shared_iter_counter.fetch_add(1, Ordering::SeqCst);
+                                            if claimed >= total_shared_iter {
+                                                break; // All iterations consumed
+                                            }
+                                        } else if let Some(max_iter) = max_iterations {
+                                            // PerVuIterations: each worker has its own limit
                                             if iteration_count >= max_iter {
                                                 break;
                                             }
@@ -1378,10 +1419,17 @@ impl Engine {
                                     ));
                                 }
 
-                                // Wait for scenario duration
+                                // Wait for scenario duration or all shared iterations to complete
                                 while start_time.elapsed() < scenario_duration {
-                                    // Also check global stop
+                                    // Check global stop
                                     if control_state.is_stopped() {
+                                        break;
+                                    }
+                                    // For shared-iterations, exit early when all iterations consumed
+                                    if is_shared_iterations
+                                        && shared_iteration_counter.load(Ordering::SeqCst)
+                                            >= total_shared_iterations
+                                    {
                                         break;
                                     }
                                     std::thread::sleep(Duration::from_millis(100));
@@ -1430,13 +1478,17 @@ impl Engine {
                 schedule_legacy = if let Some(ref s) = config.schedule {
                     let mut parsed = Vec::new();
                     for step in s {
-                        parsed.push((parse_duration(&step.duration).unwrap(), step.target));
+                        let dur = parse_duration(&step.duration).map_err(|_| {
+                            anyhow::anyhow!("Invalid duration in schedule: '{}'", step.duration)
+                        })?;
+                        parsed.push((dur, step.target));
                     }
                     parsed
                 } else {
                     let duration_str = config.duration.as_deref().unwrap_or("10s");
                     let workers = config.workers.unwrap_or(1);
-                    let duration = parse_duration(duration_str).unwrap();
+                    let duration = parse_duration(duration_str)
+                        .map_err(|_| anyhow::anyhow!("Invalid duration: '{}'", duration_str))?;
                     vec![(Duration::from_secs(0), workers), (duration, workers)]
                 };
 
@@ -2461,6 +2513,88 @@ mod tests {
         assert_eq!(
             Engine::calculate_rate(&schedule, Duration::from_secs(100)),
             100
+        );
+    }
+
+    #[test]
+    fn test_validate_scenario_name_valid() {
+        assert!(validate_scenario_name("default").is_ok());
+        assert!(validate_scenario_name("my_scenario").is_ok());
+        assert!(validate_scenario_name("scenario-1").is_ok());
+        assert!(validate_scenario_name("test.scenario").is_ok());
+        assert!(validate_scenario_name("MyScenario123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_scenario_name_empty() {
+        assert!(validate_scenario_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_scenario_name_too_long() {
+        let long_name = "a".repeat(65);
+        assert!(validate_scenario_name(&long_name).is_err());
+
+        // Exactly 64 should be fine
+        let max_name = "a".repeat(64);
+        assert!(validate_scenario_name(&max_name).is_ok());
+    }
+
+    #[test]
+    fn test_validate_scenario_name_invalid_chars() {
+        assert!(validate_scenario_name("my scenario").is_err()); // space
+        assert!(validate_scenario_name("test/scenario").is_err()); // slash
+        assert!(validate_scenario_name("test:scenario").is_err()); // colon
+        assert!(validate_scenario_name("test@scenario").is_err()); // at
+        assert!(validate_scenario_name("test#scenario").is_err()); // hash
+    }
+
+    #[test]
+    fn test_pre_validation_syntax_error() {
+        // Test that script syntax errors are caught during validation
+        let engine = Engine::new().unwrap();
+
+        // Script with syntax error - missing closing brace
+        let script_with_error = r#"
+export const options = { workers: 1, duration: '1s' };
+export default function() {
+    // Missing closing brace
+"#;
+
+        // Use extract_config which creates a runtime and compiles the script
+        let result = engine.extract_config(
+            std::path::PathBuf::from("test.js"),
+            script_with_error.to_string(),
+        );
+
+        // Should fail with an error containing info about the syntax issue
+        assert!(
+            result.is_err(),
+            "Expected error for script with syntax error"
+        );
+    }
+
+    #[test]
+    fn test_pre_validation_valid_script() {
+        let engine = Engine::new().unwrap();
+
+        let valid_script = r#"
+export const options = { workers: 1, duration: '1s' };
+export default function() {
+    console.log('test');
+}
+"#;
+
+        let result = engine.extract_config(
+            std::path::PathBuf::from("test.js"),
+            valid_script.to_string(),
+        );
+
+        // Should succeed
+        assert!(
+            result.is_ok(),
+            "Expected success for valid script, got: {:?}",
+            result
         );
     }
 }

@@ -191,6 +191,15 @@ enum Commands {
         /// Log level: debug, info, warn, error
         #[arg(long, default_value = "info")]
         log_level: String,
+        /// Skip TLS certificate verification (insecure, use for self-signed certs)
+        #[arg(long)]
+        insecure: bool,
+        /// Maximum number of HTTP redirects to follow (default: 10, 0 to disable)
+        #[arg(long)]
+        max_redirects: Option<u32>,
+        /// Default User-Agent header for HTTP requests
+        #[arg(long)]
+        user_agent: Option<String>,
     },
     /// Initialize a new test script with starter template
     Init {
@@ -329,6 +338,9 @@ fn main() -> Result<()> {
             thresholds,
             abort_on_fail,
             log_level,
+            insecure,
+            max_redirects,
+            user_agent,
         } => {
             // Set log level for console.* API
             let log_level_enum = match log_level.to_lowercase().as_str() {
@@ -565,6 +577,15 @@ fn main() -> Result<()> {
             }
             if abort_on_fail {
                 final_config.abort_on_fail = Some(true);
+            }
+            if insecure {
+                final_config.insecure = Some(true);
+            }
+            if let Some(redirects) = max_redirects {
+                final_config.max_redirects = Some(redirects);
+            }
+            if let Some(ref ua) = user_agent {
+                final_config.user_agent = Some(ua.clone());
             }
             // Parse --threshold flags into criteria map
             if !thresholds.is_empty() {
@@ -819,6 +840,14 @@ fn main() -> Result<()> {
                     } else {
                         println!("CSV export successful!");
                     }
+                } else if let Some(endpoint) = out_config.strip_prefix("statsd=") {
+                    println!("Exporting metrics to StatsD: {}", endpoint);
+                    let exporter = fusillade::stats::statsd::StatsdExporter::new(endpoint);
+                    if let Err(e) = exporter.export(&report) {
+                        eprintln!("StatsD export failed: {}", e);
+                    } else {
+                        println!("StatsD export successful!");
+                    }
                 }
             }
 
@@ -839,9 +868,13 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Note: capture_errors is handled at the HTTP layer, not here
-            // The flag is passed to the engine which captures failed requests
-            let _ = capture_errors; // Suppress unused warning for now
+            // Set capture errors path if flag is provided
+            if let Some(path_opt) = capture_errors {
+                let path = path_opt
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "fusillade-errors.json".to_string());
+                fusillade::bridge::set_capture_errors_path(path);
+            }
 
             Ok(())
         }

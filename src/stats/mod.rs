@@ -11,6 +11,7 @@ pub mod csv;
 pub mod db;
 pub mod html;
 pub mod otlp;
+pub mod statsd;
 
 // SharedAggregator uses std::sync::RwLock for JS bridge compatibility (JsLifetime trait)
 pub type SharedAggregator = Arc<std::sync::RwLock<StatsAggregator>>;
@@ -1201,6 +1202,53 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_histogram_float_precision() {
+        let mut agg = StatsAggregator::new();
+
+        // Add values with decimal precision
+        agg.add(Metric::Histogram {
+            name: "response_time".to_string(),
+            value: 1.234,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Histogram {
+            name: "response_time".to_string(),
+            value: 5.678,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Histogram {
+            name: "response_time".to_string(),
+            value: 9.012,
+            tags: HashMap::new(),
+        });
+
+        let report = agg.to_report();
+        let hist = report
+            .histograms
+            .get("response_time")
+            .expect("Histogram should exist");
+
+        // Verify decimal precision is preserved (within 0.02 tolerance due to HdrHistogram bucketing)
+        assert!(
+            (hist.min - 1.234).abs() < 0.02,
+            "Min should be ~1.234, got {}",
+            hist.min
+        );
+        assert!(
+            (hist.max - 9.012).abs() < 0.02,
+            "Max should be ~9.012, got {}",
+            hist.max
+        );
+        // avg = (1.234 + 5.678 + 9.012) / 3 = 5.308
+        // Avg uses exact sum, so it should be very precise
+        assert!(
+            (hist.avg - 5.308).abs() < 0.001,
+            "Avg should be ~5.308, got {}",
+            hist.avg
+        );
+    }
+
+    #[test]
     fn test_custom_counter() {
         let mut agg = StatsAggregator::new();
 
@@ -1409,6 +1457,76 @@ mod tests {
         assert!(
             json.contains("\"hit_rate\""),
             "JSON should contain hit_rate rate"
+        );
+    }
+
+    #[test]
+    fn test_no_endpoint_tracking() {
+        // With no_endpoint_tracking enabled, per-endpoint stats should be skipped
+        let mut agg = StatsAggregator::new();
+        agg.no_endpoint_tracking = true;
+
+        agg.add(Metric::Request {
+            name: "GET /api/users".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(100),
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Request {
+            name: "POST /api/orders".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(50),
+                ..Default::default()
+            },
+            status: 201,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        let report = agg.to_report();
+
+        // Global stats should still be tracked
+        assert_eq!(report.total_requests, 2);
+        assert!(report.avg_latency_ms > 0.0);
+
+        // Per-endpoint stats should be empty when no_endpoint_tracking is enabled
+        assert!(
+            report.grouped_requests.is_empty(),
+            "grouped_requests should be empty when no_endpoint_tracking is enabled"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_tracking_enabled() {
+        // With no_endpoint_tracking disabled (default), per-endpoint stats should be tracked
+        let mut agg = StatsAggregator::new();
+        // no_endpoint_tracking is false by default
+
+        agg.add(Metric::Request {
+            name: "GET /api/users".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(100),
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        let report = agg.to_report();
+
+        // Per-endpoint stats should exist
+        assert!(
+            !report.grouped_requests.is_empty(),
+            "grouped_requests should NOT be empty when no_endpoint_tracking is disabled"
+        );
+        assert!(
+            report.grouped_requests.contains_key("GET /api/users"),
+            "Should track endpoint stats for GET /api/users"
         );
     }
 }

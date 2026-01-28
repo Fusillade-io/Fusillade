@@ -1,6 +1,6 @@
 {
     "name": "@fusillade-io/fusillade",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "description": "High-performance load testing platform built in Rust",
     "bin": {
         "fusillade": "bin/fusillade"

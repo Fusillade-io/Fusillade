@@ -17,7 +17,7 @@ export default function () {
         print('WebSocket connected');
 
         // Send a message
-        let testMessage = 'Hello from Thruster!';
+        let testMessage = 'Hello from Fusillade!';
         socket.send(testMessage);
         print('Sent: ' + testMessage);
 

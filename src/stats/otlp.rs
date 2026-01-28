@@ -1,4 +1,4 @@
-//! OTLP (OpenTelemetry Protocol) Exporter for Thruster metrics
+//! OTLP (OpenTelemetry Protocol) Exporter for Fusillade metrics
 //!
 //! Exports load test metrics to an OTLP-compatible endpoint via HTTP/JSON.
 //! This is a simplified implementation that pushes metrics as JSON to an OTLP collector.
