@@ -5,6 +5,36 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-01-29
+
+### Added
+- `res.html(selector)` method for CSS selector-based HTML parsing on HTTP responses
+- `socket.sendBinary(data)` for sending binary WebSocket frames via base64-encoded strings
+- Optional QoS parameter for MQTT `subscribe(topic, [qos])` and `publish(topic, payload, [qos])`
+- Dedicated Crypto & Encoding documentation page on fusillade.io
+
+### Fixed
+- HAR conversion generating `sleep(100)` (100 seconds) instead of `sleep(0.1)` (100ms)
+- `fusillade convert` command documentation: input file is a positional argument, not `--input`
+- Removed non-existent `preAllocatedWorkers` and `maxWorkers` from arrival-rate docs
+- Fixed incorrect `vus = workers` config alias documentation (only valid in scenarios)
+- Added missing config aliases to docs: `noEndpointTracking`, `abortOnFail`, `memorySafe`, `minIterationDuration`
+
+## [1.2.0] - 2026-01-29
+
+### Added
+- Browser Page API methods: `title()`, `url()`, `fill(selector, value)`, `waitForSelector(selector, timeout)`, `waitForNavigation(timeout)`, `waitForTimeout(ms)`, `close()`
+- Data transfer limits and overage billing support
+
+### Changed
+- Renamed all VU/virtual user terminology to "workers" across codebase and documentation
+
+## [1.1.0] - 2026-01-29
+
+### Added
+- Browser automation documentation
+- StatsD metrics export
+
 ## [1.0.3] - 2026-01-29
 
 ### Changed

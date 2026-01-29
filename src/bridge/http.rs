@@ -3544,4 +3544,37 @@ mod tests {
             "api.example.com/"
         );
     }
+
+    #[test]
+    fn test_html_selector_basic() {
+        let html = "<html><body><h1>Title</h1><p>Content</p></body></html>";
+        let document = scraper::Html::parse_document(html);
+        let selector = scraper::Selector::parse("h1").unwrap();
+        let text: String = document.select(&selector).next().unwrap().text().collect();
+        assert_eq!(text, "Title");
+    }
+
+    #[test]
+    fn test_html_selector_nested() {
+        let html = r#"<div class="user"><span class="name">Alice</span></div>"#;
+        let document = scraper::Html::parse_document(html);
+        let selector = scraper::Selector::parse(".user .name").unwrap();
+        let text: String = document.select(&selector).next().unwrap().text().collect();
+        assert_eq!(text, "Alice");
+    }
+
+    #[test]
+    fn test_html_selector_no_match() {
+        let html = "<html><body><p>Hello</p></body></html>";
+        let document = scraper::Html::parse_document(html);
+        let selector = scraper::Selector::parse("h1").unwrap();
+        let result = document.select(&selector).next();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_html_selector_invalid() {
+        let result = scraper::Selector::parse("[[[invalid");
+        assert!(result.is_err());
+    }
 }
