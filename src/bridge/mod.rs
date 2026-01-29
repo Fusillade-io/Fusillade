@@ -18,6 +18,33 @@ mod test;
 mod utils;
 mod ws;
 
+// --- Common Error Helpers ---
+// These helpers create consistent error types for JavaScript
+
+/// Create a network-related error
+#[allow(dead_code)]
+pub fn js_network_error(message: &'static str) -> rquickjs::Error {
+    rquickjs::Error::new_from_js(message, "NetworkError")
+}
+
+/// Create a state-related error (e.g., "not connected")
+#[allow(dead_code)]
+pub fn js_state_error(message: &'static str) -> rquickjs::Error {
+    rquickjs::Error::new_from_js(message, "StateError")
+}
+
+/// Create a timeout error
+#[allow(dead_code)]
+pub fn js_timeout_error(message: &'static str) -> rquickjs::Error {
+    rquickjs::Error::new_from_js(message, "TimeoutError")
+}
+
+/// Create a type error
+#[allow(dead_code)]
+pub fn js_type_error(message: &'static str) -> rquickjs::Error {
+    rquickjs::Error::new_from_js(message, "TypeError")
+}
+
 use crate::engine::http_client::HttpClient;
 use crate::stats::{Metric, SharedAggregator};
 use crossbeam_channel::Sender;

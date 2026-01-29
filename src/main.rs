@@ -10,6 +10,20 @@ use fusillade::engine::distributed::{ControllerServer, WorkerServer};
 use fusillade::engine::Engine;
 use fusillade::parse_duration_str;
 
+/// Parse drop probability with range validation (0.0-1.0)
+fn parse_drop_probability(s: &str) -> Result<f64, String> {
+    let val: f64 = s
+        .parse()
+        .map_err(|_| format!("'{}' is not a valid number", s))?;
+    if !(0.0..=1.0).contains(&val) {
+        return Err(format!(
+            "drop probability must be between 0.0 and 1.0, got {}",
+            val
+        ));
+    }
+    Ok(val)
+}
+
 /// Run a test on Fusillade Cloud
 fn run_cloud_test(
     scenario: PathBuf,
@@ -141,7 +155,7 @@ enum Commands {
         #[arg(long)]
         jitter: Option<String>,
         /// Chaos: Drop requests with probability (0.0-1.0)
-        #[arg(long)]
+        #[arg(long, value_parser = parse_drop_probability)]
         drop: Option<f64>,
         /// Estimate bandwidth and cost before running. Optionally set warning threshold in dollars (default: 10)
         #[arg(long)]
@@ -194,9 +208,9 @@ enum Commands {
         /// Skip TLS certificate verification (insecure, use for self-signed certs)
         #[arg(long)]
         insecure: bool,
-        /// Maximum number of HTTP redirects to follow (default: 10, 0 to disable)
-        #[arg(long)]
-        max_redirects: Option<u32>,
+        /// Maximum number of HTTP redirects to follow (0 to disable)
+        #[arg(long, default_value = "10")]
+        max_redirects: u32,
         /// Default User-Agent header for HTTP requests
         #[arg(long)]
         user_agent: Option<String>,
@@ -581,9 +595,7 @@ fn main() -> Result<()> {
             if insecure {
                 final_config.insecure = Some(true);
             }
-            if let Some(redirects) = max_redirects {
-                final_config.max_redirects = Some(redirects);
-            }
+            final_config.max_redirects = Some(max_redirects);
             if let Some(ref ua) = user_agent {
                 final_config.user_agent = Some(ua.clone());
             }
@@ -593,10 +605,33 @@ fn main() -> Result<()> {
                 for t in &thresholds {
                     // Parse "metric:condition" format
                     if let Some((metric, condition)) = t.split_once(':') {
+                        if metric.is_empty() {
+                            eprintln!(
+                                "Warning: Ignoring threshold with empty metric name: '{}'",
+                                t
+                            );
+                            continue;
+                        }
+                        if condition.is_empty() {
+                            eprintln!("Warning: Ignoring threshold with empty condition: '{}'", t);
+                            continue;
+                        }
+                        // Validate condition syntax (basic check)
+                        if !condition.contains('<') && !condition.contains('>') {
+                            eprintln!(
+                                "Warning: Threshold condition '{}' may be invalid (missing < or >)",
+                                condition
+                            );
+                        }
                         criteria
                             .entry(metric.to_string())
                             .or_default()
                             .push(condition.to_string());
+                    } else {
+                        eprintln!(
+                            "Warning: Ignoring malformed threshold '{}' (expected format: METRIC:CONDITION)",
+                            t
+                        );
                     }
                 }
                 final_config.criteria = Some(criteria);

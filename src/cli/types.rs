@@ -111,9 +111,27 @@ declare namespace encoding {
     function b64decode(data: string): string;
 }
 
+/**
+ * Result type for protocol recv() methods.
+ * Allows distinguishing between timeout, closed connection, and successful receive.
+ */
+interface RecvResult<T> {
+    /** The received message, or null if none */
+    value: T | null;
+    /** Reason for null value: "timeout", "closed", "not_connected", or null on success */
+    reason: "timeout" | "closed" | "not_connected" | null;
+}
+
+/** WebSocket binary message type */
+interface WsBinaryMessage {
+    type: "binary";
+    data: string; // base64 encoded
+}
+
 declare class JsWebSocket {
     send(msg: string): void;
-    recv(): string | null;
+    /** Returns text string, binary message object, or null on close */
+    recv(): string | WsBinaryMessage | null;
     close(): void;
 }
 
@@ -121,17 +139,34 @@ declare namespace ws {
     function connect(url: string): JsWebSocket;
 }
 
+interface MqttMessage {
+    topic: string;
+    payload: string;
+    qos: number;
+}
+
 declare class JsMqttClient {
     constructor();
     connect(host: string, port: number, client_id: string): void;
+    subscribe(topic: string): void;
     publish(topic: string, payload: string): void;
+    recv(timeoutMs?: number): RecvResult<MqttMessage>;
     close(): void;
+}
+
+interface AmqpMessage {
+    body: string;
+    deliveryTag: number;
 }
 
 declare class JsAmqpClient {
     constructor();
     connect(url: string): void;
+    subscribe(queue: string): void;
     publish(exchange: string, routing_key: string, payload: string): void;
+    recv(timeoutMs?: number): RecvResult<AmqpMessage>;
+    ack(deliveryTag: number): void;
+    nack(deliveryTag: number, requeue: boolean): void;
     close(): void;
 }
 
@@ -141,11 +176,30 @@ declare class SharedArray<T = any> {
     readonly length: number;
 }
 
+declare class GrpcServerStream {
+    recv(timeoutMs?: number): RecvResult<any>;
+    close(): void;
+}
+
+declare class GrpcClientStream {
+    send(msg: any): void;
+    closeAndRecv(): any;
+}
+
+declare class GrpcBidiStream {
+    send(msg: any): void;
+    recv(timeoutMs?: number): RecvResult<any>;
+    close(): void;
+}
+
 declare class GrpcClient {
     constructor();
     load(files: string[], includes: string[]): void;
-    connect(url: string): Promise<void>;
-    invoke(method: string, request: any): Promise<any>;
+    connect(url: string): void;
+    invoke(method: string, request: any): any;
+    serverStream(method: string, request: any): GrpcServerStream;
+    clientStream(method: string): GrpcClientStream;
+    bidiStream(method: string): GrpcBidiStream;
 }
 "#
     .trim()

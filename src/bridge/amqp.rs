@@ -66,11 +66,14 @@ impl<'js> Trace<'js> for JsAmqpClient {
 #[rquickjs::methods]
 impl JsAmqpClient {
     #[qjs(constructor)]
-    pub fn new(ctx: Ctx<'_>) -> Self {
+    pub fn new(ctx: Ctx<'_>) -> Result<Self> {
         let tx = ctx.userdata::<MetricSender>().map(|w| w.0.clone());
         // Create a dedicated runtime for AMQP tasks since bridge is sync
-        let rt = Runtime::new().expect("Failed to create AMQP runtime");
-        Self {
+        let rt = Runtime::new().map_err(|e| {
+            eprintln!("Failed to create AMQP runtime: {}", e);
+            rquickjs::Error::new_from_js("Failed to create AMQP runtime", "RuntimeError")
+        })?;
+        Ok(Self {
             connection: None,
             channel: None,
             runtime: Arc::new(rt),
@@ -78,7 +81,7 @@ impl JsAmqpClient {
             running: Arc::new(AtomicBool::new(false)),
             _background_handle: None,
             tx,
-        }
+        })
     }
 
     pub fn connect(&mut self, url: String) -> Result<()> {
@@ -208,27 +211,46 @@ impl JsAmqpClient {
     }
 
     /// Receive the next message from the queue
-    /// Returns { body, deliveryTag } or null if no message/disconnected
-    pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+    /// Returns { value: { body, deliveryTag } | null, reason: "timeout" | "closed" | "not_connected" | null }
+    pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
         let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
+
         if let Some(ref rx) = self.message_rx {
-            match rx.recv_timeout(Duration::from_secs(30)) {
+            match rx.recv_timeout(timeout) {
                 Ok(msg) => {
                     if let Some(ref mtx) = self.tx {
                         let _ = mtx.send(make_metric("amqp::recv", start, None));
                     }
-                    let obj = Object::new(ctx.clone())?;
+                    let msg_obj = Object::new(ctx.clone())?;
                     // Try to decode body as UTF-8 string
                     let body_str = String::from_utf8_lossy(&msg.body).into_owned();
-                    obj.set("body", body_str)?;
-                    obj.set("deliveryTag", msg.delivery_tag)?;
-                    Ok(obj.into_value())
+                    msg_obj.set("body", body_str)?;
+                    msg_obj.set("deliveryTag", msg.delivery_tag)?;
+
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", msg_obj)?;
+                    result.set("reason", Value::new_null(ctx))?;
+                    Ok(result.into_value())
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(Value::new_null(ctx)),
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Ok(Value::new_null(ctx)),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", Value::new_null(ctx.clone()))?;
+                    result.set("reason", "timeout")?;
+                    Ok(result.into_value())
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", Value::new_null(ctx.clone()))?;
+                    result.set("reason", "closed")?;
+                    Ok(result.into_value())
+                }
             }
         } else {
-            Ok(Value::new_null(ctx))
+            let result = Object::new(ctx.clone())?;
+            result.set("value", Value::new_null(ctx.clone()))?;
+            result.set("reason", "not_connected")?;
+            Ok(result.into_value())
         }
     }
 
@@ -321,10 +343,22 @@ impl JsAmqpClient {
         // Signal background thread to stop
         self.running.store(false, Ordering::SeqCst);
 
+        // Wait for background thread to exit (with timeout)
+        if let Some(handle) = self._background_handle.take() {
+            // Give thread 1 second to finish gracefully
+            let start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < std::time::Duration::from_secs(1) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+            // If not finished after timeout, drop anyway (thread will exit on next flag check)
+        }
+
         self.connection = None;
         self.channel = None;
         self.message_rx = None;
-        self._background_handle = None;
         Ok(())
     }
 }

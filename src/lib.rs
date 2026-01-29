@@ -7,4 +7,4 @@ pub mod tui;
 pub mod utils;
 
 pub use engine::Engine;
-pub use utils::parse_duration_str;
+pub use utils::{parse_duration_str, parse_duration_str_or_warn};

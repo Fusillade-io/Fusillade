@@ -315,6 +315,8 @@ pub struct GrpcServerStream {
     message_rx: RefCell<Option<crossbeam_channel::Receiver<DynamicMessage>>>,
     #[qjs(skip_trace)]
     running: Arc<AtomicBool>,
+    #[qjs(skip_trace)]
+    _background_handle: RefCell<Option<std::thread::JoinHandle<()>>>,
 }
 
 unsafe impl<'js> JsLifetime<'js> for GrpcServerStream {
@@ -324,17 +326,38 @@ unsafe impl<'js> JsLifetime<'js> for GrpcServerStream {
 #[rquickjs::methods]
 impl GrpcServerStream {
     /// Receive the next message from the server stream
-    /// Returns message object or null if stream ended
-    pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+    /// Returns { value: message | null, reason: "timeout" | "closed" | "not_connected" | null }
+    pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
         let borrow = self.message_rx.borrow();
+
         if let Some(ref rx) = *borrow {
-            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(msg) => dynamic_message_to_js(&ctx, &msg),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(Value::new_null(ctx)),
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Ok(Value::new_null(ctx)),
+            match rx.recv_timeout(timeout) {
+                Ok(msg) => {
+                    let msg_val = dynamic_message_to_js(&ctx, &msg)?;
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", msg_val)?;
+                    result.set("reason", Value::new_null(ctx))?;
+                    Ok(result.into_value())
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", Value::new_null(ctx.clone()))?;
+                    result.set("reason", "timeout")?;
+                    Ok(result.into_value())
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", Value::new_null(ctx.clone()))?;
+                    result.set("reason", "closed")?;
+                    Ok(result.into_value())
+                }
             }
         } else {
-            Ok(Value::new_null(ctx))
+            let result = Object::new(ctx.clone())?;
+            result.set("value", Value::new_null(ctx.clone()))?;
+            result.set("reason", "not_connected")?;
+            Ok(result.into_value())
         }
     }
 
@@ -342,6 +365,18 @@ impl GrpcServerStream {
     pub fn close(&self) -> Result<()> {
         self.running.store(false, Ordering::SeqCst);
         *self.message_rx.borrow_mut() = None;
+
+        // Wait for background thread to exit (with timeout)
+        if let Some(handle) = self._background_handle.borrow_mut().take() {
+            let start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < std::time::Duration::from_secs(1) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+
         Ok(())
     }
 }
@@ -435,6 +470,8 @@ pub struct GrpcBidiStream {
     running: Arc<AtomicBool>,
     #[qjs(skip_trace)]
     input_desc: prost_reflect::MessageDescriptor,
+    #[qjs(skip_trace)]
+    _background_handle: RefCell<Option<std::thread::JoinHandle<()>>>,
 }
 
 unsafe impl<'js> JsLifetime<'js> for GrpcBidiStream {
@@ -463,16 +500,38 @@ impl GrpcBidiStream {
     }
 
     /// Receive a message from the server
-    pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+    /// Returns { value: message | null, reason: "timeout" | "closed" | "not_connected" | null }
+    pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
         let borrow = self.message_rx.borrow();
+
         if let Some(ref rx) = *borrow {
-            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(msg) => dynamic_message_to_js(&ctx, &msg),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(Value::new_null(ctx)),
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Ok(Value::new_null(ctx)),
+            match rx.recv_timeout(timeout) {
+                Ok(msg) => {
+                    let msg_val = dynamic_message_to_js(&ctx, &msg)?;
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", msg_val)?;
+                    result.set("reason", Value::new_null(ctx))?;
+                    Ok(result.into_value())
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", Value::new_null(ctx.clone()))?;
+                    result.set("reason", "timeout")?;
+                    Ok(result.into_value())
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", Value::new_null(ctx.clone()))?;
+                    result.set("reason", "closed")?;
+                    Ok(result.into_value())
+                }
             }
         } else {
-            Ok(Value::new_null(ctx))
+            let result = Object::new(ctx.clone())?;
+            result.set("value", Value::new_null(ctx.clone()))?;
+            result.set("reason", "not_connected")?;
+            Ok(result.into_value())
         }
     }
 
@@ -481,6 +540,18 @@ impl GrpcBidiStream {
         self.running.store(false, Ordering::SeqCst);
         *self.message_tx.borrow_mut() = None;
         *self.message_rx.borrow_mut() = None;
+
+        // Wait for background thread to exit (with timeout)
+        if let Some(handle) = self._background_handle.borrow_mut().take() {
+            let start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < std::time::Duration::from_secs(1) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+
         Ok(())
     }
 }
@@ -550,15 +621,18 @@ impl GrpcClient {
 #[rquickjs::methods]
 impl GrpcClient {
     #[qjs(constructor)]
-    pub fn new(ctx: Ctx<'_>) -> Self {
+    pub fn new(ctx: Ctx<'_>) -> Result<Self> {
         let tx = ctx.userdata::<GrpcMetricSender>().map(|w| w.0.clone());
-        let rt = Runtime::new().expect("Failed to create gRPC runtime");
-        Self {
+        let rt = Runtime::new().map_err(|e| {
+            eprintln!("Failed to create gRPC runtime: {}", e);
+            rquickjs::Error::new_from_js("Failed to create gRPC runtime", "RuntimeError")
+        })?;
+        Ok(Self {
             pool: RefCell::new(None),
             channel: RefCell::new(None),
             runtime: Arc::new(rt),
             tx,
-        }
+        })
     }
 
     pub fn load(&self, files: Vec<String>, includes: Vec<String>) -> Result<()> {
@@ -730,7 +804,7 @@ impl GrpcClient {
         let rt_clone = self.runtime.clone();
 
         // Spawn background task to read from stream
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             rt_clone.block_on(async {
                 while running_clone.load(Ordering::SeqCst) {
                     let timeout_result = tokio::time::timeout(
@@ -764,6 +838,7 @@ impl GrpcClient {
         let stream = GrpcServerStream {
             message_rx: RefCell::new(Some(rx)),
             running,
+            _background_handle: RefCell::new(Some(handle)),
         };
 
         let instance = rquickjs::Class::<GrpcServerStream>::instance(ctx, stream)?;
@@ -870,7 +945,7 @@ impl GrpcClient {
         let rt = self.runtime.clone();
 
         // Spawn background task to handle the bidi streaming call
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             rt.block_on(async {
                 let request_stream = async_stream::stream! {
                     while let Some(msg) = send_rx.recv().await {
@@ -913,10 +988,60 @@ impl GrpcClient {
             runtime: self.runtime.clone(),
             running,
             input_desc,
+            _background_handle: RefCell::new(Some(handle)),
         };
 
         let instance = rquickjs::Class::<GrpcBidiStream>::instance(ctx, stream)?;
         Ok(instance.into_value())
+    }
+}
+
+impl Drop for GrpcServerStream {
+    fn drop(&mut self) {
+        // Signal background thread to stop and clean up
+        self.running.store(false, Ordering::SeqCst);
+        if let Ok(mut borrow) = self.message_rx.try_borrow_mut() {
+            *borrow = None;
+        }
+        if let Ok(mut borrow) = self._background_handle.try_borrow_mut() {
+            if let Some(handle) = borrow.take() {
+                let start = std::time::Instant::now();
+                while !handle.is_finished()
+                    && start.elapsed() < std::time::Duration::from_millis(100)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                if handle.is_finished() {
+                    let _ = handle.join();
+                }
+            }
+        }
+    }
+}
+
+impl Drop for GrpcBidiStream {
+    fn drop(&mut self) {
+        // Signal background thread to stop and clean up
+        self.running.store(false, Ordering::SeqCst);
+        if let Ok(mut borrow) = self.message_tx.try_borrow_mut() {
+            *borrow = None;
+        }
+        if let Ok(mut borrow) = self.message_rx.try_borrow_mut() {
+            *borrow = None;
+        }
+        if let Ok(mut borrow) = self._background_handle.try_borrow_mut() {
+            if let Some(handle) = borrow.take() {
+                let start = std::time::Instant::now();
+                while !handle.is_finished()
+                    && start.elapsed() < std::time::Duration::from_millis(100)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                if handle.is_finished() {
+                    let _ = handle.join();
+                }
+            }
+        }
     }
 }
 

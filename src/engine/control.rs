@@ -1,7 +1,6 @@
-use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Commands that can be sent to control a running load test
@@ -27,8 +26,8 @@ pub struct ControlState {
     pub paused: AtomicBool,
     /// Target worker count (for dynamic scaling)
     pub target_workers: AtomicUsize,
-    /// Tags to add to all metrics - uses ArcSwap for lock-free reads
-    pub tags: ArcSwap<HashMap<String, String>>,
+    /// Tags to add to all metrics - uses Mutex for thread-safe updates
+    tags: Mutex<HashMap<String, String>>,
     /// Stop flag
     pub stopped: AtomicBool,
     /// Accumulated paused duration in milliseconds
@@ -44,7 +43,7 @@ impl ControlState {
         Self {
             paused: AtomicBool::new(false),
             target_workers: AtomicUsize::new(initial_workers),
-            tags: ArcSwap::from_pointee(HashMap::new()),
+            tags: Mutex::new(HashMap::new()),
             stopped: AtomicBool::new(false),
             total_paused_ms: AtomicU64::new(0),
             pause_started_ms: AtomicU64::new(0),
@@ -97,17 +96,15 @@ impl ControlState {
     }
 
     pub fn add_tag(&self, key: String, value: String) {
-        // Copy-on-write update for tags
-        let current = self.tags.load();
-        let mut new_tags = (**current).clone();
-        new_tags.insert(key, value);
-        self.tags.store(Arc::new(new_tags));
+        // Thread-safe update using Mutex
+        let mut tags = self.tags.lock();
+        tags.insert(key, value);
     }
 
     #[allow(dead_code)]
-    pub fn get_tags(&self) -> Arc<HashMap<String, String>> {
-        // Lock-free read - returns Arc reference (no clone!)
-        self.tags.load_full()
+    pub fn get_tags(&self) -> HashMap<String, String> {
+        // Clone the tags to return owned value
+        self.tags.lock().clone()
     }
 
     pub fn stop(&self) {
@@ -229,8 +226,6 @@ mod tests {
         state.add_tag("env".to_string(), "prod".to_string());
         let tags = state.get_tags();
         assert_eq!(tags.get("env"), Some(&"prod".to_string()));
-        // Verify Arc is returned (no extra clone)
-        assert!(std::sync::Arc::strong_count(&tags) >= 1);
     }
 
     #[test]

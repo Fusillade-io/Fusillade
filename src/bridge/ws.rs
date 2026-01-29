@@ -77,8 +77,18 @@ impl JsWebSocket {
                 Ok(msg) => {
                     let _ = self.tx.send(make_metric("ws::recv", start, None));
                     match msg {
-                        Message::Text(s) => s.to_string().into_js(&ctx),
-                        Message::Binary(b) => String::from_utf8_lossy(&b).to_string().into_js(&ctx),
+                        Message::Text(s) => {
+                            // Return text messages as string for backwards compatibility
+                            s.to_string().into_js(&ctx)
+                        }
+                        Message::Binary(b) => {
+                            // Return binary data as object with type indicator and base64 data
+                            use base64::Engine;
+                            let obj = Object::new(ctx.clone())?;
+                            obj.set("type", "binary")?;
+                            obj.set("data", base64::engine::general_purpose::STANDARD.encode(&b))?;
+                            Ok(obj.into_value())
+                        }
                         Message::Close(_) => {
                             *borrow = None;
                             Ok(Value::new_null(ctx))
@@ -141,6 +151,17 @@ fn ws_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
             }
             let err_val = err_msg.into_js(&ctx)?;
             Err(ctx.throw(err_val))
+        }
+    }
+}
+
+impl Drop for JsWebSocket {
+    fn drop(&mut self) {
+        // Clean up WebSocket connection when JS object is garbage collected
+        if let Ok(mut borrow) = self.inner.try_borrow_mut() {
+            if let Some(mut ws) = borrow.take() {
+                let _ = ws.close(None);
+            }
         }
     }
 }

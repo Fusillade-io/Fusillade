@@ -162,35 +162,48 @@ impl JsMqttClient {
     }
 
     /// Receive the next message from subscribed topics
-    /// Returns { topic, payload, qos } or null if no message available/disconnected
-    pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+    /// Returns { value: { topic, payload, qos } | null, reason: "timeout" | "closed" | "not_connected" | null }
+    pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
         let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
+
         if let Some(ref rx) = self.message_rx {
-            // Use recv_timeout for blocking with reasonable timeout
-            match rx.recv_timeout(Duration::from_secs(30)) {
+            // Use recv_timeout for blocking with configurable timeout
+            match rx.recv_timeout(timeout) {
                 Ok(msg) => {
                     if let Some(ref mtx) = self.tx {
                         let _ = mtx.send(make_metric("mqtt::recv", start, None));
                     }
-                    let obj = Object::new(ctx.clone())?;
-                    obj.set("topic", msg.topic)?;
+                    let msg_obj = Object::new(ctx.clone())?;
+                    msg_obj.set("topic", msg.topic)?;
                     // Try to decode payload as UTF-8 string, otherwise use lossy conversion
                     let payload_str = String::from_utf8_lossy(&msg.payload).into_owned();
-                    obj.set("payload", payload_str)?;
-                    obj.set("qos", msg.qos)?;
-                    Ok(obj.into_value())
+                    msg_obj.set("payload", payload_str)?;
+                    msg_obj.set("qos", msg.qos)?;
+
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", msg_obj)?;
+                    result.set("reason", Value::new_null(ctx))?;
+                    Ok(result.into_value())
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    // Timeout - return null to allow script to check/continue
-                    Ok(Value::new_null(ctx))
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", Value::new_null(ctx.clone()))?;
+                    result.set("reason", "timeout")?;
+                    Ok(result.into_value())
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    // Channel closed
-                    Ok(Value::new_null(ctx))
+                    let result = Object::new(ctx.clone())?;
+                    result.set("value", Value::new_null(ctx.clone()))?;
+                    result.set("reason", "closed")?;
+                    Ok(result.into_value())
                 }
             }
         } else {
-            Ok(Value::new_null(ctx))
+            let result = Object::new(ctx.clone())?;
+            result.set("value", Value::new_null(ctx.clone()))?;
+            result.set("reason", "not_connected")?;
+            Ok(result.into_value())
         }
     }
 
@@ -227,10 +240,21 @@ impl JsMqttClient {
         // Signal background thread to stop
         self.running.store(false, Ordering::SeqCst);
 
+        // Wait for background thread to exit (with timeout)
+        if let Some(handle) = self._background_handle.take() {
+            // Give thread 1 second to finish gracefully
+            let start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < std::time::Duration::from_secs(1) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+            // If not finished after timeout, drop anyway (thread will exit on next flag check)
+        }
+
         self.client = None;
         self.message_rx = None;
-        // Note: JoinHandle is dropped automatically, thread will stop on next iteration
-        self._background_handle = None;
         Ok(())
     }
 }
