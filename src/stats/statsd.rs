@@ -331,7 +331,7 @@ mod tests {
         report.status_codes.insert(200, 950);
         report.status_codes.insert(500, 50);
         report.counters.insert("my_counter".to_string(), 42.0);
-        report.gauges.insert("my_gauge".to_string(), 3.14);
+        report.gauges.insert("my_gauge".to_string(), 3.15);
         report.rates.insert(
             "success_rate".to_string(),
             RateReport {
@@ -422,7 +422,7 @@ mod tests {
             .any(|m| m.contains("fusillade.custom.counter:42|c|#name:my_counter")));
         assert!(metrics
             .iter()
-            .any(|m| m.contains("fusillade.custom.gauge:3.14|g|#name:my_gauge")));
+            .any(|m| m.contains("fusillade.custom.gauge:3.15|g|#name:my_gauge")));
         assert!(metrics
             .iter()
             .any(|m| m.contains("fusillade.custom.rate:0.9")));
