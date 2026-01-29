@@ -1754,7 +1754,7 @@ impl Engine {
                                         }
 
                                         iteration_count += 1;
-                                        // Check iteration limit (per-vu-iterations executor)
+                                        // Check iteration limit (per-worker-iterations executor)
                                         if let Some(max_iter) = max_iterations {
                                             if iteration_count >= max_iter {
                                                 break;

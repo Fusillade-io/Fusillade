@@ -187,7 +187,7 @@ enum Commands {
         /// Capture failed requests to file for later replay (default: fusillade-errors.json)
         #[arg(long)]
         capture_errors: Option<Option<PathBuf>>,
-        /// Fixed iterations per worker (per-vu-iterations)
+        /// Fixed iterations per worker
         #[arg(long)]
         iterations: Option<u64>,
         /// Warmup URL to hit before test starts
