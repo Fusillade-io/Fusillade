@@ -69,6 +69,47 @@ impl JsWebSocket {
         }
     }
 
+    #[qjs(rename = "sendBinary")]
+    pub fn send_binary(&self, data: String) -> Result<()> {
+        use base64::Engine;
+        let start = Instant::now();
+        let decoded = match base64::engine::general_purpose::STANDARD.decode(&data) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let err_msg = format!("Base64 decode error: {}", e);
+                let _ = self
+                    .tx
+                    .send(make_metric("ws::sendBinary", start, Some(err_msg.clone())));
+                eprintln!("{}", err_msg);
+                return Err(rquickjs::Error::Exception);
+            }
+        };
+        let mut borrow = self.inner.borrow_mut();
+        if let Some(ws) = borrow.as_mut() {
+            match ws.send(Message::Binary(decoded.into())) {
+                Ok(()) => {
+                    let _ = self.tx.send(make_metric("ws::sendBinary", start, None));
+                    Ok(())
+                }
+                Err(e) => {
+                    let err_msg = format!("WS SendBinary Error: {}", e);
+                    let _ = self
+                        .tx
+                        .send(make_metric("ws::sendBinary", start, Some(err_msg.clone())));
+                    eprintln!("{}", err_msg);
+                    Err(rquickjs::Error::Exception)
+                }
+            }
+        } else {
+            let _ = self.tx.send(make_metric(
+                "ws::sendBinary",
+                start,
+                Some("WebSocket not connected".to_string()),
+            ));
+            Err(rquickjs::Error::Exception)
+        }
+    }
+
     pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
         let start = Instant::now();
         let mut borrow = self.inner.borrow_mut();

@@ -78,7 +78,7 @@ pub fn convert_from_string(har_content: &str) -> Result<String> {
         }
 
         writeln!(&mut js, "    }})")?;
-        writeln!(&mut js, "    sleep(100);")?;
+        writeln!(&mut js, "    sleep(0.1);")?;
     }
 
     writeln!(&mut js, "}}")?;
@@ -197,7 +197,7 @@ mod tests {
         assert!(result.contains("https://example.com/first"));
         assert!(result.contains("https://example.com/second"));
         // Should have 2 sleep calls
-        assert_eq!(result.matches("sleep(100)").count(), 2);
+        assert_eq!(result.matches("sleep(0.1)").count(), 2);
     }
 
     #[test]

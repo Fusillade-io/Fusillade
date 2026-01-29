@@ -487,6 +487,28 @@ impl<'js> IntoJs<'js> for HttpResponse {
             }),
         )?;
 
+        // Add html(selector) method - extract text from first matching CSS selector
+        let body_for_html = body_string.clone();
+        obj.set(
+            "html",
+            Function::new(ctx.clone(), move |selector: String| -> Result<String> {
+                let document = scraper::Html::parse_document(&body_for_html);
+                let sel = match scraper::Selector::parse(&selector) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return Err(rquickjs::Error::new_from_js(
+                            "Invalid CSS selector",
+                            "SyntaxError",
+                        ));
+                    }
+                };
+                match document.select(&sel).next() {
+                    Some(element) => Ok(element.text().collect::<String>()),
+                    None => Ok(String::new()),
+                }
+            }),
+        )?;
+
         // Add cookies property - parse Set-Cookie headers
         // Format: { cookieName: { value, domain, path, expires, httpOnly, secure, sameSite }, ... }
         let cookies_obj = Object::new(ctx.clone())?;
