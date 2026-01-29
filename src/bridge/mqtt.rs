@@ -58,6 +58,16 @@ impl<'js> Trace<'js> for JsMqttClient {
     fn trace(&self, _tracer: Tracer<'_, 'js>) {}
 }
 
+/// Map optional u8 QoS value to rumqttc QoS enum
+/// 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce
+fn map_qos(qos: Option<u8>) -> QoS {
+    match qos.unwrap_or(1) {
+        0 => QoS::AtMostOnce,
+        2 => QoS::ExactlyOnce,
+        _ => QoS::AtLeastOnce,
+    }
+}
+
 #[rquickjs::methods]
 impl JsMqttClient {
     #[qjs(constructor)]
@@ -132,10 +142,12 @@ impl JsMqttClient {
     }
 
     /// Subscribe to a topic pattern (supports MQTT wildcards + and #)
-    pub fn subscribe(&mut self, topic: String) -> Result<()> {
+    /// Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce
+    pub fn subscribe(&mut self, topic: String, qos: Option<u8>) -> Result<()> {
         let start = Instant::now();
+        let qos_level = map_qos(qos);
         if let Some(ref mut client) = self.client {
-            match client.subscribe(&topic, QoS::AtLeastOnce) {
+            match client.subscribe(&topic, qos_level) {
                 Ok(()) => {
                     if let Some(ref mtx) = self.tx {
                         let _ = mtx.send(make_metric("mqtt::subscribe", start, None));
@@ -207,10 +219,13 @@ impl JsMqttClient {
         }
     }
 
-    pub fn publish(&mut self, topic: String, payload: String) -> Result<()> {
+    /// Publish a message to a topic
+    /// Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce
+    pub fn publish(&mut self, topic: String, payload: String, qos: Option<u8>) -> Result<()> {
         let start = Instant::now();
+        let qos_level = map_qos(qos);
         if let Some(ref mut client) = self.client {
-            match client.publish(topic, QoS::AtLeastOnce, false, payload.as_bytes()) {
+            match client.publish(topic, qos_level, false, payload.as_bytes()) {
                 Ok(()) => {
                     if let Some(ref mtx) = self.tx {
                         let _ = mtx.send(make_metric("mqtt::publish", start, None));

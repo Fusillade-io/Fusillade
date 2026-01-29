@@ -302,7 +302,7 @@ Workers connect to the controller, and tests are dispatched via the controller's
 Convert browser recordings (.har) directly into Fusillade flows:
 
 ```bash
-fusillade convert --input recording.har --output flow.js
+fusillade convert recording.har --output flow.js
 ```
 
 ---
@@ -794,6 +794,7 @@ The `Response` object returned by requests contains:
 * `bodyMatches(pattern)` (Function): Returns `true` if body matches the regex pattern.
 * `hasHeader(name, [value])` (Function): Returns `true` if header exists. If `value` is provided, also checks the header value matches.
 * `isJson()` (Function): Returns `true` if body is valid JSON.
+* `html(selector)` (Function): Parses body as HTML and returns the inner text of the first element matching the CSS selector. Returns empty string if no match found.
 * `headers` (Object): Response headers.
 * `cookies` (Object): Response cookies (parsed from Set-Cookie headers).
 * `error` (String): Error type for failed requests: `TIMEOUT`, `DNS`, `TLS`, `CONNECT`, `RESET`, `NETWORK`.
@@ -918,6 +919,7 @@ if (sessionCookie) {
 
 * `ws.connect(url)`: Opens a WebSocket connection, returns a socket object.
 * `socket.send(text)`: Sends a text message.
+* `socket.sendBinary(data)`: Sends binary data. `data` is a base64-encoded string.
 * `socket.recv()`: Blocking receive. Returns:
   - Text frames as string
   - Binary frames as `{ type: "binary", data: "<base64>" }`
@@ -1146,8 +1148,8 @@ stream.close();
 
 * `new JsMqttClient()`: Create a new MQTT client.
 * `.connect(host, port, clientId)`: Connect to MQTT broker.
-* `.subscribe(topic)`: Subscribe to a topic pattern (supports MQTT wildcards `+` and `#`).
-* `.publish(topic, payload)`: Publish a message to a topic.
+* `.subscribe(topic, [qos])`: Subscribe to a topic pattern (supports MQTT wildcards `+` and `#`). Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce.
+* `.publish(topic, payload, [qos])`: Publish a message to a topic. Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce.
 * `.recv(timeoutMs?)`: Receive next message (blocking). Returns `RecvResult<{ topic, payload, qos }>`.
 * `.close()`: Close the connection.
 
@@ -1629,7 +1631,7 @@ Starts an interactive proxy to record HTTP traffic and generate a Fusillade scen
 Converts a HAR (HTTP Archive) file into a Fusillade JavaScript scenario.
 
 **Arguments:**
-* `--input <FILE>`: Input .har file path.
+* `<FILE>`: Input .har file path (positional argument).
 * `--output <FILE>`: Output .js file path.
 
 ### `fusillade worker`
@@ -2055,7 +2057,7 @@ When running with `--headless --interactive`, Fusillade accepts commands via std
 | `fusillade replay <errors.json>` | Replay failed requests |
 | `fusillade schema -o config.json` | Generate JSON schema |
 | `fusillade record -o flow.js` | Record HTTP traffic as a script |
-| `fusillade convert --input file.har` | Convert HAR to JS |
+| `fusillade convert file.har` | Convert HAR to JS |
 | `fusillade worker --listen 0.0.0.0:8080` | Start worker node |
 | `fusillade controller --listen 0.0.0.0:9000` | Start controller node |
 
