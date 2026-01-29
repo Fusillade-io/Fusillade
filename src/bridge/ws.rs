@@ -269,6 +269,23 @@ mod tests {
     }
 
     #[test]
+    fn test_base64_decode_for_send_binary() {
+        use base64::Engine;
+        let input = "SGVsbG8sIFdvcmxkIQ=="; // "Hello, World!" in base64
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(input)
+            .unwrap();
+        assert_eq!(decoded, b"Hello, World!");
+    }
+
+    #[test]
+    fn test_base64_decode_invalid() {
+        use base64::Engine;
+        let result = base64::engine::general_purpose::STANDARD.decode("not-valid-base64!!!");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_ws_metrics_sent_to_channel() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let start = Instant::now();

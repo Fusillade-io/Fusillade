@@ -352,6 +352,33 @@ mod tests {
     }
 
     #[test]
+    fn test_map_qos_default() {
+        assert!(matches!(map_qos(None), QoS::AtLeastOnce));
+    }
+
+    #[test]
+    fn test_map_qos_at_most_once() {
+        assert!(matches!(map_qos(Some(0)), QoS::AtMostOnce));
+    }
+
+    #[test]
+    fn test_map_qos_at_least_once() {
+        assert!(matches!(map_qos(Some(1)), QoS::AtLeastOnce));
+    }
+
+    #[test]
+    fn test_map_qos_exactly_once() {
+        assert!(matches!(map_qos(Some(2)), QoS::ExactlyOnce));
+    }
+
+    #[test]
+    fn test_map_qos_invalid_falls_back() {
+        // Invalid values default to AtLeastOnce
+        assert!(matches!(map_qos(Some(3)), QoS::AtLeastOnce));
+        assert!(matches!(map_qos(Some(255)), QoS::AtLeastOnce));
+    }
+
+    #[test]
     fn test_mqtt_make_metric_success() {
         let start = std::time::Instant::now();
         std::thread::sleep(std::time::Duration::from_millis(5));
