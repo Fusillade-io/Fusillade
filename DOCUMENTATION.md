@@ -153,7 +153,7 @@ export function teardown(data) {
 
 **Lifecycle Flow:**
 ```
-setup() → [VU iterations run in parallel] → teardown(data) → handleSummary(data)
+setup() → [worker iterations run in parallel] → teardown(data) → handleSummary(data)
    ↓              ↓                              ↓                    ↓
  1x only    N workers × M iterations         1x only              1x only
 ```
@@ -198,12 +198,12 @@ Fusillade supports multiple executor types for different load patterns:
 
 | Executor | Description | Use Case |
 |----------|-------------|----------|
-| `constant-vus` | Maintain a fixed number of virtual users (default) | Baseline load testing |
-| `ramping-vus` | Gradually adjust VU count through stages | Load ramp-up/down |
+| `constant-vus` | Maintain a fixed number of workers (default) | Baseline load testing |
+| `ramping-vus` | Gradually adjust worker count through stages | Load ramp-up/down |
 | `constant-arrival-rate` | Maintain a fixed request rate (RPS) | API rate limit testing |
 | `ramping-arrival-rate` | Adjust request rate through stages | Variable RPS testing |
-| `per-vu-iterations` | Each VU runs a fixed number of iterations | Iteration-based testing |
-| `shared-iterations` | All VUs share a pool of iterations | Fixed total iterations |
+| `per-vu-iterations` | Each worker runs a fixed number of iterations | Iteration-based testing |
+| `shared-iterations` | All workers share a pool of iterations | Fixed total iterations |
 
 ```javascript
 export const options = {
@@ -213,12 +213,12 @@ export const options = {
     duration: '1m',
 };
 
-// Ramping VUs - gradually scale VU count
+// Ramping workers - gradually scale worker count
 export const options = {
     executor: 'ramping-vus',
     stages: [
-        { duration: '30s', target: 20 },  // Ramp to 20 VUs
-        { duration: '1m', target: 50 },   // Ramp to 50 VUs
+        { duration: '30s', target: 20 },  // Ramp to 20 workers
+        { duration: '1m', target: 50 },   // Ramp to 50 workers
         { duration: '30s', target: 0 },   // Ramp down
     ],
 };
@@ -243,11 +243,11 @@ export const options = {
     workers: 50,         // Worker pool
 };
 
-// Per-VU Iterations - fixed iterations per VU
+// Per-worker Iterations - fixed iterations per worker
 export const options = {
     executor: 'per-vu-iterations',
     workers: 10,
-    iterations: 100,     // Each VU runs exactly 100 iterations
+    iterations: 100,     // Each worker runs exactly 100 iterations
 };
 ```
 
@@ -313,12 +313,12 @@ Fusillade is configured via the `export const options` object in your script.
 
 | Option | Type | Description | Example |
 | :--- | :--- | :--- | :--- |
-| `workers` | Number | Number of concurrent virtual users (VUs). | `20` |
+| `workers` | Number | Number of concurrent workers. | `20` |
 | `duration` | String | Total duration of the test. | `'30s'`, `'1m'` |
-| `stages` | Array | Ramping schedule (target VUs over time). | `[{ duration: '10s', target: 50 }]` |
+| `stages` | Array | Ramping schedule (target workers over time). | `[{ duration: '10s', target: 50 }]` |
 | `thresholds` | Object | Pass/fail criteria. | `{ 'http_req_duration': ['p95 < 500'] }` |
 | `stop` | String | Wait time for active iterations to finish after test duration expires. Defaults to `'30s'`. | `'30s'` |
-| `iterations` | Number | Fixed number of iterations per worker (per-vu-iterations executor). If set, workers run exactly this many iterations then exit. | `10` |
+| `iterations` | Number | Fixed number of iterations per worker. If set, workers run exactly this many iterations then exit. | `10` |
 | `warmup` | String | URL to hit for connection pool warmup before test starts. | `'https://api.example.com'` |
 | `min_iteration_duration` | String | Minimum time each iteration must take. If an iteration finishes faster, it waits before starting the next. Useful for rate limiting. | `'1s'` |
 | `scenarios` | Object | Multiple named scenarios with independent configs (see below). | `{ fast: {...}, slow: {...} }` |
@@ -485,7 +485,7 @@ The `config/` directory includes ready-to-use templates:
 ### Test Types Explained
 
 #### Load Test (Ramping)
-Gradually increases virtual users to understand how performance degrades under load.
+Gradually increases workers to understand how performance degrades under load.
 
 ```yaml
 # config/ramping.yaml
@@ -846,7 +846,7 @@ This auto-naming reduces metric cardinality for APIs with dynamic IDs, making re
 
 ### Automatic Cookie Handling
 
-Fusillade automatically manages cookies per worker (VU). Cookies received via `Set-Cookie` headers are stored and sent on subsequent requests to matching domains. This enables realistic session-based testing without manual cookie management.
+Fusillade automatically manages cookies per worker. Cookies received via `Set-Cookie` headers are stored and sent on subsequent requests to matching domains. This enables realistic session-based testing without manual cookie management.
 
 ```javascript
 // First request - server sets session cookie
@@ -974,7 +974,7 @@ check(response, {
 - Return `false` = check failed (generic message)
 - Return `string` = check failed with custom message (the returned string)
 
-* `sleep(seconds)`: Pauses the virtual user for the specified duration (fractional seconds supported). Sleep time is automatically excluded from iteration response time metrics.
+* `sleep(seconds)`: Pauses the worker for the specified duration (fractional seconds supported). Sleep time is automatically excluded from iteration response time metrics.
 * `sleepRandom(min, max)`: Pauses for a random duration between `min` and `max` seconds. Useful for realistic think times. Sleep time is automatically excluded from iteration response time metrics.
 * `print(message)`: Logs a message to stdout and the worker logs file.
 * `open(path)`: Reads a file from the local filesystem and returns its content as a string. Useful for loading data files (e.g., JSON or CSV). Only available during initialization, not inside the default function.
@@ -1030,7 +1030,7 @@ fusillade run test.js --log-level error   # Only show errors
 * `__WORKER_ID`: The current worker's numeric ID (0-indexed). Useful for partitioning data across workers.
 * `__SCENARIO`: Name of the currently executing scenario (in multi-scenario tests).
 * `__ITERATION`: The current iteration number for this worker (0-indexed).
-* `__VU_STATE`: Per-VU state object that persists across iterations. Use for storing session data, counters, or any state that should survive between iterations.
+* `__VU_STATE`: Per-worker state object that persists across iterations. Use for storing session data, counters, or any state that should survive between iterations.
 
 ```javascript
 // Use worker ID to partition test data
@@ -1039,9 +1039,9 @@ const userId = users[__WORKER_ID % users.length];
 // Access environment variables
 const apiKey = __ENV.API_KEY || 'default-key';
 
-// Track per-VU state across iterations
+// Track per-worker state across iterations
 __VU_STATE.loginCount = (__VU_STATE.loginCount || 0) + 1;
-console.log(`VU ${__WORKER_ID} iteration ${__ITERATION}, logins: ${__VU_STATE.loginCount}`);
+console.log(`Worker ${__WORKER_ID} iteration ${__ITERATION}, logins: ${__VU_STATE.loginCount}`);
 
 // Store session data that persists
 if (!__VU_STATE.token) {
@@ -1350,7 +1350,7 @@ Fusillade automatically collects the following metrics:
   * `data_received`: Total bytes received from the target.
 
 * **Execution:**
-  * `vus`: Number of active virtual users.
+  * `vus`: Number of active workers.
   * `iterations`: Number of completed script iterations.
 
 * **Iteration Timing:**
@@ -1463,9 +1463,9 @@ Executes a load test script.
 * `<SCENARIO>`: Path to the JavaScript scenario file.
 
 **Options:**
-* `-w, --workers <NUM>`: Override the number of concurrent workers (VUs).
+* `-w, --workers <NUM>`: Override the number of concurrent workers.
 * `-d, --duration <DURATION>`: Override the test duration (e.g., `30s`, `5m`).
-* `--iterations <NUM>`: Override iterations per worker (per-vu-iterations mode).
+* `--iterations <NUM>`: Override iterations per worker.
 * `--warmup <URL>`: Hit this URL before test starts to warm up connection pools.
 * `--response-sink`: Discard response bodies to save memory (enables response sink mode).
 * `--threshold <EXPR>`: Add a threshold expression (repeatable, e.g., `--threshold 'http_req_duration:p95<500'`).
