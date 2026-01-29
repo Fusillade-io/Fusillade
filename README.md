@@ -86,7 +86,7 @@ fusillade convert --input recording.har --output flow.js
 ```
 
 ### Configuration Options
-- `workers` - Number of virtual users
+- `workers` - Number of concurrent workers
 - `duration` - Test duration
 - `stages` - Ramping schedule
 - `thresholds` - Pass/fail criteria
