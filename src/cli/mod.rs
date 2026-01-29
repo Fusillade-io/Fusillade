@@ -4,7 +4,6 @@ pub mod config;
 pub mod har;
 pub mod init;
 pub mod recorder;
-pub mod types;
 pub mod validate;
 
 use clap::{Parser, Subcommand};

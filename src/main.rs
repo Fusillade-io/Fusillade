@@ -256,10 +256,6 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    Types {
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-    },
     Schema {
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -960,16 +956,6 @@ fn main() -> Result<()> {
                 std::fs::write(out_path, script)?;
             } else {
                 println!("{}", script);
-            }
-            Ok(())
-        }
-        Commands::Types { output } => {
-            let types = fusillade::cli::types::generate_d_ts();
-            if let Some(out_path) = output {
-                std::fs::write(&out_path, types)?;
-                println!("Type definitions written to {:?}", out_path);
-            } else {
-                println!("{}", types);
             }
             Ok(())
         }
