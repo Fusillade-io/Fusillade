@@ -1586,12 +1586,6 @@ fusillade completion zsh >> ~/.zshrc
 fusillade completion fish > ~/.config/fish/completions/fusillade.fish
 ```
 
-### `fusillade types`
-Generates TypeScript type definitions (`index.d.ts`) for IDE support.
-
-**Options:**
-* `-o, --output <FILE>`: Path to write the definition file (default: stdout).
-
 ### `fusillade schema`
 Generates a JSON Schema for validating configuration files.
 
@@ -2039,7 +2033,6 @@ When running with `--headless --interactive`, Fusillade accepts commands via std
 | `fusillade completion <shell>` | Generate shell completions |
 | `fusillade export <errors.json> --format curl` | Export failures to cURL |
 | `fusillade replay <errors.json>` | Replay failed requests |
-| `fusillade types -o index.d.ts` | Generate TypeScript definitions |
 | `fusillade schema -o config.json` | Generate JSON schema |
 | `fusillade record -o flow.js` | Record HTTP traffic as a script |
 | `fusillade convert --input file.har` | Convert HAR to JS |
