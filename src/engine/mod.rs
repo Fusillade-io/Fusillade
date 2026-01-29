@@ -706,8 +706,7 @@ impl Engine {
 
                                                                 let timings = crate::stats::RequestTimings { duration: active_time, ..Default::default() };
                                                                 let timings_total = crate::stats::RequestTimings { duration: elapsed, ..Default::default() };
-                                                                let tags_arc = control_state.get_tags();
-                                                                let tags: HashMap<String, String> = (*tags_arc).clone();
+                                                                let tags: HashMap<String, String> = control_state.get_tags();
 
                                                                 match call_result {
                                                                     Ok(_) => {
@@ -1044,9 +1043,8 @@ impl Engine {
                                                                 ..Default::default()
                                                             };
 
-                                                        let tags_arc = control_state.get_tags();
                                                         let tags: HashMap<String, String> =
-                                                            (*tags_arc).clone();
+                                                            control_state.get_tags();
 
                                                         match call_result {
                                                             Ok(_) => {
@@ -1341,9 +1339,8 @@ impl Engine {
                                         // Secondary metric: iteration_total (includes sleep for pacing analysis)
                                         let timings_total = crate::stats::RequestTimings { duration: elapsed, ..Default::default() };
 
-                                        // Get tags Arc once (no clone of HashMap contents)
-                                        let tags_arc = control_state.get_tags();
-                                        let tags: HashMap<String, String> = (*tags_arc).clone();
+                                        // Get tags
+                                        let tags: HashMap<String, String> = control_state.get_tags();
 
                                         match call_result {
                                             Ok(_) => {
@@ -1714,9 +1711,8 @@ impl Engine {
                                         // Secondary metric: iteration_total (includes sleep for pacing analysis)
                                         let timings_total = crate::stats::RequestTimings { duration: elapsed, ..Default::default() };
 
-                                        // Get tags Arc once (no clone of HashMap contents)
-                                        let tags_arc = control_state.get_tags();
-                                        let tags: HashMap<String, String> = (*tags_arc).clone();
+                                        // Get tags
+                                        let tags: HashMap<String, String> = control_state.get_tags();
 
                                         match call_result {
                                             Ok(_) => {

@@ -918,14 +918,21 @@ if (sessionCookie) {
 
 * `ws.connect(url)`: Opens a WebSocket connection, returns a socket object.
 * `socket.send(text)`: Sends a text message.
-* `socket.recv()`: Blocking receive (returns text, binary as string, or null on close).
+* `socket.recv()`: Blocking receive. Returns:
+  - Text frames as string
+  - Binary frames as `{ type: "binary", data: "<base64>" }`
+  - `null` on close
 * `socket.close()`: Closes the connection.
 
 ```javascript
 const socket = ws.connect('wss://echo.websocket.org');
 socket.send('Hello');
 const response = socket.recv();
-print(response);
+if (typeof response === 'string') {
+    print('Text: ' + response);
+} else if (response && response.type === 'binary') {
+    print('Binary data: ' + response.data); // base64 encoded
+}
 socket.close();
 ```
 
@@ -1093,7 +1100,7 @@ describe("Cart Logic", () => {
 * `.bidiStream(method)`: Start a bidirectional streaming RPC, returns a `GrpcBidiStream`.
 
 **GrpcServerStream:**
-* `.recv()`: Receive next message from server (blocking). Returns object or `null` when stream ends.
+* `.recv(timeoutMs?)`: Receive next message from server (blocking). Returns `RecvResult<message>`.
 * `.close()`: Close the stream early.
 
 **GrpcClientStream:**
@@ -1102,7 +1109,7 @@ describe("Cart Logic", () => {
 
 **GrpcBidiStream:**
 * `.send(msg)`: Send a message to the server.
-* `.recv()`: Receive a message from the server (blocking). Returns object or `null`.
+* `.recv(timeoutMs?)`: Receive a message from the server (blocking). Returns `RecvResult<message>`.
 * `.close()`: Close the stream.
 
 ```javascript
@@ -1115,9 +1122,9 @@ print(response.message);
 
 // Server Streaming RPC
 const stream = client.serverStream('pkg.Service/StreamData', { query: 'test' });
-let msg;
-while ((msg = stream.recv()) !== null) {
-    print(msg.data);
+let result;
+while ((result = stream.recv(5000)) && result.value !== null) {
+    print(result.value.data);
 }
 
 // Client Streaming RPC
@@ -1130,8 +1137,8 @@ print(response.summary);
 // Bidirectional Streaming RPC
 const stream = client.bidiStream('pkg.Service/Chat');
 stream.send({ message: 'Hello' });
-const reply = stream.recv();
-print(reply.response);
+const result = stream.recv();
+if (result.value) print(result.value.response);
 stream.close();
 ```
 
@@ -1141,8 +1148,12 @@ stream.close();
 * `.connect(host, port, clientId)`: Connect to MQTT broker.
 * `.subscribe(topic)`: Subscribe to a topic pattern (supports MQTT wildcards `+` and `#`).
 * `.publish(topic, payload)`: Publish a message to a topic.
-* `.recv()`: Receive next message (blocking). Returns `{ topic, payload, qos }` or `null` on timeout.
+* `.recv(timeoutMs?)`: Receive next message (blocking). Returns `RecvResult<{ topic, payload, qos }>`.
 * `.close()`: Close the connection.
+
+**RecvResult type**: All protocol `recv()` methods return `{ value, reason }`:
+- `value`: The received message or `null` if none
+- `reason`: `null` on success, or `"timeout"`, `"closed"`, `"not_connected"` on failure
 
 ```javascript
 // Publish messages
@@ -1156,10 +1167,12 @@ const mqtt = new JsMqttClient();
 mqtt.connect('localhost', 1883, 'subscriber');
 mqtt.subscribe('sensors/+/temperature');  // Wildcard subscription
 
-let msg;
-while ((msg = mqtt.recv()) !== null) {
+let result;
+while ((result = mqtt.recv(5000)) && result.value !== null) {
+    const msg = result.value;
     print(`${msg.topic}: ${msg.payload}`);
 }
+if (result.reason === 'timeout') print('Timed out waiting for messages');
 mqtt.close();
 ```
 
@@ -1169,7 +1182,7 @@ mqtt.close();
 * `.connect(url)`: Connect to AMQP broker (e.g., `amqp://localhost`).
 * `.subscribe(queue)`: Declare a queue and start consuming messages.
 * `.publish(exchange, routingKey, payload)`: Publish a message.
-* `.recv()`: Receive next message (blocking). Returns `{ body, deliveryTag }` or `null` on timeout.
+* `.recv(timeoutMs?)`: Receive next message (blocking). Returns `RecvResult<{ body, deliveryTag }>`.
 * `.ack(deliveryTag)`: Acknowledge a message by its delivery tag.
 * `.nack(deliveryTag, requeue)`: Negative acknowledge (reject) a message.
 * `.close()`: Close the connection.
@@ -1186,10 +1199,12 @@ const amqp = new JsAmqpClient();
 amqp.connect('amqp://guest:guest@localhost:5672');
 amqp.subscribe('my-queue');
 
-const msg = amqp.recv();
-if (msg !== null) {
-    print(msg.body);
-    amqp.ack(msg.deliveryTag);
+const result = amqp.recv(5000);
+if (result.value !== null) {
+    print(result.value.body);
+    amqp.ack(result.value.deliveryTag);
+} else if (result.reason === 'timeout') {
+    print('No message received within timeout');
 }
 amqp.close();
 ```

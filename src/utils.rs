@@ -40,6 +40,23 @@ pub fn parse_duration_str(s: &str) -> Option<Duration> {
     }
 }
 
+/// Parse a duration string with warning on invalid input.
+///
+/// If the string cannot be parsed, prints a warning and returns the default duration.
+/// This is useful for CLI parsing where silent failures are undesirable.
+pub fn parse_duration_str_or_warn(s: &str, default_secs: u64, context: &str) -> Duration {
+    match parse_duration_str(s) {
+        Some(d) => d,
+        None => {
+            eprintln!(
+                "Warning: Invalid duration '{}' for {}, using default {}s",
+                s, context, default_secs
+            );
+            Duration::from_secs(default_secs)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +108,29 @@ mod tests {
     fn test_parse_invalid() {
         assert_eq!(parse_duration_str("invalid"), None);
         assert_eq!(parse_duration_str("abc123"), None);
+    }
+
+    #[test]
+    fn test_parse_duration_str_or_warn_valid() {
+        assert_eq!(
+            parse_duration_str_or_warn("30s", 60, "test"),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_duration_str_or_warn("500ms", 60, "test"),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_str_or_warn_invalid_uses_default() {
+        assert_eq!(
+            parse_duration_str_or_warn("invalid", 60, "test"),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            parse_duration_str_or_warn("abc", 30, "duration"),
+            Duration::from_secs(30)
+        );
     }
 }

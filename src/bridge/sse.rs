@@ -234,6 +234,15 @@ fn sse_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
     }
 }
 
+impl Drop for JsSseClient {
+    fn drop(&mut self) {
+        // Clean up SSE connection when JS object is garbage collected
+        if let Ok(mut borrow) = self.inner.try_borrow_mut() {
+            *borrow = None;
+        }
+    }
+}
+
 pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
     ctx.store_userdata(SseMetricSender(tx))?;
     rquickjs::Class::<JsSseClient>::define(&ctx.globals())?;
