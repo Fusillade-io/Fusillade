@@ -866,10 +866,10 @@ impl Engine {
                                 println!("[Scenario: {}] Complete.", scenario_name);
                             }
 
-                            // Ramping-VUs executor: dynamically scale workers based on schedule
-                            ExecutorType::RampingVus => {
+                            // Ramping-workers executor: dynamically scale workers based on schedule
+                            ExecutorType::RampingWorkers => {
                                 println!(
-                                    "[Scenario: {}] Starting ramping-vus executor for {}...",
+                                    "[Scenario: {}] Starting ramping-workers executor for {}...",
                                     scenario_name, duration
                                 );
 
@@ -880,8 +880,8 @@ impl Engine {
                                 )> = Vec::new();
                                 let mut next_worker_id = 1usize;
 
-                                // Parse VUs schedule from config
-                                let vus_schedule: Vec<(Duration, usize)> =
+                                // Parse workers schedule from config
+                                let workers_schedule: Vec<(Duration, usize)> =
                                     if let Some(ref steps) = scenario_config.schedule {
                                         steps
                                             .iter()
@@ -1118,20 +1118,21 @@ impl Engine {
                                     (worker_handle.expect("Failed to spawn coroutine"), running)
                                 };
 
-                                // Ramping control loop - adjust VU count every second
+                                // Ramping control loop - adjust worker count every second
                                 while start_time.elapsed() < scenario_duration {
                                     if control_state.is_stopped() {
                                         break;
                                     }
 
-                                    // Calculate target VUs at current time
+                                    // Calculate target workers at current time
                                     let elapsed = start_time.elapsed();
-                                    let target_vus = Self::calculate_target(&vus_schedule, elapsed);
-                                    let current_vus = active_workers.len();
+                                    let target_workers =
+                                        Self::calculate_target(&workers_schedule, elapsed);
+                                    let current_workers = active_workers.len();
 
-                                    if current_vus < target_vus {
+                                    if current_workers < target_workers {
                                         // Spawn more workers
-                                        let to_spawn = target_vus - current_vus;
+                                        let to_spawn = target_workers - current_workers;
                                         for _ in 0..to_spawn {
                                             let (handle, running) = spawn_worker(
                                                 next_worker_id,
@@ -1158,9 +1159,9 @@ impl Engine {
                                             active_workers.push((handle, running));
                                             next_worker_id += 1;
                                         }
-                                    } else if current_vus > target_vus {
+                                    } else if current_workers > target_workers {
                                         // Stop excess workers (from the end)
-                                        let to_stop = current_vus - target_vus;
+                                        let to_stop = current_workers - target_workers;
                                         for _ in 0..to_stop {
                                             if let Some((_, running)) = active_workers.pop() {
                                                 running.store(false, Ordering::Relaxed);
@@ -1168,7 +1169,7 @@ impl Engine {
                                         }
                                     }
 
-                                    // Report current VU count
+                                    // Report current worker count
                                     let _ = tx.send(Metric::Gauge {
                                         name: format!("{}::vus", scenario_name),
                                         value: active_workers.len() as f64,
@@ -1210,7 +1211,7 @@ impl Engine {
                                 println!("[Scenario: {}] Complete.", scenario_name);
                             }
 
-                            // Closed-model executors (constant-vus, per-vu-iterations, shared-iterations)
+                            // Closed-model executors (constant-workers, per-worker-iterations, shared-iterations)
                             _ => {
                                 println!(
                                     "[Scenario: {}] Starting {} workers for {}...",
@@ -1235,7 +1236,7 @@ impl Engine {
                                 let is_shared_iterations =
                                     executor == ExecutorType::SharedIterations;
 
-                                // Spawn all workers at once (constant-vus style)
+                                // Spawn all workers at once (constant-workers style)
                                 for _ in 0..workers {
                                     let worker_id = next_worker_id;
                                     next_worker_id += 1;
@@ -1390,7 +1391,7 @@ impl Engine {
                                                 break; // All iterations consumed
                                             }
                                         } else if let Some(max_iter) = max_iterations {
-                                            // PerVuIterations: each worker has its own limit
+                                            // PerWorkerIterations: each worker has its own limit
                                             if iteration_count >= max_iter {
                                                 break;
                                             }

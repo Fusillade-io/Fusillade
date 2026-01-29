@@ -2,22 +2,25 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Executor type determines how virtual users (VUs) are scheduled
+/// Executor type determines how workers are scheduled
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecutorType {
-    /// Fixed number of VUs that loop continuously (closed model)
+    /// Fixed number of workers that loop continuously (closed model)
     #[default]
-    ConstantVus,
-    /// VUs ramp up/down according to schedule stages (closed model)
-    RampingVus,
+    #[serde(alias = "constant-vus")]
+    ConstantWorkers,
+    /// Workers ramp up/down according to schedule stages (closed model)
+    #[serde(alias = "ramping-vus")]
+    RampingWorkers,
     /// Fixed iteration rate regardless of response time (open model)
     ConstantArrivalRate,
     /// Iteration rate changes according to schedule stages (open model)
     RampingArrivalRate,
-    /// Each VU runs a fixed number of iterations then stops
-    PerVuIterations,
-    /// All VUs share a fixed pool of iterations
+    /// Each worker runs a fixed number of iterations then stops
+    #[serde(alias = "per-vu-iterations")]
+    PerWorkerIterations,
+    /// All workers share a fixed pool of iterations
     SharedIterations,
 }
 
@@ -30,13 +33,13 @@ pub struct ScheduleStep {
 /// Configuration for a single scenario within multi-scenario tests
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 pub struct ScenarioConfig {
-    /// Executor type (constant-vus, ramping-vus, constant-arrival-rate, per-vu-iterations)
+    /// Executor type (constant-workers, ramping-workers, constant-arrival-rate, per-worker-iterations)
     pub executor: Option<ExecutorType>,
-    /// Number of concurrent workers (alias: vus)
+    /// Number of concurrent workers
     pub workers: Option<usize>,
     /// Duration of the scenario
     pub duration: Option<String>,
-    /// Fixed iterations per worker (for per-vu-iterations executor)
+    /// Fixed iterations per worker
     pub iterations: Option<u64>,
     /// Ramping schedule (alias: stages)
     pub schedule: Option<Vec<ScheduleStep>>,
@@ -64,13 +67,13 @@ pub struct ScenarioConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 pub struct Config {
-    /// Number of concurrent workers (VUs)
+    /// Number of concurrent workers
     pub workers: Option<usize>,
     /// Duration of the test (e.g., "10s", "1m")
     pub duration: Option<String>,
     /// Ramping schedule (stages)
     pub schedule: Option<Vec<ScheduleStep>>,
-    /// Executor type (constant-arrival-rate, ramping-vus, etc.)
+    /// Executor type (constant-workers, ramping-workers, constant-arrival-rate, etc.)
     pub executor: Option<ExecutorType>,
     /// Rate for arrival-rate executors
     pub rate: Option<u64>,
@@ -84,7 +87,7 @@ pub struct Config {
     pub warmup: Option<String>,
     /// Graceful shutdown wait time
     pub stop: Option<String>,
-    /// Fixed number of iterations per worker (per-vu-iterations executor)
+    /// Fixed number of iterations per worker
     pub iterations: Option<u64>,
     /// Multiple scenarios with independent configs
     pub scenarios: Option<HashMap<String, ScenarioConfig>>,
@@ -408,7 +411,7 @@ memory_safe: true
         assert_eq!(config.duration, Some("2m".to_string()));
         assert!(config.schedule.is_some());
         assert_eq!(config.schedule.as_ref().unwrap().len(), 2);
-        assert_eq!(config.executor, Some(ExecutorType::RampingVus));
+        assert_eq!(config.executor, Some(ExecutorType::RampingWorkers));
         assert_eq!(config.rate, Some(100));
         assert_eq!(config.time_unit, Some("1s".to_string()));
         assert!(config.criteria.is_some());
@@ -491,7 +494,7 @@ scenarios:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         let scenario = &config.scenarios.unwrap()["test"];
-        assert_eq!(scenario.executor, Some(ExecutorType::ConstantVus));
+        assert_eq!(scenario.executor, Some(ExecutorType::ConstantWorkers));
         assert_eq!(scenario.workers, Some(10));
         assert_eq!(scenario.duration, Some("1m".to_string()));
         assert_eq!(scenario.iterations, Some(50));
@@ -508,11 +511,11 @@ scenarios:
     fn test_executor_type_all_variants() {
         // Test all executor type variants parse correctly from kebab-case
         let test_cases = [
-            ("constant-vus", ExecutorType::ConstantVus),
-            ("ramping-vus", ExecutorType::RampingVus),
+            ("constant-vus", ExecutorType::ConstantWorkers),
+            ("ramping-vus", ExecutorType::RampingWorkers),
             ("constant-arrival-rate", ExecutorType::ConstantArrivalRate),
             ("ramping-arrival-rate", ExecutorType::RampingArrivalRate),
-            ("per-vu-iterations", ExecutorType::PerVuIterations),
+            ("per-vu-iterations", ExecutorType::PerWorkerIterations),
             ("shared-iterations", ExecutorType::SharedIterations),
         ];
 
@@ -525,8 +528,8 @@ scenarios:
 
     #[test]
     fn test_executor_type_default() {
-        // Default executor should be ConstantVus
-        assert_eq!(ExecutorType::default(), ExecutorType::ConstantVus);
+        // Default executor should be ConstantWorkers
+        assert_eq!(ExecutorType::default(), ExecutorType::ConstantWorkers);
     }
 
     #[test]
