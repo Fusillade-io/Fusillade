@@ -451,9 +451,11 @@ pub fn register_globals_sync<'js>(
 
     globals.set("__WORKER_ID", worker_id)?;
 
-    // Create empty __VU_STATE object that persists across iterations
-    let vu_state = Object::new(ctx.clone())?;
-    globals.set("__VU_STATE", vu_state)?;
+    // Create empty __WORKER_STATE object that persists across iterations
+    // __VU_STATE is kept as alias for backwards compatibility
+    let worker_state = Object::new(ctx.clone())?;
+    globals.set("__WORKER_STATE", worker_state.clone())?;
+    globals.set("__VU_STATE", worker_state)?;
 
     // Register internal modules
     http::register_sync(
@@ -534,9 +536,11 @@ pub fn register_globals_sync_fast<'js>(
 
     globals.set("__WORKER_ID", worker_id)?;
 
-    // Create empty __VU_STATE object that persists across iterations
-    let vu_state = Object::new(ctx.clone())?;
-    globals.set("__VU_STATE", vu_state)?;
+    // Create empty __WORKER_STATE object that persists across iterations
+    // __VU_STATE is kept as alias for backwards compatibility
+    let worker_state = Object::new(ctx.clone())?;
+    globals.set("__WORKER_STATE", worker_state.clone())?;
+    globals.set("__VU_STATE", worker_state)?;
 
     // Use sync HTTP (ureq) - no Tokio overhead
     http_sync::register_sync_http(ctx, tx.clone(), response_sink)?;

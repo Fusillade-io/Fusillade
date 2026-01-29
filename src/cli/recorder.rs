@@ -130,7 +130,7 @@ fn save_flow(output: &PathBuf, requests: &[RecordedRequest]) -> Result<()> {
     // Fusillade provides http, check, sleep as globals
 
     js.push_str("export const options = {\n");
-    js.push_str("    vus: 1,\n");
+    js.push_str("    workers: 1,\n");
     js.push_str("    duration: '10s',\n");
     js.push_str("};\n\n");
     js.push_str("export default function() {\n");

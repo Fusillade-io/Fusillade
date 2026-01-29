@@ -198,24 +198,24 @@ Fusillade supports multiple executor types for different load patterns:
 
 | Executor | Description | Use Case |
 |----------|-------------|----------|
-| `constant-vus` | Maintain a fixed number of workers (default) | Baseline load testing |
-| `ramping-vus` | Gradually adjust worker count through stages | Load ramp-up/down |
+| `constant-workers` | Maintain a fixed number of workers (default) | Baseline load testing |
+| `ramping-workers` | Gradually adjust worker count through stages | Load ramp-up/down |
 | `constant-arrival-rate` | Maintain a fixed request rate (RPS) | API rate limit testing |
 | `ramping-arrival-rate` | Adjust request rate through stages | Variable RPS testing |
-| `per-vu-iterations` | Each worker runs a fixed number of iterations | Iteration-based testing |
+| `per-worker-iterations` | Each worker runs a fixed number of iterations | Iteration-based testing |
 | `shared-iterations` | All workers share a pool of iterations | Fixed total iterations |
 
 ```javascript
 export const options = {
     // Constant VUs (default)
-    executor: 'constant-vus',
+    executor: 'constant-workers',
     workers: 10,
     duration: '1m',
 };
 
 // Ramping workers - gradually scale worker count
 export const options = {
-    executor: 'ramping-vus',
+    executor: 'ramping-workers',
     stages: [
         { duration: '30s', target: 20 },  // Ramp to 20 workers
         { duration: '1m', target: 50 },   // Ramp to 50 workers
@@ -245,7 +245,7 @@ export const options = {
 
 // Per-worker Iterations - fixed iterations per worker
 export const options = {
-    executor: 'per-vu-iterations',
+    executor: 'per-worker-iterations',
     workers: 10,
     iterations: 100,     // Each worker runs exactly 100 iterations
 };
@@ -599,13 +599,13 @@ Simulates realistic traffic with different user behaviors:
 # config/multi-scenario.yaml
 scenarios:
   browsing:
-    executor: constant-vus
+    executor: constant-workers
     workers: 20
     duration: 5m
     exec: browseProducts
 
   checkout:
-    executor: constant-vus
+    executor: constant-workers
     workers: 5
     duration: 4m
     start_time: 1m        # Start after 1 minute delay
@@ -1030,7 +1030,7 @@ fusillade run test.js --log-level error   # Only show errors
 * `__WORKER_ID`: The current worker's numeric ID (0-indexed). Useful for partitioning data across workers.
 * `__SCENARIO`: Name of the currently executing scenario (in multi-scenario tests).
 * `__ITERATION`: The current iteration number for this worker (0-indexed).
-* `__VU_STATE`: Per-worker state object that persists across iterations. Use for storing session data, counters, or any state that should survive between iterations.
+* `__WORKER_STATE`: Per-worker state object that persists across iterations. Use for storing session data, counters, or any state that should survive between iterations.
 
 ```javascript
 // Use worker ID to partition test data
@@ -1040,16 +1040,16 @@ const userId = users[__WORKER_ID % users.length];
 const apiKey = __ENV.API_KEY || 'default-key';
 
 // Track per-worker state across iterations
-__VU_STATE.loginCount = (__VU_STATE.loginCount || 0) + 1;
-console.log(`Worker ${__WORKER_ID} iteration ${__ITERATION}, logins: ${__VU_STATE.loginCount}`);
+__WORKER_STATE.loginCount = (__WORKER_STATE.loginCount || 0) + 1;
+console.log(`Worker ${__WORKER_ID} iteration ${__ITERATION}, logins: ${__WORKER_STATE.loginCount}`);
 
 // Store session data that persists
-if (!__VU_STATE.token) {
+if (!__WORKER_STATE.token) {
     const res = http.post('/login', credentials);
-    __VU_STATE.token = res.json().token;
+    __WORKER_STATE.token = res.json().token;
 }
 // Use cached token in subsequent iterations
-http.get('/api/data', { headers: { 'Authorization': `Bearer ${__VU_STATE.token}` } });
+http.get('/api/data', { headers: { 'Authorization': `Bearer ${__WORKER_STATE.token}` } });
 ```
 
 **Automatic `.env` File Loading:**
