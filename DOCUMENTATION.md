@@ -1297,11 +1297,18 @@ Fusillade includes native support for headless browser automation via Chromium. 
 * `browser.close()`: Closes the browser.
 * `page.goto(url)`: Navigates to a URL and waits for load.
 * `page.content()`: Returns the HTML content of the page.
+* `page.title()`: Returns the page title.
+* `page.url()`: Returns the current page URL.
 * `page.click(selector)`: Clicks an element matching the CSS selector.
-* `page.type(selector, text)`: Types text into an input element.
+* `page.type(selector, text)`: Types text into an input element (appends to existing value).
+* `page.fill(selector, text)`: Clears the input value and types new text.
 * `page.evaluate(script)`: Executes JavaScript in the page context and returns the result.
 * `page.metrics()`: Returns performance timing metrics (navigationStart, domInteractive, domComplete, loadEventEnd).
-* `page.screenshot()`: Captures a PNG screenshot of the page.
+* `page.screenshot()`: Captures a PNG screenshot of the page (returns raw bytes).
+* `page.waitForSelector(selector)`: Waits for an element matching the CSS selector to appear in the DOM.
+* `page.waitForNavigation()`: Waits for the current page navigation to complete.
+* `page.waitForTimeout(ms)`: Waits for the specified number of milliseconds.
+* `page.close()`: Closes the page/tab and releases resources.
 
 ```javascript
 export default function() {
@@ -1310,9 +1317,21 @@ export default function() {
 
     // Navigate and interact
     page.goto('https://example.com/login');
-    page.type('#username', 'testuser');
-    page.type('#password', 'secret');
+    print(`Page title: ${page.title()}`);
+
+    // Fill form fields (clears existing value first)
+    page.fill('#username', 'testuser');
+    page.fill('#password', 'secret');
     page.click('#submit');
+
+    // Wait for navigation after form submission
+    page.waitForNavigation();
+
+    // Wait for dynamic content
+    page.waitForSelector('.dashboard-content');
+
+    // Verify URL after redirect
+    print(`Current URL: ${page.url()}`);
 
     // Get page content
     const html = page.content();
@@ -1327,6 +1346,7 @@ export default function() {
     // Capture screenshot
     const png = page.screenshot();
 
+    page.close();
     browser.close();
 }
 ```

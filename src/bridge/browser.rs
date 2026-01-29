@@ -7,7 +7,7 @@ use rquickjs::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn make_metric(name: &str, start: Instant, error: Option<String>) -> Metric {
     let duration = start.elapsed();
@@ -229,6 +229,123 @@ impl<'js> JsPage {
                 rquickjs::Error::Exception
             })
     }
+
+    pub fn url(&self) -> String {
+        self.inner.get_url()
+    }
+
+    pub fn title(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        self.evaluate(ctx, "document.title".to_string())
+    }
+
+    pub fn fill(&self, ctx: Ctx<'_>, selector: String, text: String) -> Result<()> {
+        let start = Instant::now();
+
+        // Clear the input value via JavaScript
+        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        let clear_script = format!(
+            "(() => {{ const el = document.querySelector('{}'); if (el) {{ el.value = ''; el.dispatchEvent(new Event('input', {{bubbles: true}})); }} }})()",
+            escaped
+        );
+        self.inner.evaluate(&clear_script, false).map_err(|e| {
+            let msg = format!("Failed to clear element: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::fill", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+
+        // Type the new text
+        let el = self.inner.find_element(&selector).map_err(|e| {
+            let msg = format!("Element not found: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::fill", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+
+        el.type_into(&text).map_err(|e| {
+            let msg = format!("Fill failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::fill", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::fill", start, None));
+        }
+        Ok(())
+    }
+
+    #[qjs(rename = "waitForSelector")]
+    pub fn wait_for_selector(&self, ctx: Ctx<'_>, selector: String) -> Result<()> {
+        let start = Instant::now();
+
+        self.inner.wait_for_element(&selector).map_err(|e| {
+            let msg = format!("Element not found: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric(
+                    "browser::waitForSelector",
+                    start,
+                    Some(msg.clone()),
+                ));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::waitForSelector", start, None));
+        }
+        Ok(())
+    }
+
+    #[qjs(rename = "waitForNavigation")]
+    pub fn wait_for_navigation(&self, ctx: Ctx<'_>) -> Result<()> {
+        let start = Instant::now();
+
+        self.inner.wait_until_navigated().map_err(|e| {
+            let msg = format!("Navigation wait failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric(
+                    "browser::waitForNavigation",
+                    start,
+                    Some(msg.clone()),
+                ));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::waitForNavigation", start, None));
+        }
+        Ok(())
+    }
+
+    #[qjs(rename = "waitForTimeout")]
+    pub fn wait_for_timeout(&self, ms: f64) -> Result<()> {
+        std::thread::sleep(Duration::from_millis(ms as u64));
+        Ok(())
+    }
+
+    pub fn close(&self, ctx: Ctx<'_>) -> Result<()> {
+        // Clear the current page reference if this page is the active one
+        if let Some(cp) = ctx.userdata::<CurrentPage>() {
+            let mut guard = cp.0.lock().unwrap();
+            if let Some(ref current) = *guard {
+                if Arc::ptr_eq(current, &self.inner) {
+                    *guard = None;
+                }
+            }
+        }
+        let _ = self.inner.close_target();
+        Ok(())
+    }
 }
 
 fn launch_browser<'js>(ctx: Ctx<'js>) -> Result<Class<'js, JsBrowser>> {
@@ -306,6 +423,172 @@ mod tests {
                 assert!(error.is_some());
             }
             _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_duration_recorded() {
+        let start = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let metric = make_metric("browser::goto", start, None);
+
+        match metric {
+            crate::stats::Metric::Request { timings, .. } => {
+                assert!(timings.duration.as_millis() >= 10);
+                assert_eq!(timings.duration, timings.waiting);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_wait_for_selector() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::waitForSelector", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::waitForSelector");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_wait_for_selector_error() {
+        let start = std::time::Instant::now();
+        let metric = make_metric(
+            "browser::waitForSelector",
+            start,
+            Some("Element not found: #missing".to_string()),
+        );
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "browser::waitForSelector");
+                assert_eq!(status, 0);
+                assert_eq!(error.unwrap(), "Element not found: #missing");
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_fill() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::fill", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::fill");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_fill_error() {
+        let start = std::time::Instant::now();
+        let metric = make_metric(
+            "browser::fill",
+            start,
+            Some("Failed to clear element: timeout".to_string()),
+        );
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "browser::fill");
+                assert_eq!(status, 0);
+                assert!(error.unwrap().contains("Failed to clear element"));
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_wait_for_navigation() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::waitForNavigation", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::waitForNavigation");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_wait_for_navigation_error() {
+        let start = std::time::Instant::now();
+        let metric = make_metric(
+            "browser::waitForNavigation",
+            start,
+            Some("Navigation wait failed".to_string()),
+        );
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "browser::waitForNavigation");
+                assert_eq!(status, 0);
+                assert!(error.is_some());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_tags_empty() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::goto", start, None);
+        match metric {
+            crate::stats::Metric::Request { tags, .. } => {
+                assert!(tags.is_empty());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_all_operations() {
+        let operations = vec![
+            "browser::goto",
+            "browser::click",
+            "browser::type",
+            "browser::fill",
+            "browser::waitForSelector",
+            "browser::waitForNavigation",
+        ];
+        for op in operations {
+            let start = std::time::Instant::now();
+            let success = make_metric(op, start, None);
+            let failure = make_metric(op, start, Some("error".to_string()));
+            match success {
+                crate::stats::Metric::Request { name, status, .. } => {
+                    assert_eq!(name, op);
+                    assert_eq!(status, 200);
+                }
+                _ => panic!("Expected Request metric for {}", op),
+            }
+            match failure {
+                crate::stats::Metric::Request { name, status, .. } => {
+                    assert_eq!(name, op);
+                    assert_eq!(status, 0);
+                }
+                _ => panic!("Expected Request metric for {}", op),
+            }
         }
     }
 }
