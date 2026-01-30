@@ -93,9 +93,9 @@ impl JsWebSocket {
                 }
                 Err(e) => {
                     let err_msg = format!("WS SendBinary Error: {}", e);
-                    let _ = self
-                        .tx
-                        .send(make_metric("ws::sendBinary", start, Some(err_msg.clone())));
+                    let _ =
+                        self.tx
+                            .send(make_metric("ws::sendBinary", start, Some(err_msg.clone())));
                     eprintln!("{}", err_msg);
                     Err(rquickjs::Error::Exception)
                 }
