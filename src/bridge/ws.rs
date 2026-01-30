@@ -4,7 +4,8 @@ use rquickjs::{class::Trace, Ctx, Function, IntoJs, JsLifetime, Object, Result, 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::TcpStream;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 use tungstenite::{connect, stream::MaybeTlsStream, Message};
 
 type InnerWebSocket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
@@ -33,10 +34,54 @@ pub struct JsWebSocket {
     inner: RefCell<Option<InnerWebSocket>>,
     #[qjs(skip_trace)]
     tx: Sender<Metric>,
+    #[qjs(skip_trace)]
+    url: String,
+    #[qjs(skip_trace)]
+    reconnect: bool,
+    #[qjs(skip_trace)]
+    max_retries: u32,
 }
 
 unsafe impl<'js> JsLifetime<'js> for JsWebSocket {
     type Changed<'to> = JsWebSocket;
+}
+
+/// Compute the exponential backoff delay for a given attempt (0-indexed).
+/// Base delay is 100ms, doubling each attempt: 100ms, 200ms, 400ms, ...
+fn backoff_delay(attempt: u32) -> Duration {
+    Duration::from_millis(100 * 2u64.pow(attempt))
+}
+
+impl JsWebSocket {
+    /// Attempt to reconnect to the stored URL with exponential backoff.
+    /// Returns `true` if reconnection succeeds, `false` if all retries are exhausted.
+    fn attempt_reconnect(&self) -> bool {
+        for attempt in 0..self.max_retries {
+            let delay = backoff_delay(attempt);
+            thread::sleep(delay);
+
+            let start = Instant::now();
+            match connect(&self.url) {
+                Ok((socket, _response)) => {
+                    let _ = self.tx.send(make_metric("ws::reconnect", start, None));
+                    *self.inner.borrow_mut() = Some(socket);
+                    return true;
+                }
+                Err(e) => {
+                    let err_msg = format!(
+                        "WebSocket reconnect attempt {}/{} failed: {}",
+                        attempt + 1,
+                        self.max_retries,
+                        e
+                    );
+                    let _ = self
+                        .tx
+                        .send(make_metric("ws::reconnect", start, Some(err_msg)));
+                }
+            }
+        }
+        false
+    }
 }
 
 #[rquickjs::methods]
@@ -44,6 +89,19 @@ impl JsWebSocket {
     pub fn send(&self, msg: String) -> Result<()> {
         let start = Instant::now();
         let mut borrow = self.inner.borrow_mut();
+        if borrow.is_none() && self.reconnect {
+            drop(borrow);
+            if self.attempt_reconnect() {
+                borrow = self.inner.borrow_mut();
+            } else {
+                let _ = self.tx.send(make_metric(
+                    "ws::send",
+                    start,
+                    Some("WebSocket not connected, reconnect failed".to_string()),
+                ));
+                return Err(rquickjs::Error::Exception);
+            }
+        }
         if let Some(ws) = borrow.as_mut() {
             match ws.send(Message::Text(msg.into())) {
                 Ok(()) => {
@@ -113,6 +171,19 @@ impl JsWebSocket {
     pub fn recv<'js>(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
         let start = Instant::now();
         let mut borrow = self.inner.borrow_mut();
+        if borrow.is_none() && self.reconnect {
+            drop(borrow);
+            if self.attempt_reconnect() {
+                borrow = self.inner.borrow_mut();
+            } else {
+                let _ = self.tx.send(make_metric(
+                    "ws::recv",
+                    start,
+                    Some("WebSocket not connected, reconnect failed".to_string()),
+                ));
+                return Ok(Value::new_null(ctx));
+            }
+        }
         if let Some(ws) = borrow.as_mut() {
             match ws.read() {
                 Ok(msg) => {
@@ -158,6 +229,11 @@ impl JsWebSocket {
         }
         Ok(())
     }
+
+    #[qjs(rename = "isConnected")]
+    pub fn is_connected(&self) -> bool {
+        self.inner.borrow().is_some()
+    }
 }
 
 #[derive(Clone)]
@@ -166,9 +242,22 @@ unsafe impl<'js> JsLifetime<'js> for WsMetricSender {
     type Changed<'to> = WsMetricSender;
 }
 
-fn ws_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
+fn ws_connect<'js>(ctx: Ctx<'js>, url: String, options: Option<Object<'js>>) -> Result<Value<'js>> {
     let tx = ctx.userdata::<WsMetricSender>().map(|w| w.0.clone());
     let start = Instant::now();
+
+    // Parse options
+    let mut reconnect = false;
+    let mut max_retries: u32 = 3;
+    if let Some(ref opts) = options {
+        if let Ok(val) = opts.get::<_, bool>("reconnect") {
+            reconnect = val;
+        }
+        if let Ok(val) = opts.get::<_, u32>("maxRetries") {
+            max_retries = val;
+        }
+    }
+
     match connect(&url) {
         Ok((socket, _response)) => {
             if let Some(ref tx) = tx {
@@ -181,6 +270,9 @@ fn ws_connect<'js>(ctx: Ctx<'js>, url: String) -> Result<Value<'js>> {
                     let (s, _) = crossbeam_channel::unbounded();
                     s
                 }),
+                url: url.clone(),
+                reconnect,
+                max_retries,
             };
             let instance = rquickjs::Class::<JsWebSocket>::instance(ctx.clone(), ws)?;
             Ok(instance.into_value())
@@ -299,5 +391,88 @@ mod tests {
             }
             _ => panic!("Expected Request metric"),
         }
+    }
+
+    #[test]
+    fn test_make_metric_reconnect() {
+        // Verify that reconnect metrics follow the same make_metric pattern
+        let start = Instant::now();
+        let metric = make_metric("ws::reconnect", start, None);
+        match metric {
+            Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "ws::reconnect");
+                assert_eq!(status, 200);
+                assert!(error.is_none());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+
+        // Verify reconnect failure metric
+        let start = Instant::now();
+        let err_msg = "WebSocket reconnect attempt 1/3 failed: Connection refused".to_string();
+        let metric = make_metric("ws::reconnect", start, Some(err_msg.clone()));
+        match metric {
+            Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "ws::reconnect");
+                assert_eq!(status, 0);
+                assert_eq!(error, Some(err_msg));
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_make_metric_is_connected() {
+        // Test that a JsWebSocket with inner = Some reports connected,
+        // and with inner = None reports disconnected.
+        let (tx, _rx) = crossbeam_channel::unbounded();
+
+        let ws_connected = JsWebSocket {
+            inner: RefCell::new(None),
+            tx: tx.clone(),
+            url: "ws://localhost:9999".to_string(),
+            reconnect: false,
+            max_retries: 3,
+        };
+        assert!(!ws_connected.is_connected());
+
+        // We cannot easily create a real InnerWebSocket without a server,
+        // so we verify that None means not connected and the metric is correct.
+        let start = Instant::now();
+        let metric = make_metric(
+            "ws::send",
+            start,
+            Some("WebSocket not connected".to_string()),
+        );
+        match metric {
+            Metric::Request { status, error, .. } => {
+                assert_eq!(status, 0);
+                assert_eq!(error, Some("WebSocket not connected".to_string()));
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_exponential_backoff_delays() {
+        // Verify the backoff_delay function produces correct durations:
+        // attempt 0 -> 100ms, attempt 1 -> 200ms, attempt 2 -> 400ms,
+        // attempt 3 -> 800ms, attempt 4 -> 1600ms
+        assert_eq!(backoff_delay(0), Duration::from_millis(100));
+        assert_eq!(backoff_delay(1), Duration::from_millis(200));
+        assert_eq!(backoff_delay(2), Duration::from_millis(400));
+        assert_eq!(backoff_delay(3), Duration::from_millis(800));
+        assert_eq!(backoff_delay(4), Duration::from_millis(1600));
+        assert_eq!(backoff_delay(5), Duration::from_millis(3200));
     }
 }

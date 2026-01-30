@@ -173,6 +173,36 @@ impl JsMqttClient {
         }
     }
 
+    /// Unsubscribe from a topic
+    pub fn unsubscribe(&mut self, topic: String) -> Result<()> {
+        let start = Instant::now();
+        if let Some(ref mut client) = self.client {
+            match client.unsubscribe(&topic) {
+                Ok(()) => {
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("mqtt::unsubscribe", start, None));
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    let err_msg = format!("MQTT Unsubscribe failed: {}", e);
+                    if let Some(ref mtx) = self.tx {
+                        let _ = mtx.send(make_metric("mqtt::unsubscribe", start, Some(err_msg)));
+                    }
+                    Err(rquickjs::Error::new_from_js(
+                        "MQTT Unsubscribe failed",
+                        "NetworkError",
+                    ))
+                }
+            }
+        } else {
+            Err(rquickjs::Error::new_from_js(
+                "MQTT Client not connected",
+                "StateError",
+            ))
+        }
+    }
+
     /// Receive the next message from subscribed topics
     /// Returns { value: { topic, payload, qos } | null, reason: "timeout" | "closed" | "not_connected" | null }
     pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
@@ -221,11 +251,23 @@ impl JsMqttClient {
 
     /// Publish a message to a topic
     /// Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce
-    pub fn publish(&mut self, topic: String, payload: String, qos: Option<u8>) -> Result<()> {
+    /// Optional retain: if true, broker retains last message for new subscribers
+    pub fn publish(
+        &mut self,
+        topic: String,
+        payload: String,
+        qos: Option<u8>,
+        retain: Option<bool>,
+    ) -> Result<()> {
         let start = Instant::now();
         let qos_level = map_qos(qos);
         if let Some(ref mut client) = self.client {
-            match client.publish(topic, qos_level, false, payload.as_bytes()) {
+            match client.publish(
+                topic,
+                qos_level,
+                retain.unwrap_or(false),
+                payload.as_bytes(),
+            ) {
                 Ok(()) => {
                     if let Some(ref mtx) = self.tx {
                         let _ = mtx.send(make_metric("mqtt::publish", start, None));
@@ -394,6 +436,50 @@ mod tests {
                 assert_eq!(name, "mqtt::publish");
                 assert_eq!(status, 200);
                 assert!(error.is_none());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_mqtt_make_metric_unsubscribe() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("mqtt::unsubscribe", start, None);
+
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "mqtt::unsubscribe");
+                assert_eq!(status, 200);
+                assert!(error.is_none());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_mqtt_make_metric_unsubscribe_error() {
+        let start = std::time::Instant::now();
+        let metric = make_metric(
+            "mqtt::unsubscribe",
+            start,
+            Some("Unsubscribe failed".to_string()),
+        );
+
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "mqtt::unsubscribe");
+                assert_eq!(status, 0);
+                assert!(error.is_some());
             }
             _ => panic!("Expected Request metric"),
         }

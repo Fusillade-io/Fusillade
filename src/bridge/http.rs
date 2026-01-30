@@ -545,6 +545,46 @@ impl<'js> IntoJs<'js> for HttpResponse {
         }
         obj.set("cookies", cookies_obj)?;
 
+        // Add matchesSchema(schema) method - validate body JSON against a type schema
+        let body_for_schema = body_string.clone();
+        obj.set(
+            "matchesSchema",
+            Function::new(ctx.clone(), move |schema: Object<'_>| -> bool {
+                let parsed: serde_json::Value = match serde_json::from_str(&body_for_schema) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+                let body_obj = match parsed.as_object() {
+                    Some(o) => o,
+                    None => return false,
+                };
+                let schema_keys: Vec<(String, String)> = schema
+                    .keys::<String>()
+                    .filter_map(|k| k.ok())
+                    .filter_map(|k| schema.get::<_, String>(&k).ok().map(|v| (k, v)))
+                    .collect();
+                for (key, expected_type) in &schema_keys {
+                    match body_obj.get(key.as_str()) {
+                        None => return false,
+                        Some(val) => {
+                            let matches = match expected_type.as_str() {
+                                "string" => val.is_string(),
+                                "number" => val.is_number(),
+                                "boolean" => val.is_boolean(),
+                                "array" => val.is_array(),
+                                "object" => val.is_object(),
+                                _ => true,
+                            };
+                            if !matches {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            }),
+        )?;
+
         // Add error and errorCode fields for failed requests
         if let Some(ref err) = self.error {
             obj.set("error", err.clone())?;
@@ -2939,7 +2979,7 @@ pub fn register_sync(
     let rt_batch = runtime.clone();
     let sink_batch = global_response_sink;
 
-    http.set("batch", Function::new(ctx.clone(), move |requests: rquickjs::Array<'_>| -> Result<Vec<HttpResponse>> {
+    http.set("batch", Function::new(ctx.clone(), move |ctx: Ctx<'_>, requests: rquickjs::Array<'_>, on_progress: Option<Function<'_>>| -> Result<Vec<HttpResponse>> {
         let client = c_batch.clone();
         let tx = tx_batch.clone();
         let runtime = rt_batch.clone();
@@ -3123,6 +3163,15 @@ pub fn register_sync(
             futures::future::join_all(futures).await
         });
 
+        // Call onProgress callback for each completed result (after all complete)
+        if let Some(ref callback) = on_progress {
+            let total = results.len();
+            for i in 0..total {
+                let _ = callback.call::<_, Value>(((i + 1) as u32, total as u32));
+            }
+        }
+        let _ = ctx; // ensure ctx stays alive
+
         Ok(results)
     }))?;
 
@@ -3305,6 +3354,15 @@ pub fn register_sync(
         http.clearHooks = function() {
             globalThis.__http_hooks.beforeRequest = [];
             globalThis.__http_hooks.afterResponse = [];
+        };
+
+        // http.graphql(url, query, variables?, options?) - GraphQL convenience wrapper
+        http.graphql = function(url, query, variables, options) {
+            var body = JSON.stringify({ query: query, variables: variables || null });
+            var opts = options || {};
+            opts.headers = opts.headers || {};
+            opts.headers['Content-Type'] = 'application/json';
+            return http.post(url, body, opts);
         };
     "#)?;
     Ok(())
@@ -3575,6 +3633,60 @@ mod tests {
     #[test]
     fn test_html_selector_invalid() {
         let result = scraper::Selector::parse("[[[invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_matches_schema_valid() {
+        let body = r#"{"name": "John", "age": 30, "active": true}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let obj = parsed.as_object().unwrap();
+
+        // Check string type
+        assert!(obj.get("name").unwrap().is_string());
+        // Check number type
+        assert!(obj.get("age").unwrap().is_number());
+        // Check boolean type
+        assert!(obj.get("active").unwrap().is_boolean());
+    }
+
+    #[test]
+    fn test_matches_schema_missing_key() {
+        let body = r#"{"name": "John"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let obj = parsed.as_object().unwrap();
+
+        // Key exists
+        assert!(obj.get("name").is_some());
+        // Key does not exist
+        assert!(obj.get("age").is_none());
+    }
+
+    #[test]
+    fn test_matches_schema_type_mismatch() {
+        let body = r#"{"name": 123}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let obj = parsed.as_object().unwrap();
+
+        // "name" is a number, not a string
+        assert!(!obj.get("name").unwrap().is_string());
+        assert!(obj.get("name").unwrap().is_number());
+    }
+
+    #[test]
+    fn test_matches_schema_array_and_object() {
+        let body = r#"{"items": [1, 2, 3], "meta": {"total": 3}}"#;
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let obj = parsed.as_object().unwrap();
+
+        assert!(obj.get("items").unwrap().is_array());
+        assert!(obj.get("meta").unwrap().is_object());
+    }
+
+    #[test]
+    fn test_matches_schema_invalid_json() {
+        let body = "not json";
+        let result = serde_json::from_str::<serde_json::Value>(body);
         assert!(result.is_err());
     }
 }

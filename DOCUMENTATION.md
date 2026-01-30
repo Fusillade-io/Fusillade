@@ -297,12 +297,16 @@ fusillade controller --listen 0.0.0.0:9000
 
 Workers connect to the controller, and tests are dispatched via the controller's API. See the Kubernetes Deployment section for the full distributed architecture.
 
-### HAR Conversion
+### HAR & OpenAPI Conversion
 
-Convert browser recordings (.har) directly into Fusillade flows:
+Convert browser recordings (.har) or OpenAPI specifications (.yaml/.yml/.json) directly into Fusillade test scripts:
 
 ```bash
-fusillade convert recording.har --output flow.js
+# From a HAR recording
+fusillade convert --input recording.har --output flow.js
+
+# From an OpenAPI specification
+fusillade convert --input api-spec.yaml --output test.js
 ```
 
 ---
@@ -680,7 +684,8 @@ criteria:
 * `http.bearerToken(token)`: Generate Bearer auth header value (returns `"Bearer token"`).
 * `http.setDefaults(options)`: Set global defaults for all requests (timeout, headers).
 * `http.request({ method, url, body, headers, name, timeout })`: Generic request builder.
-* `http.batch(requests)`: Execute multiple requests in parallel. Returns array of responses.
+* `http.batch(requests, [onProgress])`: Execute multiple requests in parallel. Returns array of responses. Optional `onProgress(completed, total)` callback fires for each completed result.
+* `http.graphql(url, query, [variables], [options])`: GraphQL convenience wrapper. Sets `Content-Type: application/json` and builds `{"query": ..., "variables": ...}` body automatically.
 * `http.cookieJar()`: Returns the cookie jar for manual cookie management.
 * `http.addHook(hookType, fn)`: Register a request/response hook.
 * `http.clearHooks()`: Clear all registered hooks.
@@ -750,6 +755,50 @@ http.post('https://api.example.com/upload', fd.body(), {
 });
 ```
 
+### FormData
+
+Fusillade provides a built-in `FormData` class for constructing multipart form data, commonly used for file uploads and form submissions.
+
+**Constructor:**
+
+```javascript
+const fd = new FormData();
+```
+
+**Methods:**
+
+* `fd.append(name, value)`: Adds a field to the form data. `value` can be a string or the result of `http.file()`.
+* `fd.body()`: Returns the encoded multipart body string to pass as the request body.
+* `fd.contentType()`: Returns the `Content-Type` header value including the multipart boundary.
+
+**File Uploads with `http.file()`:**
+
+Use `http.file(path, [filename], [contentType])` to read a file from disk and prepare it for multipart upload:
+
+```javascript
+// Simple text field + file upload
+const fd = new FormData();
+fd.append('username', 'testuser');
+fd.append('avatar', http.file('./avatar.png', 'avatar.png', 'image/png'));
+
+http.post('https://api.example.com/upload', fd.body(), {
+    headers: { 'Content-Type': fd.contentType() }
+});
+```
+
+**Multiple files:**
+
+```javascript
+const fd = new FormData();
+fd.append('document', http.file('./report.pdf', 'report.pdf', 'application/pdf'));
+fd.append('attachment', http.file('./data.csv', 'data.csv', 'text/csv'));
+fd.append('description', 'Monthly report with data');
+
+http.post('https://api.example.com/documents', fd.body(), {
+    headers: { 'Content-Type': fd.contentType() }
+});
+```
+
 ### Request Options
 
 The optional `options` argument supports:
@@ -794,6 +843,7 @@ The `Response` object returned by requests contains:
 * `bodyMatches(pattern)` (Function): Returns `true` if body matches the regex pattern.
 * `hasHeader(name, [value])` (Function): Returns `true` if header exists. If `value` is provided, also checks the header value matches.
 * `isJson()` (Function): Returns `true` if body is valid JSON.
+* `matchesSchema(schema)` (Function): Validates JSON body against a type schema object. Schema keys map to type strings: `"string"`, `"number"`, `"boolean"`, `"array"`, `"object"`. Returns `true` if all keys exist and match types.
 * `html(selector)` (Function): Parses body as HTML and returns the inner text of the first element matching the CSS selector. Returns empty string if no match found.
 * `headers` (Object): Response headers.
 * `cookies` (Object): Response cookies (parsed from Set-Cookie headers).
@@ -826,7 +876,22 @@ check(res, {
     'has content-type': (r) => r.hasHeader('content-type'),
     'content-type is json': (r) => r.hasHeader('content-type', 'application/json'),
     'response is valid json': (r) => r.isJson(),
+    'matches schema': (r) => r.matchesSchema({ name: 'string', age: 'number', active: 'boolean' }),
 });
+```
+
+**GraphQL Example:**
+
+```javascript
+const res = http.graphql('https://api.example.com/graphql',
+  `query GetUser($id: ID!) {
+    user(id: $id) { name email }
+  }`,
+  { id: '123' }
+);
+check(res, { 'graphql ok': (r) => r.status === 200 });
+const data = res.json();
+print(data.data.user.name);
 ```
 
 **Automatic URL Naming:**
@@ -917,13 +982,16 @@ if (sessionCookie) {
 
 ### ws Module
 
-* `ws.connect(url)`: Opens a WebSocket connection, returns a socket object.
-* `socket.send(text)`: Sends a text message.
+* `ws.connect(url, [options])`: Opens a WebSocket connection, returns a socket object. Options:
+  - `reconnect` (bool): Enable auto-reconnect on disconnection (default: false)
+  - `maxRetries` (number): Maximum reconnect attempts (default: 3)
+* `socket.send(text)`: Sends a text message. Auto-reconnects if enabled and disconnected.
 * `socket.sendBinary(data)`: Sends binary data. `data` is a base64-encoded string.
-* `socket.recv()`: Blocking receive. Returns:
+* `socket.recv()`: Blocking receive. Auto-reconnects if enabled and disconnected. Returns:
   - Text frames as string
   - Binary frames as `{ type: "binary", data: "<base64>" }`
   - `null` on close
+* `socket.isConnected()`: Returns `true` if the WebSocket is connected.
 * `socket.close()`: Closes the connection.
 
 ```javascript
@@ -935,6 +1003,23 @@ if (typeof response === 'string') {
 } else if (response && response.type === 'binary') {
     print('Binary data: ' + response.data); // base64 encoded
 }
+socket.close();
+```
+
+**Auto-Reconnect:**
+
+```javascript
+// Enable auto-reconnect with exponential backoff
+const socket = ws.connect('wss://api.example.com/stream', {
+    reconnect: true,
+    maxRetries: 5
+});
+
+// If connection drops, send/recv will automatically reconnect
+socket.send('Hello');      // Reconnects if disconnected
+const msg = socket.recv(); // Reconnects if disconnected
+
+print('Connected: ' + socket.isConnected());
 socket.close();
 ```
 
@@ -1149,7 +1234,8 @@ stream.close();
 * `new JsMqttClient()`: Create a new MQTT client.
 * `.connect(host, port, clientId)`: Connect to MQTT broker.
 * `.subscribe(topic, [qos])`: Subscribe to a topic pattern (supports MQTT wildcards `+` and `#`). Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce.
-* `.publish(topic, payload, [qos])`: Publish a message to a topic. Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce.
+* `.unsubscribe(topic)`: Unsubscribe from a topic.
+* `.publish(topic, payload, [qos], [retain])`: Publish a message to a topic. Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce. Optional `retain`: if `true`, broker retains the message for new subscribers (default: `false`).
 * `.recv(timeoutMs?)`: Receive next message (blocking). Returns `RecvResult<{ topic, payload, qos }>`.
 * `.close()`: Close the connection.
 
@@ -1162,6 +1248,7 @@ stream.close();
 const mqtt = new JsMqttClient();
 mqtt.connect('localhost', 1883, 'test-client');
 mqtt.publish('sensors/temp', '22.5');
+mqtt.publish('sensors/status', 'online', 1, true);  // QoS 1, retained
 mqtt.close();
 
 // Subscribe and receive messages
@@ -1175,6 +1262,9 @@ while ((result = mqtt.recv(5000)) && result.value !== null) {
     print(`${msg.topic}: ${msg.payload}`);
 }
 if (result.reason === 'timeout') print('Timed out waiting for messages');
+
+// Unsubscribe from a topic
+mqtt.unsubscribe('sensors/+/temperature');
 mqtt.close();
 ```
 
@@ -1182,6 +1272,9 @@ mqtt.close();
 
 * `new JsAmqpClient()`: Create a new AMQP client.
 * `.connect(url)`: Connect to AMQP broker (e.g., `amqp://localhost`).
+* `.declareExchange(name, type, [opts])`: Declare an exchange. Types: `"direct"`, `"fanout"`, `"topic"`, `"headers"`. Options: `{ durable, autoDelete }`.
+* `.declareQueue(name, [opts])`: Declare a queue. Options: `{ durable, autoDelete, exclusive }`.
+* `.bindQueue(queue, exchange, routingKey)`: Bind a queue to an exchange with a routing key.
 * `.subscribe(queue)`: Declare a queue and start consuming messages.
 * `.publish(exchange, routingKey, payload)`: Publish a message.
 * `.recv(timeoutMs?)`: Receive next message (blocking). Returns `RecvResult<{ body, deliveryTag }>`.
@@ -1233,6 +1326,7 @@ Fusillade provides built-in globals for common operations:
 * `utils.randomEmail()`: Generate a random email address (e.g., `"abc123@test.com"`).
 * `utils.randomPhone()`: Generate a random US phone number (e.g., `"+1-555-123-4567"`).
 * `utils.randomName()`: Generate a random name object with `first`, `last`, and `full` properties.
+* `utils.randomAddress()`: Generate a random US address object with `street`, `city`, `state`, `zip`, and `full` properties.
 * `utils.randomDate(startYear, endYear)`: Generate a random date string in YYYY-MM-DD format.
 * `utils.sequentialId()`: Generate a unique sequential ID (unique across workers).
 
@@ -1249,6 +1343,7 @@ const email = utils.randomEmail();         // "xk7f2b1q@test.com"
 const phone = utils.randomPhone();         // "+1-555-847-2901"
 const name = utils.randomName();           // { first: "John", last: "Smith", full: "John Smith" }
 const dob = utils.randomDate(1970, 2000);  // "1985-07-23"
+const addr = utils.randomAddress();        // { street: "1234 Oak Ave", city: "Springfield", state: "IL", zip: "62704", full: "1234 Oak Ave, Springfield, IL 62704" }
 const orderId = utils.sequentialId();      // Unique ID per worker, e.g., 1000000001
 ```
 
@@ -1310,6 +1405,14 @@ Fusillade includes native support for headless browser automation via Chromium. 
 * `page.waitForSelector(selector)`: Waits for an element matching the CSS selector to appear in the DOM.
 * `page.waitForNavigation()`: Waits for the current page navigation to complete.
 * `page.waitForTimeout(ms)`: Waits for the specified number of milliseconds.
+* `page.setContent(html)`: Replaces the page content with the given HTML string.
+* `page.focus(selector)`: Focuses the element matching the CSS selector.
+* `page.select(selector, values)`: Selects options in a `<select>` element by value. `values` is an array of strings.
+* `page.getCookies()`: Returns an array of cookies for the current page `[{ name, value }, ...]`.
+* `page.setCookie(cookie)`: Sets a cookie. `cookie` is an object with `name`, `value`, and optional `domain`, `path`, `secure`, `maxAge`.
+* `page.deleteCookie(name)`: Deletes a cookie by name.
+* `page.queryAll(selector)`: Returns an array of all elements matching the selector: `[{ tag, text, id, className }, ...]`.
+* `page.waitForResponse(urlPattern, [timeoutMs])`: Waits for a network response matching the URL pattern. Returns `{ name, duration, startTime, transferSize }`. Default timeout: 30000ms.
 * `page.close()`: Closes the page/tab and releases resources.
 
 ```javascript
@@ -1383,7 +1486,35 @@ Fusillade automatically collects the following metrics:
   * `iteration` will report ~100ms (actual work time)
   * `iteration_total` will report ~600ms (work + sleep)
 
+
   This separation allows you to accurately measure response times without think-time/pacing skewing your metrics.
+
+### Connection Pool Metrics
+
+Fusillade automatically tracks HTTP connection pool reuse across all workers. No configuration is needed — connection pool metrics are collected whenever HTTP requests are made.
+
+**Report Output:**
+
+At the end of each test run, the summary report includes a **Connection Pool** section:
+
+```
+┌─────────────────────────────────────────────────┐
+│ Connection Pool                                 │
+├─────────────────────────────────────────────────┤
+│ Reused connections .. 14,823 (92.6%)            │
+│ New connections ..... 1,177 (7.4%)              │
+└─────────────────────────────────────────────────┘
+```
+
+**Export Fields:**
+
+JSON and HTML exports include the following fields in the summary:
+
+* `pool_hits` (Number): Count of requests that reused an existing connection from the pool.
+* `pool_misses` (Number): Count of requests that required a new connection to be established.
+
+A high `pool_hits` percentage indicates efficient connection reuse, which reduces TCP/TLS handshake overhead and improves throughput.
+
 
 ### Custom Metrics
 
@@ -1493,6 +1624,8 @@ Executes a load test script.
 * `--threshold <EXPR>`: Add a threshold expression (repeatable, e.g., `--threshold 'http_req_duration:p95<500'`).
 * `--abort-on-fail`: Abort immediately if any threshold is breached.
 * `--log-level <LEVEL>`: Set console log level: `debug`, `info`, `warn`, `error` (default: `info`).
+* `--log-filter <FILTER>`: Filter logs to a specific scenario (e.g., `--log-filter scenario=login`). Only logs from the matching scenario will be shown.
+* `--dry-run`: Validate script and display the execution plan (workers, duration, stages, scenarios, thresholds) without actually running the test.
 * `--headless`: Run in headless mode (no TUI, suitable for CI/CD).
 * `--json`: Output metrics in newline-delimited JSON format to stdout.
 * `--export-json <FILE>`: Save the final summary report to a JSON file.
@@ -1627,12 +1760,54 @@ Starts an interactive proxy to record HTTP traffic and generate a Fusillade scen
 3. Perform the actions you want to load test.
 4. Press `Ctrl+C` in the terminal to save the script.
 
-### `fusillade convert`
-Converts a HAR (HTTP Archive) file into a Fusillade JavaScript scenario.
+### `fusillade login <TOKEN>`
+Authenticate with Fusillade Cloud using an API key.
 
 **Arguments:**
-* `<FILE>`: Input .har file path (positional argument).
+* `<TOKEN>`: API key from https://fusillade.io/settings.
+
+**Example:**
+```bash
+fusillade login fsk_abc123...
+```
+
+After login, you can use `fusillade run --cloud` to run tests on Fusillade Cloud.
+
+### `fusillade whoami`
+Check authentication status with Fusillade Cloud. Displays login state and token info.
+
+**Example:**
+```bash
+fusillade whoami
+# Output: Logged in to Fusillade Cloud
+#         Token: fsk_abc123...
+```
+
+### `fusillade convert`
+Converts HAR (HTTP Archive) files and OpenAPI (Swagger) specifications into Fusillade JavaScript scenarios.
+
+**Arguments:**
+* `--input <FILE>`: Input file path. Accepts `.har`, `.yaml`, `.yml`, or `.json` files.
 * `--output <FILE>`: Output .js file path.
+
+**File Type Detection:**
+* `.yaml` / `.yml` files are treated as **OpenAPI specifications**.
+* `.json` files are **auto-detected**: if the JSON contains a `"log"` key it is treated as a HAR file, otherwise it is treated as an OpenAPI specification.
+* `.har` files are treated as **HAR archives**.
+
+**OpenAPI Conversion:**
+
+Generated scripts include all endpoints defined in the specification with the correct HTTP methods, example request bodies (derived from schema examples or defaults), and a `sleep(1)` between requests to avoid overwhelming the target.
+
+**Usage Examples:**
+
+```bash
+# Convert a HAR recording
+fusillade convert --input recording.har --output flow.js
+
+# Convert an OpenAPI spec
+fusillade convert --input api-spec.yaml --output test.js
+```
 
 ### `fusillade worker`
 Starts a worker node for distributed testing.
@@ -2048,6 +2223,8 @@ When running with `--headless --interactive`, Fusillade accepts commands via std
 | `fusillade run <file> -w 50 -d 5m` | Run with 50 workers for 5 minutes |
 | `fusillade run <file> -i` | Run with interactive control |
 | `fusillade run <file> --jitter 500ms --drop 0.05` | Run with chaos injection |
+| `fusillade run <file> --dry-run` | Show execution plan without running |
+| `fusillade run <file> --log-filter scenario=<name>` | Filter logs to specific scenario |
 | `fusillade run <file> --estimate-cost` | Estimate transfer costs first |
 | `fusillade init` | Create starter test script |
 | `fusillade init -o test.js --config` | Create script and config file |
@@ -2058,6 +2235,8 @@ When running with `--headless --interactive`, Fusillade accepts commands via std
 | `fusillade schema -o config.json` | Generate JSON schema |
 | `fusillade record -o flow.js` | Record HTTP traffic as a script |
 | `fusillade convert file.har` | Convert HAR to JS |
+| `fusillade login <token>` | Authenticate with Fusillade Cloud |
+| `fusillade whoami` | Check authentication status |
 | `fusillade worker --listen 0.0.0.0:8080` | Start worker node |
 | `fusillade controller --listen 0.0.0.0:9000` | Start controller node |
 

@@ -67,6 +67,8 @@ pub enum LogLevel {
 
 thread_local! {
     static LOG_LEVEL: RefCell<LogLevel> = const { RefCell::new(LogLevel::Info) };
+    static LOG_FILTER: RefCell<Option<String>> = const { RefCell::new(None) };
+    static CURRENT_SCENARIO: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Set the global log level for console.* API
@@ -77,6 +79,16 @@ pub fn set_log_level(level: LogLevel) {
 /// Get the current log level
 pub fn get_log_level() -> LogLevel {
     LOG_LEVEL.with(|l| *l.borrow())
+}
+
+/// Set the log filter (e.g., "scenario=login")
+pub fn set_log_filter(filter: String) {
+    LOG_FILTER.with(|f| *f.borrow_mut() = Some(filter));
+}
+
+/// Set the current scenario name for the worker thread
+pub fn set_current_scenario(name: String) {
+    CURRENT_SCENARIO.with(|s| *s.borrow_mut() = Some(name));
 }
 
 /// When true, suppress stdout output (TUI is active on the alternate screen)
@@ -175,10 +187,30 @@ fn format_value(v: &Value) -> String {
     }
 }
 
-/// Log with level filtering
+/// Log with level filtering and optional scenario filtering
 fn log_with_level(tx: &Sender<Metric>, level: LogLevel, args: Vec<Value>) {
     LOG_LEVEL.with(|current| {
         if level >= *current.borrow() {
+            // Check log filter (e.g., "scenario=login")
+            let filtered = LOG_FILTER.with(|filter| {
+                if let Some(ref f) = *filter.borrow() {
+                    if let Some(scenario_name) = f.strip_prefix("scenario=") {
+                        return CURRENT_SCENARIO.with(|s| {
+                            if let Some(ref current_scenario) = *s.borrow() {
+                                current_scenario != scenario_name
+                            } else {
+                                true // No scenario set, filter it out
+                            }
+                        });
+                    }
+                }
+                false // No filter, don't filter anything
+            });
+
+            if filtered {
+                return;
+            }
+
             // Format args
             let msg = args.iter().map(format_value).collect::<Vec<_>>().join(" ");
 
@@ -622,5 +654,42 @@ mod tests {
 
         // Verify the message was received
         assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn test_log_filter_set_and_scenario() {
+        // Set a log filter
+        set_log_filter("scenario=login".to_string());
+        LOG_FILTER.with(|f| {
+            assert_eq!(*f.borrow(), Some("scenario=login".to_string()));
+        });
+
+        // Set current scenario
+        set_current_scenario("login".to_string());
+        CURRENT_SCENARIO.with(|s| {
+            assert_eq!(*s.borrow(), Some("login".to_string()));
+        });
+
+        // Clean up
+        LOG_FILTER.with(|f| *f.borrow_mut() = None);
+        CURRENT_SCENARIO.with(|s| *s.borrow_mut() = None);
+    }
+
+    #[test]
+    fn test_log_level_ordering() {
+        assert!(LogLevel::Debug < LogLevel::Info);
+        assert!(LogLevel::Info < LogLevel::Warn);
+        assert!(LogLevel::Warn < LogLevel::Error);
+    }
+
+    #[test]
+    fn test_set_and_get_log_level() {
+        let original = get_log_level();
+        set_log_level(LogLevel::Debug);
+        assert_eq!(get_log_level(), LogLevel::Debug);
+        set_log_level(LogLevel::Error);
+        assert_eq!(get_log_level(), LogLevel::Error);
+        // Restore
+        set_log_level(original);
     }
 }

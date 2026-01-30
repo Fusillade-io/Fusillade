@@ -472,6 +472,23 @@ pub fn generate_html(report: &ReportStats) -> String {
         format_bytes(report.total_data_received)
     ));
 
+    // Connection pool metrics
+    let pool_total = report.pool_hits + report.pool_misses;
+    if pool_total > 0 {
+        let pool_rate = report.pool_hits as f64 / pool_total as f64 * 100.0;
+        html.push_str(&format!(
+            r#"
+    <div class="section">
+        <h2>Connection Pool</h2>
+        <table>
+            <tr><td>Reused Connections</td><td>{} ({:.1}%)</td></tr>
+            <tr><td>New Connections</td><td>{}</td></tr>
+        </table>
+    </div>"#,
+            report.pool_hits, pool_rate, report.pool_misses
+        ));
+    }
+
     // Footer
     html.push_str(r#"
     <footer style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #ddd; color: #888; font-size: 14px;">
@@ -547,6 +564,8 @@ mod tests {
             rates: HashMap::new(),
             counters: HashMap::new(),
             gauges: HashMap::new(),
+            pool_hits: 0,
+            pool_misses: 0,
         };
         let html = generate_html(&report);
         assert!(html.contains("No requests were made"));
@@ -578,6 +597,8 @@ mod tests {
             rates: HashMap::new(),
             counters: HashMap::new(),
             gauges: HashMap::new(),
+            pool_hits: 0,
+            pool_misses: 0,
         };
 
         let html = generate_html(&report);
@@ -697,6 +718,8 @@ mod tests {
             rates: HashMap::new(),
             counters: HashMap::new(),
             gauges: HashMap::new(),
+            pool_hits: 0,
+            pool_misses: 0,
         };
 
         let html = generate_html(&report);

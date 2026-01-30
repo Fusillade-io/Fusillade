@@ -3,6 +3,7 @@ pub mod cloud;
 pub mod config;
 pub mod har;
 pub mod init;
+pub mod openapi;
 pub mod recorder;
 pub mod validate;
 
@@ -68,7 +69,7 @@ pub enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
-    /// Convert a HAR file to a Fusillade JS flow
+    /// Convert a HAR or OpenAPI file to a Fusillade JS script
     Convert {
         /// Path to the input .har file
         #[arg(short, long)]

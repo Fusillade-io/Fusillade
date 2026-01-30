@@ -205,6 +205,12 @@ enum Commands {
         /// Log level: debug, info, warn, error
         #[arg(long, default_value = "info")]
         log_level: String,
+        /// Filter logs to a specific scenario (e.g., --log-filter scenario=login)
+        #[arg(long)]
+        log_filter: Option<String>,
+        /// Validate script and show execution plan without running the test
+        #[arg(long)]
+        dry_run: bool,
         /// Skip TLS certificate verification (insecure, use for self-signed certs)
         #[arg(long)]
         insecure: bool,
@@ -348,6 +354,8 @@ fn main() -> Result<()> {
             thresholds,
             abort_on_fail,
             log_level,
+            log_filter,
+            dry_run,
             insecure,
             max_redirects,
             user_agent,
@@ -360,6 +368,12 @@ fn main() -> Result<()> {
                 _ => fusillade::bridge::LogLevel::Info,
             };
             fusillade::bridge::set_log_level(log_level_enum);
+
+            // Set log filter if specified (e.g., --log-filter scenario=login)
+            if let Some(ref filter) = log_filter {
+                fusillade::bridge::set_log_filter(filter.clone());
+            }
+
             // Load .env file if present (check script directory, then current directory)
             let script_dir = scenario.parent().unwrap_or(std::path::Path::new("."));
             let env_paths = [script_dir.join(".env"), PathBuf::from(".env")];
@@ -631,6 +645,68 @@ fn main() -> Result<()> {
                     }
                 }
                 final_config.criteria = Some(criteria);
+            }
+
+            // Dry run: show execution plan and exit
+            if dry_run {
+                println!("╭────────────────────────────────────────────────────────────╮");
+                println!("│ DRY RUN - Execution Plan                                  │");
+                println!("├────────────────────────────────────────────────────────────┤");
+                println!("│ Script:      {:>44} │", scenario.display());
+                println!("│ Workers:     {:>44} │", final_config.workers.unwrap_or(1));
+                println!(
+                    "│ Duration:    {:>44} │",
+                    final_config
+                        .duration
+                        .as_deref()
+                        .unwrap_or("(iterations-based)")
+                );
+                if let Some(iters) = final_config.iterations {
+                    println!("│ Iterations:  {:>44} │", iters);
+                }
+                if let Some(ref executor) = final_config.executor {
+                    println!("│ Executor:    {:>44?} │", executor);
+                }
+                if let Some(ref rate) = final_config.rate {
+                    println!("│ Rate:        {:>44} │", rate);
+                }
+                if let Some(ref schedule) = final_config.schedule {
+                    println!("├────────────────────────────────────────────────────────────┤");
+                    println!("│ Schedule Stages:                                           │");
+                    for (i, stage) in schedule.iter().enumerate() {
+                        println!(
+                            "│   Stage {}: {:>3} workers for {:>37} │",
+                            i + 1,
+                            stage.target,
+                            stage.duration
+                        );
+                    }
+                }
+                if let Some(ref scenarios) = final_config.scenarios {
+                    println!("├────────────────────────────────────────────────────────────┤");
+                    println!("│ Scenarios:                                                 │");
+                    for (name, sc) in scenarios {
+                        println!(
+                            "│   {}: {:>3} workers                                     │",
+                            name,
+                            sc.workers.unwrap_or(1)
+                        );
+                    }
+                }
+                if let Some(ref criteria) = final_config.criteria {
+                    println!("├────────────────────────────────────────────────────────────┤");
+                    println!("│ Thresholds:                                                │");
+                    for (metric, conditions) in criteria {
+                        for condition in conditions {
+                            println!(
+                                "│   {}:{}                                               │",
+                                metric, condition
+                            );
+                        }
+                    }
+                }
+                println!("╰────────────────────────────────────────────────────────────╯");
+                return Ok(());
             }
 
             // Pre-flight memory check (unless disabled)
@@ -951,7 +1027,20 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Convert { input, output } => {
-            let script = fusillade::cli::har::convert_to_js(&input)?;
+            let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let script = match ext {
+                "yaml" | "yml" => fusillade::cli::openapi::convert_to_js(&input)?,
+                "json" => {
+                    // Try HAR first (has "log" key), otherwise try OpenAPI
+                    let content = std::fs::read_to_string(&input)?;
+                    if content.contains("\"log\"") {
+                        fusillade::cli::har::convert_from_string(&content)?
+                    } else {
+                        fusillade::cli::openapi::convert_to_js(&input)?
+                    }
+                }
+                _ => fusillade::cli::har::convert_to_js(&input)?,
+            };
             if let Some(out_path) = output {
                 std::fs::write(out_path, script)?;
             } else {
