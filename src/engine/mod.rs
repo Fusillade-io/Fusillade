@@ -646,6 +646,7 @@ impl Engine {
                                                         agg, tokio_rt, jitter, drop_rate, response_sink
                                                     ).unwrap();
                                                     ctx.globals().set("__SCENARIO", scenario_name.clone()).unwrap();
+                                                    crate::bridge::set_current_scenario(scenario_name.clone());
 
                                                     let module = match Module::declare(
                                                         ctx.clone(),
@@ -946,6 +947,7 @@ impl Engine {
                                                     ctx.globals()
                                                         .set("__SCENARIO", scenario_name.clone())
                                                         .unwrap();
+                                                    crate::bridge::set_current_scenario(scenario_name.clone());
 
                                                     let module = match Module::declare(
                                                         ctx.clone(),
@@ -1278,6 +1280,7 @@ impl Engine {
                                     crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink).unwrap();
                                     // Set scenario name global for automatic tagging
                                     ctx.globals().set("__SCENARIO", scenario_name.clone()).unwrap();
+                                    crate::bridge::set_current_scenario(scenario_name.clone());
 
                                     // Module declaration with better error handling
                                     let module = match Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).catch(&ctx) {

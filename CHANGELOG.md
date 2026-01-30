@@ -5,6 +5,39 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-01-30
+
+### Added
+- `--dry-run` flag to preview execution plan without running the test
+- `--log-filter scenario=<name>` flag to filter log output to a specific scenario
+- WebSocket auto-reconnect with exponential backoff (`reconnect` and `maxRetries` options)
+- `socket.isConnected()` method for checking WebSocket connection status
+- Browser `page.setContent(html)` to set page HTML content
+- Browser `page.focus(selector)` to focus an element
+- Browser `page.select(selector, values)` to select options in a `<select>` element
+- Browser `page.getCookies()` to retrieve cookies as an array
+- Browser `page.setCookie(cookie)` to set a cookie with name, value, domain, path, secure, maxAge
+- Browser `page.deleteCookie(name)` to delete a cookie by name
+- Browser `page.queryAll(selector)` to query all matching elements and return their tag, text, id, className
+- Browser `page.waitForResponse(urlPattern, [timeoutMs])` to wait for a network response matching a URL pattern
+- AMQP `client.declareExchange(name, type, [opts])` for declaring exchanges
+- AMQP `client.declareQueue(name, [opts])` for declaring queues with durable, autoDelete, exclusive options
+- AMQP `client.bindQueue(queue, exchange, routingKey)` for binding queues to exchanges
+- MQTT `client.unsubscribe(topic)` to unsubscribe from topics
+- MQTT `publish` now supports optional `retain` parameter
+- `utils.randomAddress()` generating random street, city, state, zip, and full address
+- `http.graphql(url, query, [variables])` convenience method for GraphQL requests
+- `http.batch()` now supports optional `onProgress` callback
+- `res.matchesSchema(schema)` for JSON schema type validation on responses
+- `stats.get(name)` for accessing runtime metric values from scripts
+- Connection pool metrics: automatic tracking of `pool_hits` and `pool_misses` in reports, JSON, and HTML exports
+- OpenAPI/Swagger import: `fusillade convert` now accepts `.yaml`/`.yml`/`.json` OpenAPI specs and generates test scripts
+- FormData documentation section in DOCUMENTATION.md
+- `fusillade login` and `fusillade whoami` CLI documentation
+
+### Changed
+- `fusillade convert` now auto-detects file format (HAR vs OpenAPI) for JSON inputs
+
 ## [1.3.0] - 2026-01-29
 
 ### Added

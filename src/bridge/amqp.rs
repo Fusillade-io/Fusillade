@@ -339,6 +339,132 @@ impl JsAmqpClient {
         }
     }
 
+    /// Declare an exchange
+    #[qjs(rename = "declareExchange")]
+    pub fn declare_exchange(
+        &self,
+        name: String,
+        exchange_type: String,
+        opts: Option<Object<'_>>,
+    ) -> Result<()> {
+        let start = Instant::now();
+        let channel = self.channel.as_ref().ok_or_else(|| {
+            rquickjs::Error::new_from_js("AMQP Client not connected", "StateError")
+        })?;
+
+        let kind = match exchange_type.as_str() {
+            "direct" => lapin::ExchangeKind::Direct,
+            "fanout" => lapin::ExchangeKind::Fanout,
+            "topic" => lapin::ExchangeKind::Topic,
+            "headers" => lapin::ExchangeKind::Headers,
+            other => lapin::ExchangeKind::Custom(other.to_string()),
+        };
+
+        let mut exchange_opts = ExchangeDeclareOptions::default();
+        if let Some(ref o) = opts {
+            if let Ok(durable) = o.get::<_, bool>("durable") {
+                exchange_opts.durable = durable;
+            }
+            if let Ok(auto_delete) = o.get::<_, bool>("autoDelete") {
+                exchange_opts.auto_delete = auto_delete;
+            }
+        }
+
+        let rt = self.runtime.clone();
+        rt.block_on(async {
+            channel
+                .exchange_declare(&name, kind, exchange_opts, FieldTable::default())
+                .await
+        })
+        .map_err(|e| {
+            let err_msg = format!("AMQP Exchange declare failed: {}", e);
+            if let Some(ref mtx) = self.tx {
+                let _ = mtx.send(make_metric("amqp::declareExchange", start, Some(err_msg)));
+            }
+            rquickjs::Error::new_from_js("AMQP Exchange declare failed", "NetworkError")
+        })?;
+
+        if let Some(ref mtx) = self.tx {
+            let _ = mtx.send(make_metric("amqp::declareExchange", start, None));
+        }
+        Ok(())
+    }
+
+    /// Declare a queue with options
+    #[qjs(rename = "declareQueue")]
+    pub fn declare_queue(&self, name: String, opts: Option<Object<'_>>) -> Result<()> {
+        let start = Instant::now();
+        let channel = self.channel.as_ref().ok_or_else(|| {
+            rquickjs::Error::new_from_js("AMQP Client not connected", "StateError")
+        })?;
+
+        let mut queue_opts = QueueDeclareOptions::default();
+        if let Some(ref o) = opts {
+            if let Ok(durable) = o.get::<_, bool>("durable") {
+                queue_opts.durable = durable;
+            }
+            if let Ok(auto_delete) = o.get::<_, bool>("autoDelete") {
+                queue_opts.auto_delete = auto_delete;
+            }
+            if let Ok(exclusive) = o.get::<_, bool>("exclusive") {
+                queue_opts.exclusive = exclusive;
+            }
+        }
+
+        let rt = self.runtime.clone();
+        rt.block_on(async {
+            channel
+                .queue_declare(&name, queue_opts, FieldTable::default())
+                .await
+        })
+        .map_err(|e| {
+            let err_msg = format!("AMQP Queue declare failed: {}", e);
+            if let Some(ref mtx) = self.tx {
+                let _ = mtx.send(make_metric("amqp::declareQueue", start, Some(err_msg)));
+            }
+            rquickjs::Error::new_from_js("AMQP Queue declare failed", "NetworkError")
+        })?;
+
+        if let Some(ref mtx) = self.tx {
+            let _ = mtx.send(make_metric("amqp::declareQueue", start, None));
+        }
+        Ok(())
+    }
+
+    /// Bind a queue to an exchange with a routing key
+    #[qjs(rename = "bindQueue")]
+    pub fn bind_queue(&self, queue: String, exchange: String, routing_key: String) -> Result<()> {
+        let start = Instant::now();
+        let channel = self.channel.as_ref().ok_or_else(|| {
+            rquickjs::Error::new_from_js("AMQP Client not connected", "StateError")
+        })?;
+
+        let rt = self.runtime.clone();
+        rt.block_on(async {
+            channel
+                .queue_bind(
+                    &queue,
+                    &exchange,
+                    &routing_key,
+                    QueueBindOptions::default(),
+                    FieldTable::default(),
+                )
+                .await
+        })
+        .map_err(|e| {
+            let err_msg = format!("AMQP Queue bind failed: {}", e);
+            if let Some(ref mtx) = self.tx {
+                let _ = mtx.send(make_metric("amqp::bindQueue", start, Some(err_msg)));
+            }
+            rquickjs::Error::new_from_js("AMQP Queue bind failed", "NetworkError")
+        })?;
+
+        if let Some(ref mtx) = self.tx {
+            let _ = mtx.send(make_metric("amqp::bindQueue", start, None));
+        }
+        Ok(())
+    }
+
     pub fn close(&mut self) -> Result<()> {
         // Signal background thread to stop
         self.running.store(false, Ordering::SeqCst);
@@ -460,6 +586,68 @@ mod tests {
                 ..
             } => {
                 assert_eq!(name, "amqp::connect");
+                assert_eq!(status, 0);
+                assert!(error.is_some());
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_amqp_make_metric_declare_exchange() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("amqp::declareExchange", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "amqp::declareExchange");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_amqp_make_metric_declare_queue() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("amqp::declareQueue", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "amqp::declareQueue");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_amqp_make_metric_bind_queue() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("amqp::bindQueue", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "amqp::bindQueue");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_amqp_make_metric_declare_exchange_error() {
+        let start = std::time::Instant::now();
+        let metric = make_metric(
+            "amqp::declareExchange",
+            start,
+            Some("Exchange declare failed".to_string()),
+        );
+        match metric {
+            crate::stats::Metric::Request {
+                name,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(name, "amqp::declareExchange");
                 assert_eq!(status, 0);
                 assert!(error.is_some());
             }

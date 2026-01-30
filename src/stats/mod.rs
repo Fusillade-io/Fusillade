@@ -146,6 +146,10 @@ impl ShardedAggregator {
                 merged.gauges.insert(name.clone(), *val);
             }
 
+            // Merge pool metrics
+            merged.pool_hits += shard_data.pool_hits;
+            merged.pool_misses += shard_data.pool_misses;
+
             // Merge logs
             for log in &shard_data.logs {
                 merged.logs.push_back(log.clone());
@@ -174,6 +178,7 @@ pub struct RequestTimings {
     pub duration: Duration,
     pub response_size: usize,
     pub request_size: usize,
+    pub pool_reused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +263,9 @@ pub struct ReportStats {
     pub rates: HashMap<String, RateReport>,
     pub counters: HashMap<String, f64>,
     pub gauges: HashMap<String, f64>,
+    // Connection pool metrics
+    pub pool_hits: usize,
+    pub pool_misses: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -344,6 +352,9 @@ pub struct StatsAggregator {
     pub gauges: HashMap<String, f64>,
     /// When true, skip per-endpoint grouped_requests tracking to reduce memory
     pub no_endpoint_tracking: bool,
+    // Connection pool metrics
+    pub pool_hits: usize,
+    pub pool_misses: usize,
 }
 
 unsafe impl<'js> JsLifetime<'js> for StatsAggregator {
@@ -381,6 +392,8 @@ impl StatsAggregator {
             counters: HashMap::new(),
             gauges: HashMap::new(),
             no_endpoint_tracking: false,
+            pool_hits: 0,
+            pool_misses: 0,
         }
     }
 
@@ -417,6 +430,13 @@ impl StatsAggregator {
                 // Update global data counters
                 self.total_data_sent += timings.request_size as u64;
                 self.total_data_received += timings.response_size as u64;
+
+                // Track connection pool reuse
+                if timings.pool_reused {
+                    self.pool_hits += 1;
+                } else {
+                    self.pool_misses += 1;
+                }
 
                 // Per-request stats (skip when no_endpoint_tracking to save memory)
                 if !self.no_endpoint_tracking {
@@ -644,6 +664,8 @@ impl StatsAggregator {
             gauges: self.gauges.clone(),
             total_data_sent: self.total_data_sent,
             total_data_received: self.total_data_received,
+            pool_hits: self.pool_hits,
+            pool_misses: self.pool_misses,
         }
     }
 
@@ -705,6 +727,15 @@ impl StatsAggregator {
             println!("\nData Transfer:");
             println!("  Sent:     {:.2} MB", mb_sent);
             println!("  Received: {:.2} MB", mb_recv);
+
+            // Print connection pool metrics
+            let pool_total = self.pool_hits + self.pool_misses;
+            if pool_total > 0 {
+                let pool_rate = self.pool_hits as f64 / pool_total as f64 * 100.0;
+                println!("\nConnection Pool:");
+                println!("  Reused:  {} ({:.1}%)", self.pool_hits, pool_rate);
+                println!("  New:     {}", self.pool_misses);
+            }
         }
 
         if !self.requests.is_empty() {
@@ -1527,6 +1558,85 @@ mod tests {
         assert!(
             report.grouped_requests.contains_key("GET /api/users"),
             "Should track endpoint stats for GET /api/users"
+        );
+    }
+
+    #[test]
+    fn test_pool_metrics() {
+        let mut agg = StatsAggregator::new();
+
+        // Pool miss: connecting > 0
+        agg.add(Metric::Request {
+            name: "req1".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(100),
+                connecting: Duration::from_millis(10),
+                pool_reused: false,
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        // Pool hit: connecting == 0, pool_reused = true
+        agg.add(Metric::Request {
+            name: "req2".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(50),
+                pool_reused: true,
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        // Another pool hit
+        agg.add(Metric::Request {
+            name: "req3".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(60),
+                pool_reused: true,
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        assert_eq!(agg.pool_hits, 2);
+        assert_eq!(agg.pool_misses, 1);
+
+        let report = agg.to_report();
+        assert_eq!(report.pool_hits, 2);
+        assert_eq!(report.pool_misses, 1);
+    }
+
+    #[test]
+    fn test_pool_metrics_in_json() {
+        let mut agg = StatsAggregator::new();
+
+        agg.add(Metric::Request {
+            name: "test".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(100),
+                pool_reused: true,
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        let json = agg.to_json();
+        assert!(
+            json.contains("\"pool_hits\": 1"),
+            "JSON should contain pool_hits"
+        );
+        assert!(
+            json.contains("\"pool_misses\": 0"),
+            "JSON should contain pool_misses"
         );
     }
 }

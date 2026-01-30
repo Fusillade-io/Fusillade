@@ -333,6 +333,250 @@ impl<'js> JsPage {
         Ok(())
     }
 
+    #[qjs(rename = "setContent")]
+    pub fn set_content(&self, ctx: Ctx<'_>, html: String) -> Result<()> {
+        let start = Instant::now();
+        let escaped = html.replace('\\', "\\\\").replace('`', "\\`");
+        let script = format!(
+            "(() => {{ document.open(); document.write(`{}`); document.close(); }})()",
+            escaped
+        );
+        self.inner.evaluate(&script, false).map_err(|e| {
+            let msg = format!("setContent failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::setContent", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::setContent", start, None));
+        }
+        Ok(())
+    }
+
+    pub fn focus(&self, ctx: Ctx<'_>, selector: String) -> Result<()> {
+        let start = Instant::now();
+        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        let script = format!(
+            "(() => {{ const el = document.querySelector('{}'); if (el) el.focus(); else throw new Error('Element not found'); }})()",
+            escaped
+        );
+        self.inner.evaluate(&script, false).map_err(|e| {
+            let msg = format!("Focus failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::focus", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::focus", start, None));
+        }
+        Ok(())
+    }
+
+    pub fn select(&self, ctx: Ctx<'js>, selector: String, values: Vec<String>) -> Result<()> {
+        let start = Instant::now();
+        let escaped_sel = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        let values_js = values
+            .iter()
+            .map(|v| format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = format!(
+            r#"(() => {{
+                const el = document.querySelector('{}');
+                if (!el) throw new Error('Element not found');
+                const vals = [{}];
+                Array.from(el.options).forEach(o => {{ o.selected = vals.includes(o.value); }});
+                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            }})()"#,
+            escaped_sel, values_js
+        );
+        self.inner.evaluate(&script, false).map_err(|e| {
+            let msg = format!("Select failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::select", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::select", start, None));
+        }
+        Ok(())
+    }
+
+    #[qjs(rename = "getCookies")]
+    pub fn get_cookies(&self, ctx: Ctx<'js>) -> Result<Value<'js>> {
+        let start = Instant::now();
+        let script = r#"document.cookie.split('; ').filter(Boolean).map(c => {
+            const [name, ...rest] = c.split('=');
+            return { name, value: rest.join('=') };
+        })"#;
+        let result = self.inner.evaluate(script, false).map_err(|e| {
+            let msg = format!("getCookies failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::getCookies", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::getCookies", start, None));
+        }
+        let json_str = serde_json::to_string(&result.value).unwrap_or("[]".to_string());
+        let json_obj: Object = ctx.globals().get("JSON")?;
+        let parse: Function = json_obj.get("parse")?;
+        parse.call((json_str,))
+    }
+
+    #[qjs(rename = "setCookie")]
+    pub fn set_cookie(&self, ctx: Ctx<'_>, cookie: Object<'_>) -> Result<()> {
+        let start = Instant::now();
+        let name: String = cookie.get("name")?;
+        let value: String = cookie.get("value")?;
+        let mut cookie_str = format!("{}={}", name, value);
+        if let Ok(domain) = cookie.get::<_, String>("domain") {
+            cookie_str.push_str(&format!("; domain={}", domain));
+        }
+        if let Ok(path) = cookie.get::<_, String>("path") {
+            cookie_str.push_str(&format!("; path={}", path));
+        }
+        if let Ok(true) = cookie.get::<_, bool>("secure") {
+            cookie_str.push_str("; secure");
+        }
+        if let Ok(max_age) = cookie.get::<_, i64>("maxAge") {
+            cookie_str.push_str(&format!("; max-age={}", max_age));
+        }
+        let escaped = cookie_str.replace('\\', "\\\\").replace('\'', "\\'");
+        let script = format!("document.cookie = '{}'", escaped);
+        self.inner.evaluate(&script, false).map_err(|e| {
+            let msg = format!("setCookie failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::setCookie", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::setCookie", start, None));
+        }
+        Ok(())
+    }
+
+    #[qjs(rename = "deleteCookie")]
+    pub fn delete_cookie(&self, ctx: Ctx<'_>, name: String) -> Result<()> {
+        let start = Instant::now();
+        let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
+        let script = format!(
+            "document.cookie = '{}=; expires=Thu, 01 Jan 1970 00:00:01 GMT; path=/'",
+            escaped
+        );
+        self.inner.evaluate(&script, false).map_err(|e| {
+            let msg = format!("deleteCookie failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric(
+                    "browser::deleteCookie",
+                    start,
+                    Some(msg.clone()),
+                ));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::deleteCookie", start, None));
+        }
+        Ok(())
+    }
+
+    #[qjs(rename = "queryAll")]
+    pub fn query_all(&self, ctx: Ctx<'js>, selector: String) -> Result<Value<'js>> {
+        let start = Instant::now();
+        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        let script = format!(
+            "Array.from(document.querySelectorAll('{}')).map(el => ({{ tag: el.tagName.toLowerCase(), text: el.textContent || '', id: el.id || '', className: el.className || '' }}))",
+            escaped
+        );
+        let result = self.inner.evaluate(&script, false).map_err(|e| {
+            let msg = format!("queryAll failed: {}", e);
+            if let Some(ref tx) = self.tx {
+                let _ = tx.send(make_metric("browser::queryAll", start, Some(msg.clone())));
+            }
+            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+            rquickjs::Error::Exception
+        })?;
+        if let Some(ref tx) = self.tx {
+            let _ = tx.send(make_metric("browser::queryAll", start, None));
+        }
+        let json_str = serde_json::to_string(&result.value).unwrap_or("[]".to_string());
+        let json_obj: Object = ctx.globals().get("JSON")?;
+        let parse: Function = json_obj.get("parse")?;
+        parse.call((json_str,))
+    }
+
+    #[qjs(rename = "waitForResponse")]
+    pub fn wait_for_response(
+        &self,
+        ctx: Ctx<'js>,
+        url_pattern: String,
+        timeout_ms: Option<f64>,
+    ) -> Result<Value<'js>> {
+        let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30000.0) as u64);
+        let escaped_pattern = url_pattern.replace('\\', "\\\\").replace('\'', "\\'");
+
+        loop {
+            if start.elapsed() > timeout {
+                let msg = format!(
+                    "waitForResponse timed out after {}ms waiting for '{}'",
+                    timeout.as_millis(),
+                    url_pattern
+                );
+                if let Some(ref tx) = self.tx {
+                    let _ = tx.send(make_metric(
+                        "browser::waitForResponse",
+                        start,
+                        Some(msg.clone()),
+                    ));
+                }
+                let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+                return Err(rquickjs::Error::Exception);
+            }
+
+            let script = format!(
+                "(() => {{ const entries = performance.getEntriesByType('resource').filter(e => e.name.includes('{}')); if (entries.length > 0) {{ const e = entries[entries.length - 1]; return {{ name: e.name, duration: e.duration, startTime: e.startTime, transferSize: e.transferSize || 0 }}; }} return null; }})()",
+                escaped_pattern
+            );
+
+            match self.inner.evaluate(&script, false) {
+                Ok(result) => {
+                    let is_valid = match &result.value {
+                        Some(val) => !val.is_null(),
+                        None => false,
+                    };
+                    if is_valid {
+                        if let Some(ref tx) = self.tx {
+                            let _ = tx.send(make_metric("browser::waitForResponse", start, None));
+                        }
+                        let json_str =
+                            serde_json::to_string(&result.value).unwrap_or("null".to_string());
+                        let json_obj: Object = ctx.globals().get("JSON")?;
+                        let parse: Function = json_obj.get("parse")?;
+                        return parse.call((json_str,));
+                    }
+                }
+                Err(_) => {
+                    // Script evaluation error, continue polling
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     pub fn close(&self, ctx: Ctx<'_>) -> Result<()> {
         // Clear the current page reference if this page is the active one
         if let Some(cp) = ctx.userdata::<CurrentPage>() {
@@ -589,6 +833,110 @@ mod tests {
                 }
                 _ => panic!("Expected Request metric for {}", op),
             }
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_set_content() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::setContent", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::setContent");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_focus() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::focus", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::focus");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_select() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::select", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::select");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_get_cookies() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::getCookies", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::getCookies");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_set_cookie() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::setCookie", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::setCookie");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_delete_cookie() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::deleteCookie", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::deleteCookie");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_query_all() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::queryAll", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::queryAll");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
+        }
+    }
+
+    #[test]
+    fn test_browser_make_metric_wait_for_response() {
+        let start = std::time::Instant::now();
+        let metric = make_metric("browser::waitForResponse", start, None);
+        match metric {
+            crate::stats::Metric::Request { name, status, .. } => {
+                assert_eq!(name, "browser::waitForResponse");
+                assert_eq!(status, 200);
+            }
+            _ => panic!("Expected Request metric"),
         }
     }
 }

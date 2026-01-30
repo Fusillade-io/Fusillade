@@ -108,6 +108,8 @@ mod tests {
             rates: HashMap::new(),
             counters: HashMap::new(),
             gauges: HashMap::new(),
+            pool_hits: 0,
+            pool_misses: 0,
         }
     }
 

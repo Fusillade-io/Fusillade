@@ -310,6 +310,8 @@ impl HttpClient {
 
         timings.response_size = resp_size;
         timings.request_size = req_size;
+        // Pool reuse: if no connecting or TLS time was recorded, the connection was reused
+        timings.pool_reused = connection_time == Duration::ZERO;
 
         // Construct new response with bytes body
         let mut builder = Response::builder()

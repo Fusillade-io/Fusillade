@@ -116,6 +116,106 @@ fn random_name() -> RandomName {
     RandomName { first, last, full }
 }
 
+#[derive(Debug)]
+struct RandomAddress {
+    street: String,
+    city: String,
+    state: String,
+    zip: String,
+    full: String,
+}
+
+impl<'js> IntoJs<'js> for RandomAddress {
+    fn into_js(self, ctx: &Ctx<'js>) -> Result<Value<'js>> {
+        let obj = Object::new(ctx.clone())?;
+        obj.set("street", self.street.clone())?;
+        obj.set("city", self.city.clone())?;
+        obj.set("state", self.state.clone())?;
+        obj.set("zip", self.zip.clone())?;
+        obj.set("full", self.full)?;
+        Ok(obj.into_value())
+    }
+}
+
+fn random_address() -> RandomAddress {
+    let street_names = [
+        "Main",
+        "Oak",
+        "Maple",
+        "Cedar",
+        "Elm",
+        "Pine",
+        "Washington",
+        "Lake",
+        "Hill",
+        "Park",
+        "Walnut",
+        "Sunset",
+        "River",
+        "Spring",
+        "Church",
+    ];
+    let street_types = ["St", "Ave", "Blvd", "Dr", "Ln", "Rd", "Way", "Ct"];
+    let cities = [
+        "Springfield",
+        "Riverside",
+        "Fairview",
+        "Franklin",
+        "Clinton",
+        "Madison",
+        "Georgetown",
+        "Arlington",
+        "Salem",
+        "Burlington",
+        "Greenville",
+        "Bristol",
+        "Oakland",
+        "Manchester",
+        "Ashland",
+    ];
+    let states = [
+        ("AL", "Alabama"),
+        ("AK", "Alaska"),
+        ("AZ", "Arizona"),
+        ("CA", "California"),
+        ("CO", "Colorado"),
+        ("CT", "Connecticut"),
+        ("FL", "Florida"),
+        ("GA", "Georgia"),
+        ("IL", "Illinois"),
+        ("IN", "Indiana"),
+        ("MA", "Massachusetts"),
+        ("MI", "Michigan"),
+        ("MN", "Minnesota"),
+        ("NY", "New York"),
+        ("OH", "Ohio"),
+        ("OR", "Oregon"),
+        ("PA", "Pennsylvania"),
+        ("TX", "Texas"),
+        ("VA", "Virginia"),
+        ("WA", "Washington"),
+    ];
+
+    let mut rng = rand::thread_rng();
+    let street_num = rng.gen_range(100..9999);
+    let street_name = street_names[rng.gen_range(0..street_names.len())];
+    let street_type = street_types[rng.gen_range(0..street_types.len())];
+    let city = cities[rng.gen_range(0..cities.len())];
+    let (state_abbr, _) = states[rng.gen_range(0..states.len())];
+    let zip = format!("{:05}", rng.gen_range(10000..99999));
+
+    let street = format!("{} {} {}", street_num, street_name, street_type);
+    let full = format!("{}, {}, {} {}", street, city, state_abbr, zip);
+
+    RandomAddress {
+        street,
+        city: city.to_string(),
+        state: state_abbr.to_string(),
+        zip,
+        full,
+    }
+}
+
 fn random_date(start_year: i32, end_year: i32) -> String {
     let mut rng = rand::thread_rng();
     let year = rng.gen_range(start_year..=end_year);
@@ -185,6 +285,12 @@ pub fn register_sync(ctx: &Ctx, worker_id: usize) -> Result<()> {
     utils.set(
         "randomName",
         Function::new(ctx.clone(), || -> RandomName { random_name() }),
+    )?;
+
+    // randomAddress() -> { street, city, state, zip, full }
+    utils.set(
+        "randomAddress",
+        Function::new(ctx.clone(), || -> RandomAddress { random_address() }),
     )?;
 
     // randomDate(startYear, endYear) -> String (YYYY-MM-DD)
@@ -297,6 +403,34 @@ mod tests {
         assert!(name.full.contains(' '));
         assert!(name.full.contains(&name.first));
         assert!(name.full.contains(&name.last));
+    }
+
+    #[test]
+    fn test_random_address_fields() {
+        let addr = random_address();
+        assert!(!addr.street.is_empty());
+        assert!(!addr.city.is_empty());
+        assert!(!addr.state.is_empty());
+        assert_eq!(addr.state.len(), 2); // State abbreviation
+        assert_eq!(addr.zip.len(), 5); // ZIP code
+        assert!(addr.full.contains(&addr.street));
+        assert!(addr.full.contains(&addr.city));
+        assert!(addr.full.contains(&addr.state));
+        assert!(addr.full.contains(&addr.zip));
+    }
+
+    #[test]
+    fn test_random_address_zip_numeric() {
+        let addr = random_address();
+        assert!(addr.zip.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_random_address_uniqueness() {
+        let addr1 = random_address();
+        let addr2 = random_address();
+        // Very unlikely to be identical
+        assert_ne!(addr1.full, addr2.full);
     }
 
     #[test]
