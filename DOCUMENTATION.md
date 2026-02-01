@@ -1635,7 +1635,7 @@ Executes a load test script.
   * `--out csv=<FILE>`: Export to CSV file
   * `--out junit=<FILE>`: Export to JUnit XML format (for CI/CD integration)
   * `--out statsd=<HOST:PORT>`: Export to StatsD endpoint (e.g., `statsd=localhost:8125`). Compatible with StatsD, Datadog, Graphite.
-* `--metrics-url <URL>`: Stream real-time metrics to a URL during test execution. Sends periodic JSON payloads with RPS, latency, errors, etc. At test completion, sends a summary to `<URL>/summary` with endpoint breakdown and HTTP status code counts.
+* `--metrics-url <URL>`: Stream real-time metrics to a URL during test execution. Sends periodic JSON payloads with RPS, latency, errors, and per-endpoint breakdown (when endpoint tracking is enabled). At test completion, sends a summary to `<URL>/summary` with final endpoint metrics and HTTP status code counts.
 * `--metrics-auth <HEADER>`: Authentication header for metrics URL (format: `HeaderName: value`).
 * `-i, --interactive`: Enable interactive control mode (pause, resume, ramp workers).
 * `--cloud`: Run on Fusillade Cloud instead of locally.
@@ -1652,6 +1652,41 @@ Executes a load test script.
 * `--insecure`: Skip TLS certificate verification. Use for self-signed certificates. **Warning:** This is insecure and should only be used for testing.
 * `--max-redirects <NUM>`: Maximum number of HTTP redirects to follow. Default: 10. Set to 0 to disable redirects entirely.
 * `--user-agent <STRING>`: Set default User-Agent header for all HTTP requests.
+
+**Metrics Streaming Payload Format:**
+
+Periodic payloads (every ~5 seconds) are sent to `<URL>/metrics`:
+
+```json
+{
+  "requests_total": 12500,
+  "requests_per_sec": 2500.5,
+  "latency_avg_ms": 45.2,
+  "latency_p95_ms": 120.8,
+  "errors": 3,
+  "active_workers": 100,
+  "data_sent": 5242880,
+  "data_received": 15728640,
+  "endpoints": [
+    {
+      "name": "GET https://api.example.com/users",
+      "requests": 6200,
+      "avg_latency_ms": 42.1,
+      "p95_latency_ms": 110.5,
+      "errors": 1
+    },
+    {
+      "name": "POST https://api.example.com/orders",
+      "requests": 6300,
+      "avg_latency_ms": 48.3,
+      "p95_latency_ms": 131.0,
+      "errors": 2
+    }
+  ]
+}
+```
+
+The `endpoints` array is included when endpoint tracking is enabled (the default). Use `--no-endpoint-tracking` to omit it. The summary payload sent to `<URL>/summary` at completion includes additional `min_latency_ms` and `max_latency_ms` per endpoint.
 
 ### `fusillade history`
 View test run history from the local database.

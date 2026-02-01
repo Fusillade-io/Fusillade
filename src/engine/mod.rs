@@ -1818,8 +1818,7 @@ impl Engine {
                         };
 
                         // Build metrics payload matching control plane format
-                        // Note: Endpoint metrics are sent separately at completion to avoid performance overhead
-                        let payload = serde_json::json!({
+                        let mut payload = serde_json::json!({
                             "requests_total": report.total_requests,
                             "requests_per_sec": rps,
                             "latency_avg_ms": report.avg_latency_ms,
@@ -1829,6 +1828,27 @@ impl Engine {
                             "data_sent": report.total_data_sent,
                             "data_received": report.total_data_received
                         });
+
+                        // Include per-endpoint metrics when endpoint tracking is enabled
+                        if !report.grouped_requests.is_empty() {
+                            let endpoints: Vec<serde_json::Value> = report
+                                .grouped_requests
+                                .iter()
+                                .map(|(name, req_report)| {
+                                    serde_json::json!({
+                                        "name": name,
+                                        "requests": req_report.total_requests,
+                                        "avg_latency_ms": req_report.avg_latency_ms,
+                                        "p95_latency_ms": req_report.p95_latency_ms,
+                                        "errors": req_report.error_count
+                                    })
+                                })
+                                .collect();
+                            payload.as_object_mut().unwrap().insert(
+                                "endpoints".to_string(),
+                                serde_json::Value::Array(endpoints),
+                            );
+                        }
 
                         // Send metrics to URL
                         let body = payload.to_string();
