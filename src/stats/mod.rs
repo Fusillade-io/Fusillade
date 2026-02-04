@@ -406,36 +406,45 @@ impl StatsAggregator {
                 name,
                 tags,
             } => {
-                self.total_requests += 1;
-                self.total_duration += timings.duration;
+                // Iteration metrics are internal bookkeeping (JS execution time),
+                // not actual HTTP requests. Track them in grouped stats only.
+                let is_iteration = name == "iteration"
+                    || name == "iteration_total"
+                    || name.ends_with("::iteration")
+                    || name.ends_with("::iteration_total");
 
-                if self.min_duration.is_none_or(|min| timings.duration < min) {
-                    self.min_duration = Some(timings.duration);
-                }
+                if !is_iteration {
+                    self.total_requests += 1;
+                    self.total_duration += timings.duration;
 
-                if timings.duration > self.max_duration {
-                    self.max_duration = timings.duration;
-                }
+                    if self.min_duration.is_none_or(|min| timings.duration < min) {
+                        self.min_duration = Some(timings.duration);
+                    }
 
-                // Record to global histogram
-                let micros = timings.duration.as_micros() as u64;
-                let _ = self.histogram.record(micros.max(1));
+                    if timings.duration > self.max_duration {
+                        self.max_duration = timings.duration;
+                    }
 
-                *self.status_codes.entry(status).or_insert(0) += 1;
+                    // Record to global histogram
+                    let micros = timings.duration.as_micros() as u64;
+                    let _ = self.histogram.record(micros.max(1));
 
-                if let Some(err) = error.clone() {
-                    *self.errors.entry(err).or_insert(0) += 1;
-                }
+                    *self.status_codes.entry(status).or_insert(0) += 1;
 
-                // Update global data counters
-                self.total_data_sent += timings.request_size as u64;
-                self.total_data_received += timings.response_size as u64;
+                    if let Some(err) = error.clone() {
+                        *self.errors.entry(err).or_insert(0) += 1;
+                    }
 
-                // Track connection pool reuse
-                if timings.pool_reused {
-                    self.pool_hits += 1;
-                } else {
-                    self.pool_misses += 1;
+                    // Update global data counters
+                    self.total_data_sent += timings.request_size as u64;
+                    self.total_data_received += timings.response_size as u64;
+
+                    // Track connection pool reuse
+                    if timings.pool_reused {
+                        self.pool_hits += 1;
+                    } else {
+                        self.pool_misses += 1;
+                    }
                 }
 
                 // Per-request stats (skip when no_endpoint_tracking to save memory)
@@ -469,6 +478,7 @@ impl StatsAggregator {
                     if timings.duration > req_stats.max_duration {
                         req_stats.max_duration = timings.duration;
                     }
+                    let micros = timings.duration.as_micros() as u64;
                     let _ = req_stats.histogram.record(micros.max(1));
                     if error.is_some() {
                         req_stats.error_count += 1;
@@ -1638,5 +1648,92 @@ mod tests {
             json.contains("\"pool_misses\": 0"),
             "JSON should contain pool_misses"
         );
+    }
+
+    #[test]
+    fn test_iteration_metrics_excluded_from_total() {
+        let mut agg = StatsAggregator::new();
+
+        // Add a real HTTP request
+        agg.add(Metric::Request {
+            name: "localhost:3000/api/users".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_micros(500),
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        // Add iteration metrics (should NOT count toward total_requests)
+        agg.add(Metric::Request {
+            name: "iteration".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(1),
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Request {
+            name: "iteration_total".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(2),
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        // Add scenario-prefixed iteration metrics
+        agg.add(Metric::Request {
+            name: "default::iteration".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(1),
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+        agg.add(Metric::Request {
+            name: "default::iteration_total".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(2),
+                ..Default::default()
+            },
+            status: 200,
+            error: None,
+            tags: HashMap::new(),
+        });
+
+        let report = agg.to_report();
+
+        // Only the real HTTP request should be counted
+        assert_eq!(
+            report.total_requests, 1,
+            "iteration metrics should not be counted in total_requests"
+        );
+
+        // Iteration metrics should still appear in grouped_requests
+        assert!(
+            report.grouped_requests.contains_key("iteration"),
+            "iteration should still be tracked in grouped_requests"
+        );
+        assert!(
+            report.grouped_requests.contains_key("iteration_total"),
+            "iteration_total should still be tracked in grouped_requests"
+        );
+
+        // Global histogram should only contain the real request
+        assert_eq!(
+            report.status_codes.len(),
+            1,
+            "only real request status codes should be tracked"
+        );
+        assert_eq!(report.status_codes[&200], 1);
     }
 }

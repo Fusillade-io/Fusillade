@@ -1,7 +1,6 @@
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -16,83 +15,62 @@ use tower::Service;
 
 use crate::stats::RequestTimings;
 
-// Atomic timing context that can be safely shared across async boundaries
-// Uses AtomicU64 to store nanoseconds for lock-free updates
-#[derive(Clone)]
-struct TimingContext {
-    request_start_nanos: Arc<AtomicU64>,
-    blocked_nanos: Arc<AtomicU64>,
-    connecting_nanos: Arc<AtomicU64>,
-    tls_nanos: Arc<AtomicU64>,
+// Task-local timing storage for per-request connection measurements.
+// Each tokio task gets its own timing slots, eliminating races between
+// concurrent requests sharing the same HttpClient.
+tokio::task_local! {
+    static TASK_CONNECTING_NANOS: Cell<u64>;
+    static TASK_TLS_NANOS: Cell<u64>;
 }
 
-#[allow(dead_code)]
-impl TimingContext {
-    fn new() -> Self {
-        Self {
-            request_start_nanos: Arc::new(AtomicU64::new(0)),
-            blocked_nanos: Arc::new(AtomicU64::new(0)),
-            connecting_nanos: Arc::new(AtomicU64::new(0)),
-            tls_nanos: Arc::new(AtomicU64::new(0)),
-        }
-    }
+/// Record TCP connect time into the current task's timing slot.
+/// No-op if called outside a task-local scope (pooled ureq path).
+fn record_connecting(d: Duration) {
+    let _ = TASK_CONNECTING_NANOS.try_with(|cell| {
+        cell.set(cell.get() + d.as_nanos() as u64);
+    });
+}
 
-    fn set_start(&self, instant: Instant) {
-        // Store as nanos since some epoch (we'll use elapsed from a base)
-        self.request_start_nanos
-            .store(instant.elapsed().as_nanos() as u64, Ordering::Release);
-    }
+/// Record TLS handshake time into the current task's timing slot.
+fn record_tls(d: Duration) {
+    let _ = TASK_TLS_NANOS.try_with(|cell| {
+        cell.set(cell.get() + d.as_nanos() as u64);
+    });
+}
 
-    fn add_blocked(&self, d: Duration) {
-        self.blocked_nanos
-            .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
-    }
+/// Read and consume the per-task connecting time.
+fn take_connecting() -> Duration {
+    TASK_CONNECTING_NANOS
+        .try_with(|cell| {
+            let nanos = cell.get();
+            cell.set(0);
+            Duration::from_nanos(nanos)
+        })
+        .unwrap_or(Duration::ZERO)
+}
 
-    fn add_connecting(&self, d: Duration) {
-        self.connecting_nanos
-            .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
-    }
-
-    fn add_tls(&self, d: Duration) {
-        self.tls_nanos
-            .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
-    }
-
-    fn get_blocked(&self) -> Duration {
-        Duration::from_nanos(self.blocked_nanos.load(Ordering::Acquire))
-    }
-
-    fn get_connecting(&self) -> Duration {
-        Duration::from_nanos(self.connecting_nanos.load(Ordering::Acquire))
-    }
-
-    fn get_tls(&self) -> Duration {
-        Duration::from_nanos(self.tls_nanos.load(Ordering::Acquire))
-    }
-
-    fn reset(&self) {
-        self.request_start_nanos.store(0, Ordering::Release);
-        self.blocked_nanos.store(0, Ordering::Release);
-        self.connecting_nanos.store(0, Ordering::Release);
-        self.tls_nanos.store(0, Ordering::Release);
-    }
+/// Read and consume the per-task TLS time.
+fn take_tls() -> Duration {
+    TASK_TLS_NANOS
+        .try_with(|cell| {
+            let nanos = cell.get();
+            cell.set(0);
+            Duration::from_nanos(nanos)
+        })
+        .unwrap_or(Duration::ZERO)
 }
 
 // 1. Wrapped HttpConnector to measure TCP/DNS time
 #[derive(Clone)]
 struct MeasuredHttpConnector {
     inner: HttpConnector,
-    timing_ctx: TimingContext,
 }
 
 impl MeasuredHttpConnector {
-    pub fn new(timing_ctx: TimingContext) -> Self {
+    pub fn new() -> Self {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
-        Self {
-            inner: http,
-            timing_ctx,
-        }
+        Self { inner: http }
     }
 }
 
@@ -107,26 +85,24 @@ impl Service<Uri> for MeasuredHttpConnector {
 
     fn call(&mut self, uri: Uri) -> Self::Future {
         let mut inner = self.inner.clone();
-        let timing_ctx = self.timing_ctx.clone();
         let start = Instant::now();
 
         Box::pin(async move {
             let res = inner.call(uri).await;
-            timing_ctx.add_connecting(start.elapsed());
+            record_connecting(start.elapsed());
             res
         })
     }
 }
 
-// 2. Connector Stack with timing context
+// 2. Connector Stack that measures TLS on top of TCP
 #[derive(Clone)]
 struct MeasuredHttpsConnector {
     inner: HttpsConnector<MeasuredHttpConnector>,
-    timing_ctx: TimingContext,
 }
 
 impl MeasuredHttpsConnector {
-    pub fn new(http: MeasuredHttpConnector, timing_ctx: TimingContext) -> Self {
+    pub fn new(http: MeasuredHttpConnector) -> Self {
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_native_roots()
             .unwrap()
@@ -135,10 +111,7 @@ impl MeasuredHttpsConnector {
             .enable_http2()
             .wrap_connector(http);
 
-        Self {
-            inner: https,
-            timing_ctx,
-        }
+        Self { inner: https }
     }
 }
 
@@ -153,12 +126,12 @@ impl Service<Uri> for MeasuredHttpsConnector {
 
     fn call(&mut self, uri: Uri) -> Self::Future {
         let mut inner = self.inner.clone();
-        let timing_ctx = self.timing_ctx.clone();
         let start = Instant::now();
 
         Box::pin(async move {
             let res = inner.call(uri).await;
-            timing_ctx.add_tls(start.elapsed());
+            // TLS time = total HTTPS connector time minus the inner TCP time already recorded
+            record_tls(start.elapsed());
             res
         })
     }
@@ -167,7 +140,6 @@ impl Service<Uri> for MeasuredHttpsConnector {
 #[derive(Clone)]
 pub struct HttpClient {
     client: Client<MeasuredHttpsConnector, Full<Bytes>>,
-    timing_ctx: TimingContext,
 }
 
 impl Default for HttpClient {
@@ -187,12 +159,35 @@ impl HttpClient {
         Self::with_pool_and_workers(pool_size, 1000) // Default to 1K worker config
     }
 
+    /// Create a new HttpClient with connection pooling disabled.
+    /// Every request establishes a new TCP connection and TLS handshake.
+    pub fn with_no_pool(total_workers: usize) -> Self {
+        let http = MeasuredHttpConnector::new();
+        let https = MeasuredHttpsConnector::new(http);
+
+        let (conn_window, stream_window) = if total_workers > 5000 {
+            (128 * 1024, 64 * 1024)
+        } else if total_workers > 2000 {
+            (256 * 1024, 128 * 1024)
+        } else {
+            (512 * 1024, 256 * 1024)
+        };
+
+        let client = Client::builder(TokioExecutor::new())
+            .pool_idle_timeout(Duration::ZERO)
+            .pool_max_idle_per_host(0)
+            .http2_initial_connection_window_size(conn_window)
+            .http2_initial_stream_window_size(stream_window)
+            .build(https);
+
+        Self { client }
+    }
+
     /// Create a new HttpClient with pool size and worker-scaled HTTP/2 windows
     /// At high worker counts (>5K), use smaller windows to reduce memory
     pub fn with_pool_and_workers(pool_size: usize, total_workers: usize) -> Self {
-        let timing_ctx = TimingContext::new();
-        let http = MeasuredHttpConnector::new(timing_ctx.clone());
-        let https = MeasuredHttpsConnector::new(http, timing_ctx.clone());
+        let http = MeasuredHttpConnector::new();
+        let https = MeasuredHttpsConnector::new(http);
 
         // Scale HTTP/2 windows based on worker count:
         // - Low workers (<2K): larger windows for better throughput
@@ -212,12 +207,15 @@ impl HttpClient {
             .http2_initial_stream_window_size(stream_window)
             .build(https);
 
-        Self { client, timing_ctx }
+        Self { client }
     }
 
     /// Make an HTTP request. If `response_sink` is true, the response body is read from the network
     /// (required for connection keep-alive) but immediately discarded to save memory.
     /// The returned Response will have an empty body when sink mode is enabled.
+    ///
+    /// Must be called inside a TASK_CONNECTING_NANOS / TASK_TLS_NANOS scope
+    /// (set up by `request_with_timings`) for accurate per-request connection timing.
     // Must be called inside a Tokio Runtime
     pub async fn request(
         &self,
@@ -248,8 +246,6 @@ impl HttpClient {
 
         let req_hyper = builder.body(Full::new(body_bytes))?;
 
-        // Reset timing context before each request so connector timings are per-request
-        self.timing_ctx.reset();
         let response = self.client.request(req_hyper).await?;
         let headers_received = Instant::now();
 
@@ -284,10 +280,13 @@ impl HttpClient {
         let time_to_headers = headers_received.duration_since(request_start);
 
         timings.blocked = Duration::ZERO;
-        // Read per-request connector timings (reset before request via reset() call above)
-        // For pooled connections these will be zero (correct: no new connection was made)
-        timings.connecting = self.timing_ctx.get_connecting();
-        timings.tls_handshaking = self.timing_ctx.get_tls();
+        // Read per-request connector timings from task-local storage.
+        // For pooled connections these will be zero (no connector was invoked).
+        timings.connecting = take_connecting();
+        timings.tls_handshaking = take_tls();
+        // TLS connector wraps HTTP connector, so tls time includes connecting time.
+        // Subtract to get pure TLS handshake time.
+        timings.tls_handshaking = timings.tls_handshaking.saturating_sub(timings.connecting);
         let connection_time = timings.connecting + timings.tls_handshaking;
         timings.sending = Duration::from_micros(100);
         timings.waiting = time_to_headers
@@ -295,8 +294,8 @@ impl HttpClient {
             .saturating_sub(timings.sending);
         timings.receiving = receive_end.duration_since(headers_received);
 
-        // Total request duration: send + wait + receive
-        timings.duration = timings.sending + timings.waiting + timings.receiving;
+        // Total request duration: connect + send + wait + receive
+        timings.duration = connection_time + timings.sending + timings.waiting + timings.receiving;
 
         // Calculate response size (headers + body)
         // Use resp_body_size which tracks actual bytes read (works for both normal and sink mode)
@@ -328,6 +327,23 @@ impl HttpClient {
 
         Ok((final_res, timings))
     }
+
+    /// Execute a request within a task-local timing scope.
+    /// This sets up per-request timing storage so the MeasuredConnectors
+    /// record connection times to this specific request, not a shared context.
+    pub async fn request_with_timings(
+        &self,
+        req: Request<String>,
+        response_sink: bool,
+    ) -> Result<(Response<Bytes>, RequestTimings), Box<dyn std::error::Error + Send + Sync>> {
+        TASK_CONNECTING_NANOS
+            .scope(Cell::new(0), async {
+                TASK_TLS_NANOS
+                    .scope(Cell::new(0), self.request(req, response_sink))
+                    .await
+            })
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -344,5 +360,11 @@ mod tests {
     fn test_http_client_custom_pool() {
         // Just verify builder logic runs
         let _client = HttpClient::with_pool_and_workers(50, 100);
+    }
+
+    #[test]
+    fn test_http_client_no_pool() {
+        // Verify no-pool construction doesn't panic
+        let _client = HttpClient::with_no_pool(100);
     }
 }

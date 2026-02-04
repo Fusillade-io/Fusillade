@@ -144,6 +144,7 @@ impl Engine {
                 None,
                 None,
                 false,
+                None,
             )?;
             let module_name = script_path.to_string_lossy().to_string();
             let module = Module::declare(ctx.clone(), module_name, script_content)?;
@@ -279,7 +280,7 @@ impl Engine {
                 };
                 let pre_shared = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
                 crate::bridge::register_globals_sync(
-                    &ctx, pre_tx, pre_client, pre_shared, 0, pre_agg, pre_tokio, None, None, false,
+                    &ctx, pre_tx, pre_client, pre_shared, 0, pre_agg, pre_tokio, None, None, false, None,
                 )
                 .ok();
 
@@ -457,6 +458,8 @@ impl Engine {
                     .build()
                     .expect("Failed to create shared Tokio runtime"),
             );
+            let no_pool = config.no_pool.unwrap_or(false);
+
             // Scale connection pool with workers: target ~1 idle connection per 5 workers
             let pool_size = (total_workers / 5).clamp(500, 2000);
             let shared_http_client = {
@@ -475,13 +478,26 @@ impl Engine {
                 .set_workers(may_workers)
                 .set_stack_size(may_stack_size);
 
-            // Create I/O bridge for may coroutines to access Tokio HTTP
-            let num_io_workers = tokio_threads.min(32); // I/O workers match Tokio threads
-            let _io_bridge = Arc::new(IoBridge::new(
-                shared_tokio_rt.clone(),
-                Arc::new(shared_http_client.clone()),
-                num_io_workers,
-            ));
+            // Create I/O bridge when no_pool is enabled to route requests through
+            // Hyper with measured connectors, getting per-request connection timing.
+            // Uses a pooled Hyper client (like k6/Gatling) — connections are reused,
+            // but connecting/TLS timing is captured when new connections are established.
+            // Pool is sized to match workers so each worker can have its own connection
+            // (matching k6's per-VU connection behavior).
+            let io_bridge: Option<Arc<IoBridge>> = if no_pool {
+                let num_io_workers = tokio_threads.min(32);
+                let hyper_client = {
+                    let _guard = shared_tokio_rt.enter();
+                    HttpClient::with_pool_and_workers(total_workers, total_workers)
+                };
+                Some(Arc::new(IoBridge::new(
+                    shared_tokio_rt.clone(),
+                    Arc::new(hyper_client),
+                    num_io_workers,
+                )))
+            } else {
+                None
+            };
 
             let start_time = Instant::now();
             let mut active_scenario_handles: Vec<JoinHandle<()>> = Vec::new(); // For multi-scenario
@@ -547,6 +563,7 @@ impl Engine {
                     let shared_http_client = shared_http_client.clone();
                     let control_state = control_state.clone();
                     let graceful_stop = config.stop.clone();
+                    let io_bridge = io_bridge.clone();
 
                     let h = std::thread::spawn(move || {
                         // Handle startTime delay
@@ -632,6 +649,7 @@ impl Engine {
                                     let client = shared_http_client.clone();
                                     let control_state = control_state.clone();
                                     let iterations_completed = iterations_completed.clone();
+                                    let io_bridge = io_bridge.clone();
 
                                     // SAFETY: Stack size is configured to be sufficient for JS execution
                                     let handle = unsafe {
@@ -643,7 +661,7 @@ impl Engine {
                                                 context.with(|ctx| {
                                                     crate::bridge::register_globals_sync(
                                                         &ctx, tx.clone(), client, shared_data, worker_id,
-                                                        agg, tokio_rt, jitter, drop_rate, response_sink
+                                                        agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge
                                                     ).unwrap();
                                                     ctx.globals().set("__SCENARIO", scenario_name.clone()).unwrap();
                                                     crate::bridge::set_current_scenario(scenario_name.clone());
@@ -915,7 +933,8 @@ impl Engine {
                                                     client: HttpClient,
                                                     control_state: Arc<control::ControlState>,
                                                     max_iterations: Option<u64>,
-                                                    min_iter_duration: Option<Duration>|
+                                                    min_iter_duration: Option<Duration>,
+                                                    io_bridge: Option<Arc<IoBridge>>|
                                  -> (
                                     may::coroutine::JoinHandle<()>,
                                     Arc<AtomicBool>,
@@ -942,6 +961,7 @@ impl Engine {
                                                         jitter,
                                                         drop_rate,
                                                         response_sink,
+                                                        io_bridge,
                                                     )
                                                     .unwrap();
                                                     ctx.globals()
@@ -1157,6 +1177,7 @@ impl Engine {
                                                 control_state.clone(),
                                                 max_iterations,
                                                 min_iter_duration,
+                                                io_bridge.clone(),
                                             );
                                             active_workers.push((handle, running));
                                             next_worker_id += 1;
@@ -1266,6 +1287,7 @@ impl Engine {
                                     let shared_iter_counter = shared_iteration_counter.clone();
                                     let total_shared_iter = total_shared_iterations;
                                     let is_shared_iter = is_shared_iterations;
+                                    let io_bridge = io_bridge.clone();
 
                                     // Spawn as may coroutine instead of OS thread
                                     // SAFETY: Stack size is configured to be sufficient for JS execution
@@ -1277,7 +1299,7 @@ impl Engine {
                                 runtime.set_memory_limit(256 * 1024); // 256KB per worker max JS heap
                                 context.with(|ctx| {
                                     // Use standard HTTP path with hyper/Tokio (better connection pooling)
-                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink).unwrap();
+                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge).unwrap();
                                     // Set scenario name global for automatic tagging
                                     ctx.globals().set("__SCENARIO", scenario_name.clone()).unwrap();
                                     crate::bridge::set_current_scenario(scenario_name.clone());
@@ -1647,6 +1669,7 @@ impl Engine {
                             let stack_sz = config.stack_size.unwrap_or(may_stack_size);
                             let tokio_rt = shared_tokio_rt.clone();
                             let client = shared_http_client.clone();
+                            let io_bridge = io_bridge.clone();
 
                             // Spawn as may coroutine instead of OS thread for higher concurrency
                             // SAFETY: Stack size is configured to be sufficient for JS execution
@@ -1659,7 +1682,7 @@ impl Engine {
                                 context.with(|ctx| {
                                     // Pass std::sync::mpsc::Sender directly - no bridge thread needed!
                                     // Clone tx since we need it for both bridge and iteration metrics
-                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink).unwrap();
+                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge).unwrap();
 
                                     // Module declaration with better error handling
                                     let module = match Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).catch(&ctx) {
@@ -2162,6 +2185,7 @@ impl Engine {
                 None,
                 None,
                 false,
+                None,
             )?;
             let module = Module::declare(
                 ctx.clone(),
@@ -2213,6 +2237,7 @@ impl Engine {
                 None,
                 None,
                 false,
+                None,
             )?;
             let _ = ctx.eval::<Value, _>(script_content)?;
             Ok::<(), anyhow::Error>(())
@@ -2263,6 +2288,7 @@ impl Engine {
                 None,
                 None,
                 false,
+                None,
             )?;
             let module = Module::declare(
                 ctx.clone(),
@@ -2335,6 +2361,7 @@ impl Engine {
                 None,
                 None,
                 false,
+                None,
             )?;
             let module = Module::declare(
                 ctx.clone(),

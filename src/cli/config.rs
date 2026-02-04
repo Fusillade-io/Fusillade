@@ -63,6 +63,11 @@ pub struct ScenarioConfig {
     /// where response content is not needed for assertions.
     #[serde(alias = "responseSink")]
     pub response_sink: Option<bool>,
+    /// Disable connection pooling. Every HTTP request establishes a new connection.
+    /// Enables accurate DNS, TCP connect, and TLS handshake timing per request.
+    /// Reduces throughput but provides realistic end-user latency measurements.
+    #[serde(alias = "noPool")]
+    pub no_pool: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
@@ -126,6 +131,11 @@ pub struct Config {
     /// Default User-Agent header for all HTTP requests
     #[serde(alias = "userAgent")]
     pub user_agent: Option<String>,
+    /// Disable connection pooling. Every HTTP request establishes a new connection.
+    /// Enables accurate DNS, TCP connect, and TLS handshake timing per request.
+    /// Reduces throughput but provides realistic end-user latency measurements.
+    #[serde(alias = "noPool")]
+    pub no_pool: Option<bool>,
 }
 
 impl Config {}
@@ -646,5 +656,45 @@ user_agent: "Fusillade/1.0.2"
         assert_eq!(config.insecure, Some(true));
         assert_eq!(config.max_redirects, Some(3));
         assert_eq!(config.user_agent, Some("Fusillade/1.0.2".to_string()));
+    }
+
+    #[test]
+    fn test_config_no_pool() {
+        let yaml = r#"
+workers: 10
+duration: "30s"
+no_pool: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.no_pool, Some(true));
+    }
+
+    #[test]
+    fn test_config_no_pool_camel_case() {
+        let json = r#"{
+            "workers": 5,
+            "duration": "10s",
+            "noPool": true
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.no_pool, Some(true));
+    }
+
+    #[test]
+    fn test_scenario_config_no_pool() {
+        let yaml = r#"
+scenarios:
+  realistic:
+    workers: 50
+    duration: "1m"
+    no_pool: true
+  fast:
+    workers: 100
+    duration: "1m"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let scenarios = config.scenarios.unwrap();
+        assert_eq!(scenarios["realistic"].no_pool, Some(true));
+        assert_eq!(scenarios["fast"].no_pool, None);
     }
 }

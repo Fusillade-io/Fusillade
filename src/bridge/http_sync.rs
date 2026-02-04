@@ -1,13 +1,19 @@
 //! Synchronous HTTP bridge using ureq - bypasses Tokio for lower latency
 //! This module provides a drop-in replacement for http.rs that uses blocking I/O
 //! directly compatible with May green threads.
+//!
+//! When an IoBridge is provided (no_pool mode), requests are routed through
+//! Hyper with connection pooling disabled, providing per-request DNS+TCP and TLS timing.
 
+use crate::engine::io_bridge::IoBridge;
 use crate::stats::{Metric, RequestTimings};
 use cookie::{Cookie, SameSite};
 use crossbeam_channel::Sender;
+use hyper::body::Bytes;
 use rquickjs::{Ctx, Function, IntoJs, Object, Result, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Map HTTP status code to status text
@@ -231,14 +237,85 @@ thread_local! {
         .build();
 }
 
+/// Build an http::Request from JS parameters for IoBridge routing
+fn build_http_request(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    headers: &HashMap<String, String>,
+) -> std::result::Result<http::Request<String>, String> {
+    let mut builder = http::Request::builder().method(method).uri(url);
+
+    for (k, v) in headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+
+    let body_str = body.unwrap_or("").to_string();
+    builder.body(body_str).map_err(|e| e.to_string())
+}
+
+/// Convert Hyper Response + RequestTimings to SyncHttpResponse
+fn hyper_response_to_sync(
+    response: http::Response<Bytes>,
+    timings: RequestTimings,
+) -> SyncHttpResponse {
+    let status = response.status().as_u16();
+    let mut headers = HashMap::new();
+    let mut set_cookie_headers = Vec::new();
+
+    for (name, value) in response.headers() {
+        let name_str = name.as_str().to_string();
+        let value_str = value.to_str().unwrap_or("").to_string();
+        if name_str.to_lowercase() == "set-cookie" {
+            set_cookie_headers.push(value_str.clone());
+        }
+        headers.insert(name_str, value_str);
+    }
+
+    let body = response.into_body().to_vec();
+
+    SyncHttpResponse {
+        status,
+        status_text: status_text_for_code(status),
+        body,
+        headers,
+        timings,
+        proto: "h2".to_string(),
+        set_cookie_headers,
+        error: None,
+        error_code: None,
+    }
+}
+
+/// Execute an HTTP request through IoBridge (no-pool mode with connection timing)
+fn execute_via_bridge(
+    bridge: &IoBridge,
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    headers: &HashMap<String, String>,
+    response_sink: bool,
+) -> std::result::Result<SyncHttpResponse, String> {
+    let req = build_http_request(method, url, body, headers)?;
+    let (response, timings) = bridge.request(req, Some(Duration::from_secs(60)), response_sink)?;
+    Ok(hyper_response_to_sync(response, timings))
+}
+
 /// Register synchronous HTTP functions using ureq (no Tokio overhead)
-pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) -> Result<()> {
+/// When io_bridge is Some, routes through Hyper with pool disabled for connection timing.
+pub fn register_sync_http(
+    ctx: &Ctx,
+    tx: Sender<Metric>,
+    response_sink: bool,
+    io_bridge: Option<Arc<IoBridge>>,
+) -> Result<()> {
     let http = Object::new(ctx.clone())?;
     let global_response_sink = response_sink;
 
     // GET - most common, highly optimized
     let tx_get = tx.clone();
     let sink_get = global_response_sink;
+    let bridge_get = io_bridge.clone();
     http.set(
         "get",
         Function::new(
@@ -264,6 +341,74 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .unwrap_or_default();
 
                 let tx = tx_get.clone();
+
+                // IoBridge path: route through Hyper with no pool for connection timing
+                if let Some(ref bridge) = bridge_get {
+                    let start = Instant::now();
+                    match execute_via_bridge(
+                        bridge,
+                        "GET",
+                        &url_str,
+                        None,
+                        &custom_headers,
+                        sink_get,
+                    ) {
+                        Ok(mut resp) => {
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            resp.timings.duration = start.elapsed();
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings: resp.timings,
+                                status: resp.status,
+                                error: None,
+                                tags,
+                            });
+                            return Ok(resp);
+                        }
+                        Err(e) => {
+                            let duration = start.elapsed();
+                            let timings = RequestTimings {
+                                duration,
+                                ..Default::default()
+                            };
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let (error_type, error_code) = categorize_error(&e);
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.clone()),
+                                tags,
+                            });
+                            return Ok(SyncHttpResponse {
+                                status: 0,
+                                status_text: status_text_for_code(0),
+                                body: e.into_bytes(),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
+                            });
+                        }
+                    }
+                }
+
                 let start = Instant::now();
 
                 let result = AGENT.with(|agent| {
@@ -385,6 +530,7 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
 
     let tx_post = tx.clone();
     let sink_post = global_response_sink;
+    let bridge_post = io_bridge.clone();
     http.set(
         "post",
         Function::new(
@@ -412,6 +558,76 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .unwrap_or_else(|| "application/json".to_string());
 
                 let tx = tx_post.clone();
+
+                // IoBridge path
+                if let Some(ref bridge) = bridge_post {
+                    let mut hdrs = HashMap::new();
+                    hdrs.insert("Content-Type".to_string(), content_type.clone());
+                    let start = Instant::now();
+                    match execute_via_bridge(
+                        bridge,
+                        "POST",
+                        &url_str,
+                        Some(&body),
+                        &hdrs,
+                        sink_post,
+                    ) {
+                        Ok(mut resp) => {
+                            resp.timings.duration = start.elapsed();
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings: resp.timings,
+                                status: resp.status,
+                                error: None,
+                                tags,
+                            });
+                            return Ok(resp);
+                        }
+                        Err(e) => {
+                            let duration = start.elapsed();
+                            let timings = RequestTimings {
+                                duration,
+                                ..Default::default()
+                            };
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let (error_type, error_code) = categorize_error(&e);
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.clone()),
+                                tags,
+                            });
+                            return Ok(SyncHttpResponse {
+                                status: 0,
+                                status_text: status_text_for_code(0),
+                                body: e.into_bytes(),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
+                            });
+                        }
+                    }
+                }
+
                 let start = Instant::now();
 
                 let result = AGENT.with(|agent| {
@@ -528,6 +744,7 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
 
     let tx_put = tx.clone();
     let sink_put = global_response_sink;
+    let bridge_put = io_bridge.clone();
     http.set(
         "put",
         Function::new(
@@ -548,6 +765,72 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .unwrap_or_default();
 
                 let tx = tx_put.clone();
+                // IoBridge path
+                if let Some(ref bridge) = bridge_put {
+                    let start = Instant::now();
+                    match execute_via_bridge(
+                        bridge,
+                        "PUT",
+                        &url_str,
+                        Some(&body),
+                        &HashMap::new(),
+                        sink_put,
+                    ) {
+                        Ok(mut resp) => {
+                            resp.timings.duration = start.elapsed();
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings: resp.timings,
+                                status: resp.status,
+                                error: None,
+                                tags,
+                            });
+                            return Ok(resp);
+                        }
+                        Err(e) => {
+                            let duration = start.elapsed();
+                            let timings = RequestTimings {
+                                duration,
+                                ..Default::default()
+                            };
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let (error_type, error_code) = categorize_error(&e);
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.clone()),
+                                tags,
+                            });
+                            return Ok(SyncHttpResponse {
+                                status: 0,
+                                status_text: status_text_for_code(0),
+                                body: e.into_bytes(),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
+                            });
+                        }
+                    }
+                }
                 let start = Instant::now();
 
                 let result = AGENT.with(|agent| {
@@ -649,6 +932,7 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
 
     let tx_del = tx.clone();
     let sink_del = global_response_sink;
+    let bridge_del = io_bridge.clone();
     http.set(
         "del",
         Function::new(
@@ -674,6 +958,72 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .unwrap_or_default();
 
                 let tx = tx_del.clone();
+                // IoBridge path
+                if let Some(ref bridge) = bridge_del {
+                    let start = Instant::now();
+                    match execute_via_bridge(
+                        bridge,
+                        "DELETE",
+                        &url_str,
+                        None,
+                        &custom_headers,
+                        sink_del,
+                    ) {
+                        Ok(mut resp) => {
+                            resp.timings.duration = start.elapsed();
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings: resp.timings,
+                                status: resp.status,
+                                error: None,
+                                tags,
+                            });
+                            return Ok(resp);
+                        }
+                        Err(e) => {
+                            let duration = start.elapsed();
+                            let timings = RequestTimings {
+                                duration,
+                                ..Default::default()
+                            };
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let (error_type, error_code) = categorize_error(&e);
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.clone()),
+                                tags,
+                            });
+                            return Ok(SyncHttpResponse {
+                                status: 0,
+                                status_text: status_text_for_code(0),
+                                body: e.into_bytes(),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
+                            });
+                        }
+                    }
+                }
                 let start = Instant::now();
 
                 let result = AGENT.with(|agent| {
@@ -777,6 +1127,7 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
     // PATCH - like POST, takes url + body + rest args
     let tx_patch = tx.clone();
     let sink_patch = global_response_sink;
+    let bridge_patch = io_bridge.clone();
     http.set(
         "patch",
         Function::new(
@@ -804,6 +1155,74 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .unwrap_or_else(|| "application/json".to_string());
 
                 let tx = tx_patch.clone();
+                // IoBridge path
+                if let Some(ref bridge) = bridge_patch {
+                    let mut hdrs = HashMap::new();
+                    hdrs.insert("Content-Type".to_string(), content_type.clone());
+                    let start = Instant::now();
+                    match execute_via_bridge(
+                        bridge,
+                        "PATCH",
+                        &url_str,
+                        Some(&body),
+                        &hdrs,
+                        sink_patch,
+                    ) {
+                        Ok(mut resp) => {
+                            resp.timings.duration = start.elapsed();
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings: resp.timings,
+                                status: resp.status,
+                                error: None,
+                                tags,
+                            });
+                            return Ok(resp);
+                        }
+                        Err(e) => {
+                            let duration = start.elapsed();
+                            let timings = RequestTimings {
+                                duration,
+                                ..Default::default()
+                            };
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let (error_type, error_code) = categorize_error(&e);
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.clone()),
+                                tags,
+                            });
+                            return Ok(SyncHttpResponse {
+                                status: 0,
+                                status_text: status_text_for_code(0),
+                                body: e.into_bytes(),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
+                            });
+                        }
+                    }
+                }
                 let start = Instant::now();
 
                 let result = AGENT.with(|agent| {
@@ -920,6 +1339,8 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
 
     // HEAD - like GET but uses .head() and doesn't read body
     let tx_head = tx.clone();
+    let sink_head = global_response_sink;
+    let bridge_head = io_bridge.clone();
     http.set(
         "head",
         Function::new(
@@ -945,6 +1366,72 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .unwrap_or_default();
 
                 let tx = tx_head.clone();
+                // IoBridge path
+                if let Some(ref bridge) = bridge_head {
+                    let start = Instant::now();
+                    match execute_via_bridge(
+                        bridge,
+                        "HEAD",
+                        &url_str,
+                        None,
+                        &custom_headers,
+                        sink_head,
+                    ) {
+                        Ok(mut resp) => {
+                            resp.timings.duration = start.elapsed();
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings: resp.timings,
+                                status: resp.status,
+                                error: None,
+                                tags,
+                            });
+                            return Ok(resp);
+                        }
+                        Err(e) => {
+                            let duration = start.elapsed();
+                            let timings = RequestTimings {
+                                duration,
+                                ..Default::default()
+                            };
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let (error_type, error_code) = categorize_error(&e);
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.clone()),
+                                tags,
+                            });
+                            return Ok(SyncHttpResponse {
+                                status: 0,
+                                status_text: status_text_for_code(0),
+                                body: e.into_bytes(),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
+                            });
+                        }
+                    }
+                }
                 let start = Instant::now();
 
                 let result = AGENT.with(|agent| {
@@ -1042,6 +1529,7 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
     // OPTIONS - like GET but uses agent.request("OPTIONS", ...)
     let tx_options = tx.clone();
     let sink_options = global_response_sink;
+    let bridge_options = io_bridge.clone();
     http.set(
         "options",
         Function::new(
@@ -1067,6 +1555,72 @@ pub fn register_sync_http(ctx: &Ctx, tx: Sender<Metric>, response_sink: bool) ->
                     .unwrap_or_default();
 
                 let tx = tx_options.clone();
+                // IoBridge path
+                if let Some(ref bridge) = bridge_options {
+                    let start = Instant::now();
+                    match execute_via_bridge(
+                        bridge,
+                        "OPTIONS",
+                        &url_str,
+                        None,
+                        &custom_headers,
+                        sink_options,
+                    ) {
+                        Ok(mut resp) => {
+                            resp.timings.duration = start.elapsed();
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings: resp.timings,
+                                status: resp.status,
+                                error: None,
+                                tags,
+                            });
+                            return Ok(resp);
+                        }
+                        Err(e) => {
+                            let duration = start.elapsed();
+                            let timings = RequestTimings {
+                                duration,
+                                ..Default::default()
+                            };
+                            let metric_name: Cow<str> = match &name_tag {
+                                Some(n) => Cow::Borrowed(n.as_str()),
+                                None => Cow::Borrowed(&url_str),
+                            };
+                            let (error_type, error_code) = categorize_error(&e);
+                            let _ = tx.send(Metric::Request {
+                                name: format!(
+                                    "{}{}",
+                                    crate::bridge::group::get_current_group_prefix(),
+                                    metric_name
+                                ),
+                                timings,
+                                status: 0,
+                                error: Some(e.clone()),
+                                tags,
+                            });
+                            return Ok(SyncHttpResponse {
+                                status: 0,
+                                status_text: status_text_for_code(0),
+                                body: e.into_bytes(),
+                                headers: HashMap::new(),
+                                timings,
+                                proto: "h1".to_string(),
+                                set_cookie_headers: Vec::new(),
+                                error: Some(error_type),
+                                error_code: Some(error_code),
+                            });
+                        }
+                    }
+                }
                 let start = Instant::now();
 
                 let result = AGENT.with(|agent| {

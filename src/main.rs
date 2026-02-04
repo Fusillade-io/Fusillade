@@ -220,6 +220,9 @@ enum Commands {
         /// Default User-Agent header for HTTP requests
         #[arg(long)]
         user_agent: Option<String>,
+        /// Disable connection pooling (new connection per request, enables connection timing)
+        #[arg(long)]
+        no_pool: bool,
     },
     /// Initialize a new test script with starter template
     Init {
@@ -359,6 +362,7 @@ fn main() -> Result<()> {
             insecure,
             max_redirects,
             user_agent,
+            no_pool,
         } => {
             // Set log level for console.* API
             let log_level_enum = match log_level.to_lowercase().as_str() {
@@ -569,6 +573,9 @@ fn main() -> Result<()> {
                 if file_config.memory_safe.is_some() {
                     final_config.memory_safe = file_config.memory_safe;
                 }
+                if file_config.no_pool.is_some() {
+                    final_config.no_pool = file_config.no_pool;
+                }
             }
 
             // CLI flags override everything (highest priority)
@@ -604,6 +611,9 @@ fn main() -> Result<()> {
             }
             if insecure {
                 final_config.insecure = Some(true);
+            }
+            if no_pool {
+                final_config.no_pool = Some(true);
             }
             final_config.max_redirects = Some(max_redirects);
             if let Some(ref ua) = user_agent {

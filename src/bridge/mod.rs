@@ -46,6 +46,7 @@ pub fn js_type_error(message: &'static str) -> rquickjs::Error {
 }
 
 use crate::engine::http_client::HttpClient;
+use crate::engine::io_bridge::IoBridge;
 use crate::stats::{Metric, SharedAggregator};
 use crossbeam_channel::Sender;
 use rand::Rng;
@@ -448,6 +449,7 @@ pub fn register_globals_sync<'js>(
     jitter: Option<String>,
     drop: Option<f64>,
     response_sink: bool,
+    io_bridge: Option<Arc<IoBridge>>,
 ) -> Result<()> {
     let globals = ctx.globals();
     let tx_print = tx.clone();
@@ -490,15 +492,21 @@ pub fn register_globals_sync<'js>(
     globals.set("__VU_STATE", worker_state)?;
 
     // Register internal modules
-    http::register_sync(
-        ctx,
-        tx.clone(),
-        client,
-        runtime,
-        jitter,
-        drop,
-        response_sink,
-    )?;
+    // When io_bridge is present (no_pool mode), use http_sync with IoBridge routing
+    // for per-request connection timing. Otherwise use standard Tokio HTTP path.
+    if let Some(bridge) = io_bridge {
+        http_sync::register_sync_http(ctx, tx.clone(), response_sink, Some(bridge))?;
+    } else {
+        http::register_sync(
+            ctx,
+            tx.clone(),
+            client,
+            runtime,
+            jitter,
+            drop,
+            response_sink,
+        )?;
+    }
     check::register_sync(ctx, tx.clone())?;
     group::register_sync(ctx)?;
     file::register_sync(ctx)?;
@@ -531,6 +539,7 @@ pub fn register_globals_sync_fast<'js>(
     worker_id: usize,
     aggregator: SharedAggregator,
     response_sink: bool,
+    io_bridge: Option<Arc<IoBridge>>,
 ) -> Result<()> {
     let globals = ctx.globals();
     let tx_print = tx.clone();
@@ -575,7 +584,8 @@ pub fn register_globals_sync_fast<'js>(
     globals.set("__VU_STATE", worker_state)?;
 
     // Use sync HTTP (ureq) - no Tokio overhead
-    http_sync::register_sync_http(ctx, tx.clone(), response_sink)?;
+    // When io_bridge is present, routes through Hyper with pool disabled for connection timing
+    http_sync::register_sync_http(ctx, tx.clone(), response_sink, io_bridge)?;
     check::register_sync(ctx, tx.clone())?;
     group::register_sync(ctx)?;
     file::register_sync(ctx)?;

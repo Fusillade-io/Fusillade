@@ -1,134 +1,82 @@
 //! I/O Bridge for Green Threads
 //!
 //! This module provides a bridge between may coroutines and Tokio async I/O.
-//! Coroutines send HTTP requests via channel and yield until response arrives.
+//! May coroutines spawn tokio tasks directly via a runtime handle and yield
+//! until the response arrives via a may channel.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use http::{Request, Response};
 use hyper::body::Bytes;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 
 use crate::engine::http_client::HttpClient;
 use crate::stats::RequestTimings;
-
-/// Request payload sent from coroutine to Tokio I/O pool
-pub struct IoRequest {
-    pub request: Request<String>,
-    pub timeout: Option<Duration>,
-    pub response_tx: may::sync::mpsc::Sender<IoResponse>,
-}
 
 /// Response payload sent back to coroutine
 pub struct IoResponse {
     pub result: Result<(Response<Bytes>, RequestTimings), String>,
 }
 
-/// I/O Bridge that forwards requests from may coroutines to Tokio
+/// I/O Bridge that spawns tokio tasks directly from may coroutines.
+/// No intermediate channel or worker threads — minimal latency overhead.
 pub struct IoBridge {
-    request_tx: Sender<IoRequest>,
-    _worker_handles: Vec<std::thread::JoinHandle<()>>,
+    tokio_handle: Handle,
+    http_client: Arc<HttpClient>,
 }
 
 impl IoBridge {
-    /// Create a new I/O bridge with specified number of Tokio worker threads
+    /// Create a new I/O bridge. The `_num_io_workers` parameter is kept for
+    /// API compatibility but is no longer used — tasks are spawned directly
+    /// on the shared tokio runtime.
     pub fn new(
-        tokio_rt: Arc<Runtime>,
+        tokio_rt: Arc<tokio::runtime::Runtime>,
         http_client: Arc<HttpClient>,
-        num_io_workers: usize,
+        _num_io_workers: usize,
     ) -> Self {
-        // Bounded channel to prevent unbounded memory growth
-        // Size: 10k to handle burst of requests from coroutines
-        let (request_tx, request_rx): (Sender<IoRequest>, Receiver<IoRequest>) = bounded(10_000);
-
-        let mut worker_handles = Vec::with_capacity(num_io_workers);
-
-        // Spawn multiple I/O worker threads that process requests on Tokio
-        for worker_id in 0..num_io_workers {
-            let rx = request_rx.clone();
-            let rt = tokio_rt.clone();
-            let client = http_client.clone();
-
-            let handle = std::thread::Builder::new()
-                .name(format!("io-bridge-{}", worker_id))
-                .spawn(move || {
-                    // Each worker runs in its own thread, using the shared Tokio runtime
-                    rt.block_on(async move {
-                        while let Ok(io_req) = rx.recv() {
-                            let IoRequest {
-                                request,
-                                timeout,
-                                response_tx,
-                            } = io_req;
-
-                            // Execute HTTP request
-                            // I/O bridge doesn't currently support response_sink, use false
-                            let result = if let Some(timeout_dur) = timeout {
-                                match tokio::time::timeout(
-                                    timeout_dur,
-                                    client.request(request, false),
-                                )
-                                .await
-                                {
-                                    Ok(res) => res.map_err(|e| e.to_string()),
-                                    Err(_) => Err("Request timeout".to_string()),
-                                }
-                            } else {
-                                client
-                                    .request(request, false)
-                                    .await
-                                    .map_err(|e| e.to_string())
-                            };
-
-                            // Send response back to coroutine (non-blocking for Tokio side)
-                            let _ = response_tx.send(IoResponse { result });
-                        }
-                    });
-                })
-                .expect("Failed to spawn I/O bridge worker");
-
-            worker_handles.push(handle);
-        }
-
         Self {
-            request_tx,
-            _worker_handles: worker_handles,
+            tokio_handle: tokio_rt.handle().clone(),
+            http_client,
         }
     }
 
     /// Send an HTTP request from a may coroutine.
-    /// This yields the coroutine until the response is ready.
+    /// Spawns a tokio task and yields the coroutine until the response is ready.
     pub fn request(
         &self,
         request: Request<String>,
         timeout: Option<Duration>,
+        response_sink: bool,
     ) -> Result<(Response<Bytes>, RequestTimings), String> {
-        // Create a channel for this specific request
+        // Create a may channel for this specific request — recv() yields the coroutine
         let (response_tx, response_rx) = may::sync::mpsc::channel();
 
-        let io_req = IoRequest {
-            request,
-            timeout,
-            response_tx,
-        };
+        let client = self.http_client.clone();
 
-        // Send request to I/O pool
-        match self.request_tx.try_send(io_req) {
-            Ok(_) => {}
-            Err(TrySendError::Full(req)) => {
-                // Channel full - apply backpressure by blocking send
-                if self.request_tx.send(req).is_err() {
-                    return Err("I/O bridge channel closed".to_string());
+        // Spawn directly on the tokio runtime — no channel, no worker thread
+        self.tokio_handle.spawn(async move {
+            let result = if let Some(timeout_dur) = timeout {
+                match tokio::time::timeout(
+                    timeout_dur,
+                    client.request_with_timings(request, response_sink),
+                )
+                .await
+                {
+                    Ok(res) => res.map_err(|e| e.to_string()),
+                    Err(_) => Err("Request timeout".to_string()),
                 }
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                return Err("I/O bridge channel disconnected".to_string());
-            }
-        }
+            } else {
+                client
+                    .request_with_timings(request, response_sink)
+                    .await
+                    .map_err(|e| e.to_string())
+            };
 
-        // Wait for response - this yields the may coroutine
+            let _ = response_tx.send(IoResponse { result });
+        });
+
+        // Yield the may coroutine until the tokio task completes
         match response_rx.recv() {
             Ok(response) => response.result,
             Err(_) => Err("Response channel closed".to_string()),
@@ -140,18 +88,12 @@ impl IoBridge {
         &self,
         request: Request<String>,
         timeout: Option<Duration>,
+        response_sink: bool,
     ) -> (Result<(Response<Bytes>, RequestTimings), String>, Duration) {
         let start = Instant::now();
-        let result = self.request(request, timeout);
+        let result = self.request(request, timeout, response_sink);
         let elapsed = start.elapsed();
         (result, elapsed)
-    }
-}
-
-impl Drop for IoBridge {
-    fn drop(&mut self) {
-        // Dropping request_tx will cause workers to exit when channel is empty
-        // Worker threads will join when IoBridge is fully dropped
     }
 }
 

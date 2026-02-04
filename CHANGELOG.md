@@ -5,6 +5,20 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-02-04
+
+### Added
+- `--no-pool` CLI flag and `noPool` / `no_pool` config option to route HTTP requests through the Hyper async client with measured connectors
+- Per-request connection timing: `connecting` and `tls_handshaking` fields are now populated when `--no-pool` is enabled
+- `HttpClient::with_no_pool()` constructor for disabling connection pooling entirely
+- Task-local timing storage for accurate per-request connection measurements under concurrent load
+- `request_with_timings()` method on `HttpClient` that scopes timing to the current tokio task
+
+### Changed
+- `IoBridge` rewritten to spawn tokio tasks directly from may coroutines instead of using intermediate channel + worker threads, reducing bridge latency
+- `MeasuredHttpConnector` and `MeasuredHttpsConnector` now use task-local storage instead of a shared `TimingContext`, eliminating timing races between concurrent requests
+- Connection timing fields (`connecting`, `tls_handshaking`) now correctly report zero for pooled/reused connections and actual connect time for new connections
+
 ## [1.3.2] - 2026-02-01
 
 ### Changed
