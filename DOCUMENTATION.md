@@ -6,7 +6,7 @@
 
 ## 1. Core Philosophy & Architecture
 
-* **Performance (The Host):** The engine handles networking, threading, and resource management using Rust's sync ecosystem (`std::thread`) and `reqwest::blocking` heavily tuned for HTTP/2 multiplexing.
+* **Performance (The Host):** The engine handles networking, threading, and resource management using Rust with green-thread coroutines (`may`). HTTP uses raw TCP with keep-alive connections for maximum throughput (135K+ RPS).
 * **Scripting (The Guest):** Users define test logic in standard JavaScript (ES Modules). The JS context is strictly for logic; it does not handle I/O directly.
 * **Precision:** Metrics capture raw network + body download time, explicitly excluding JS execution overhead and internal processing.
 * **Stability:** Explicit lifecycle management (`std::mem::forget`) prevents panics during runtime shutdown, ensuring clean exit codes.

@@ -52,8 +52,9 @@ export default function () {
 
 ## Performance
 
-- **100,000+ RPS** on a single machine
-- **Sub-millisecond latency** (0.1-0.2ms average)
+- **135,000+ RPS** on a single machine
+- **Sub-millisecond latency** (0.07ms P50, 0.25ms P95)
+- **3-5x lower tail latency** than k6 at all percentiles
 - **Low memory footprint** with Rust's zero-cost abstractions
 
 ## Features

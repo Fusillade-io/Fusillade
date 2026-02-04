@@ -5,6 +5,28 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-02-04
+
+### Added
+- Raw TCP fast path for HTTP GET requests — bypasses ureq overhead with per-coroutine keep-alive connections, delivering up to 19% higher throughput
+- JS response prototype — `json()`, `bodyContains()`, `bodyMatches()`, `hasHeader()`, `isJson()` methods defined once per worker instead of per-response
+- Missing HTTP methods in sync path: `http.del()`, `http.request()`, `http.batch()`
+- FormData support, request/response hooks, and `http.graphql()` in sync HTTP path
+
+### Fixed
+- **Critical:** `sleep()` and `sleepRandom()` blocked OS threads instead of yielding green-thread coroutines — throughput with sleep was capped at OS thread count (16) instead of worker count
+- **Critical:** Default HTTP path used `runtime.block_on()` which blocked OS threads, limiting concurrent requests to 16 regardless of worker count — switched to ureq (cooperative with may green threads)
+
+### Changed
+- Default HTTP client switched from Hyper/Tokio (`block_on`) to ureq + raw TCP for maximum throughput with may coroutines
+- `--no-pool` mode continues to use Hyper/IoBridge path for per-request connection timing
+
+### Performance
+- S1 (50 VUs, simple GET): 71K → 112K RPS (1.6x improvement), matching k6 within 2%
+- S1 (10K workers): 116K → 136K RPS
+- S2/S3 (with sleep): 3-9x improvement from sleep fix
+- Latency 3-5x lower than k6 at all percentiles (P50: 0.07ms, P95: 0.25ms)
+
 ## [1.3.3] - 2026-02-04
 
 ### Added

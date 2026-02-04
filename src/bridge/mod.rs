@@ -7,6 +7,7 @@ mod encoding;
 mod file;
 mod group;
 mod grpc;
+#[allow(dead_code)]
 mod http;
 mod http_sync;
 pub mod metrics;
@@ -441,13 +442,13 @@ pub fn register_env(ctx: &Ctx) -> Result<()> {
 pub fn register_globals_sync<'js>(
     ctx: &Ctx<'js>,
     tx: Sender<Metric>,
-    client: HttpClient,
+    _client: HttpClient,
     shared_data: data::SharedData,
     worker_id: usize,
     aggregator: SharedAggregator,
-    runtime: Arc<Runtime>,
-    jitter: Option<String>,
-    drop: Option<f64>,
+    _runtime: Arc<Runtime>,
+    _jitter: Option<String>,
+    _drop: Option<f64>,
     response_sink: bool,
     io_bridge: Option<Arc<IoBridge>>,
 ) -> Result<()> {
@@ -465,7 +466,7 @@ pub fn register_globals_sync<'js>(
         Function::new(ctx.clone(), move |secs: f64| {
             let dur = Duration::from_secs_f64(secs);
             track_sleep(dur);
-            std::thread::sleep(dur);
+            may::coroutine::sleep(dur);
         }),
     )?;
 
@@ -479,7 +480,7 @@ pub fn register_globals_sync<'js>(
             };
             let dur = Duration::from_secs_f64(duration);
             track_sleep(dur);
-            std::thread::sleep(dur);
+            may::coroutine::sleep(dur);
         }),
     )?;
 
@@ -493,20 +494,10 @@ pub fn register_globals_sync<'js>(
 
     // Register internal modules
     // When io_bridge is present (no_pool mode), use http_sync with IoBridge routing
-    // for per-request connection timing. Otherwise use standard Tokio HTTP path.
-    if let Some(bridge) = io_bridge {
-        http_sync::register_sync_http(ctx, tx.clone(), response_sink, Some(bridge))?;
-    } else {
-        http::register_sync(
-            ctx,
-            tx.clone(),
-            client,
-            runtime,
-            jitter,
-            drop,
-            response_sink,
-        )?;
-    }
+    // for per-request connection timing. Otherwise use ureq (cooperative with may
+    // green threads) for maximum throughput - ureq uses std::net which may hooks
+    // to yield coroutines on I/O, avoiding the OS-thread-blocking runtime.block_on().
+    http_sync::register_sync_http(ctx, tx.clone(), response_sink, io_bridge)?;
     check::register_sync(ctx, tx.clone())?;
     group::register_sync(ctx)?;
     file::register_sync(ctx)?;
