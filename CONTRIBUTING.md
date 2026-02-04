@@ -46,4 +46,4 @@ Fusillade is written in Rust. You will need a working Rust environment.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under its GNU General Public License v3.0.
+By contributing, you agree that your contributions will be licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).

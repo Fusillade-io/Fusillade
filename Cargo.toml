@@ -2,6 +2,7 @@
 name = "fusillade"
 version = "1.4.0"
 edition = "2021"
+license = "AGPL-3.0-only"
 default-run = "fusillade"
 
 [dependencies]

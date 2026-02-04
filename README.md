@@ -109,4 +109,6 @@ fusillade convert --input recording.har --output flow.js
 
 ## License
 
-GNU General Public License v3.0
+GNU Affero General Public License v3.0 (AGPL-3.0)
+
+Commercial licensing available for proprietary/embedded use. Contact fusi@fusillade.io.

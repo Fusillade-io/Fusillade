@@ -13,7 +13,7 @@
         "url": "git+https://github.com/Fusillade-io/Fusillade.git"
     },
     "author": "Fusillade Maintainer",
-    "license": "GPL-3.0",
+    "license": "AGPL-3.0-only",
     "os": [
         "darwin",
         "linux",
