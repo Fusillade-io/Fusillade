@@ -54,7 +54,7 @@ pub fn run_init(output: Option<&Path>, with_config: bool) -> Result<()> {
 
     if script_path.exists() {
         anyhow::bail!(
-            "File already exists: {:?}. Use --force to overwrite.",
+            "File already exists: {:?}. Remove it first or choose a different output path.",
             script_path
         );
     }

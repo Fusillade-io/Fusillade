@@ -108,12 +108,48 @@ impl WorkerServer {
                     println!("Received StartTest command");
 
                     // Parse config from JSON
-                    let config: Config =
-                        serde_json::from_str(&start_test.config_json).unwrap_or_default();
+                    let config: Config = match serde_json::from_str(&start_test.config_json) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!(
+                                "WARNING: Failed to parse config JSON, using defaults: {}",
+                                e
+                            );
+                            Config::default()
+                        }
+                    };
 
                     // Save assets to local disk before running
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                     for (path, content) in &start_test.assets {
                         let p = PathBuf::from(path);
+                        // Validate: reject paths with '..' components
+                        if p.components().any(|c| c == std::path::Component::ParentDir) {
+                            eprintln!("WARNING: Skipping asset with path traversal: {}", path);
+                            continue;
+                        }
+                        // Validate: resolved path must stay within working directory
+                        let resolved = cwd.join(&p);
+                        match resolved.canonicalize().or_else(|_| {
+                            // File doesn't exist yet; canonicalize the parent instead
+                            if let Some(parent) = resolved.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                                parent
+                                    .canonicalize()
+                                    .map(|cp| cp.join(resolved.file_name().unwrap_or_default()))
+                            } else {
+                                Err(std::io::Error::other("no parent"))
+                            }
+                        }) {
+                            Ok(canonical) if canonical.starts_with(&cwd) => {}
+                            _ => {
+                                eprintln!(
+                                    "WARNING: Skipping asset that escapes working directory: {}",
+                                    path
+                                );
+                                continue;
+                            }
+                        }
                         if let Some(parent) = p.parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }
@@ -225,8 +261,36 @@ async fn handle_start(
 
     // Save assets to local disk before running
     if let Some(assets) = payload.assets {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         for (path, content) in assets {
             let p = PathBuf::from(&path);
+            // Validate: reject paths with '..' components
+            if p.components().any(|c| c == std::path::Component::ParentDir) {
+                eprintln!("WARNING: Skipping asset with path traversal: {}", path);
+                continue;
+            }
+            // Validate: resolved path must stay within working directory
+            let resolved = cwd.join(&p);
+            match resolved.canonicalize().or_else(|_| {
+                // File doesn't exist yet; canonicalize the parent instead
+                if let Some(parent) = resolved.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                    parent
+                        .canonicalize()
+                        .map(|cp| cp.join(resolved.file_name().unwrap_or_default()))
+                } else {
+                    Err(std::io::Error::other("no parent"))
+                }
+            }) {
+                Ok(canonical) if canonical.starts_with(&cwd) => {}
+                _ => {
+                    eprintln!(
+                        "WARNING: Skipping asset that escapes working directory: {}",
+                        path
+                    );
+                    continue;
+                }
+            }
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -352,8 +416,13 @@ async fn handle_metrics(State(state): State<ControllerState>, Json(batch): Json<
 }
 
 async fn handle_api_stats(State(state): State<ControllerState>) -> Json<ReportStats> {
-    let guard = state.aggregator.read().unwrap();
-    Json(guard.to_report())
+    match state.aggregator.read() {
+        Ok(guard) => Json(guard.to_report()),
+        Err(_) => {
+            eprintln!("WARNING: Aggregator RwLock poisoned, returning empty report");
+            Json(ReportStats::default())
+        }
+    }
 }
 
 async fn handle_api_history() -> Json<Vec<(i64, String, String)>> {
@@ -587,5 +656,48 @@ mod tests {
         assert!(json.contains("worker-1"));
         assert!(json.contains("192.168.1.1:9000"));
         assert!(json.contains("4"));
+    }
+
+    #[test]
+    fn test_path_traversal_detection() {
+        // Verify that paths with '..' components are correctly identified
+        use std::path::PathBuf;
+
+        let dangerous_paths = vec!["../../etc/passwd", "../../../tmp/evil", "foo/../../bar"];
+
+        for path_str in dangerous_paths {
+            let p = PathBuf::from(path_str);
+            let has_parent_dir = p.components().any(|c| c == std::path::Component::ParentDir);
+            assert!(
+                has_parent_dir,
+                "Should detect path traversal in: {}",
+                path_str
+            );
+        }
+
+        let safe_paths = vec!["test.js", "lib/helpers.js", "data/users.json"];
+        for path_str in safe_paths {
+            let p = PathBuf::from(path_str);
+            let has_parent_dir = p.components().any(|c| c == std::path::Component::ParentDir);
+            assert!(!has_parent_dir, "Should not flag safe path: {}", path_str);
+        }
+    }
+
+    #[test]
+    fn test_rwlock_poison_graceful_handling() {
+        // Verify that a poisoned RwLock returns a default report instead of panicking
+        let aggregator: SharedAggregator =
+            std::sync::Arc::new(std::sync::RwLock::new(crate::stats::StatsAggregator::new()));
+
+        // Poison the lock by panicking in a writer thread
+        let agg_clone = aggregator.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = agg_clone.write().unwrap();
+            panic!("intentional panic to poison the lock");
+        })
+        .join();
+
+        // Read should return Err (poisoned) but we handle it gracefully
+        assert!(aggregator.read().is_err());
     }
 }

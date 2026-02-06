@@ -1,6 +1,5 @@
 # Local testing of distributed mode
 # Run: docker-compose up --build
-version: '3.8'
 
 services:
   controller:
@@ -10,7 +9,7 @@ services:
       - "9000:9000"   # Dashboard & API
       - "9001:9001"   # gRPC for workers
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/api/stats"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9000/api/stats"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -19,16 +18,19 @@ services:
     build: .
     command: ["worker", "--connect", "controller:9001"]
     depends_on:
-      - controller
+      controller:
+        condition: service_healthy
 
   worker-2:
     build: .
     command: ["worker", "--connect", "controller:9001"]
     depends_on:
-      - controller
+      controller:
+        condition: service_healthy
 
   worker-3:
     build: .
     command: ["worker", "--connect", "controller:9001"]
     depends_on:
-      - controller
+      controller:
+        condition: service_healthy

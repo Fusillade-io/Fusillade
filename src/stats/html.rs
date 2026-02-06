@@ -222,7 +222,11 @@ pub fn generate_html(report: &ReportStats) -> String {
         codes.sort_by_key(|(code, _)| *code);
 
         for (code, count) in codes {
-            let pct = (*count as f64 / report.total_requests as f64) * 100.0;
+            let pct = if report.total_requests > 0 {
+                (*count as f64 / report.total_requests as f64) * 100.0
+            } else {
+                0.0
+            };
             let badge_class = if *code >= 200 && *code < 300 {
                 "badge-success"
             } else if *code >= 400 {
@@ -301,7 +305,7 @@ pub fn generate_html(report: &ReportStats) -> String {
                 <td>{}</td>
                 <td class="{}">{} ({:.1}%)</td>
             </tr>"#,
-                truncate_endpoint(name, 60),
+                escape_html(&truncate_endpoint(name, 60)),
                 format_number(req.total_requests),
                 req.avg_latency_ms,
                 req.p95_latency_ms,
@@ -365,10 +369,10 @@ pub fn generate_html(report: &ReportStats) -> String {
         let mut checks: Vec<_> = report.checks.iter().collect();
         checks.sort_by_key(|(name, _)| name.as_str());
 
-        for (name, (passed, failed)) in checks {
-            let total = passed + failed;
-            let pass_rate = if total > 0 {
-                (*passed as f64 / total as f64) * 100.0
+        for (name, (total, passes)) in checks {
+            let failed = total - passes;
+            let pass_rate = if *total > 0 {
+                (*passes as f64 / *total as f64) * 100.0
             } else {
                 0.0
             };
@@ -387,8 +391,8 @@ pub fn generate_html(report: &ReportStats) -> String {
                 <td class="{}">{:.1}%</td>
             </tr>"#,
                 escape_html(name),
-                format_number(*passed),
-                format_number(*failed),
+                format_number(*passes),
+                format_number(failed),
                 rate_class,
                 pass_rate
             ));
@@ -530,10 +534,11 @@ fn escape_html(s: &str) -> String {
 }
 
 fn truncate_endpoint(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        let truncated: String = s.chars().take(max_len - 3).collect();
+        format!("{}...", truncated)
     }
 }
 
@@ -743,5 +748,54 @@ mod tests {
 
         assert!(!endpoints_table.contains("<code>iteration</code>"));
         assert!(!endpoints_table.contains("<code>iteration_total</code>"));
+    }
+
+    #[test]
+    fn test_generate_html_zero_requests() {
+        // Division by zero guard: total_requests == 0 should not panic
+        let report = ReportStats::default();
+        let html = generate_html(&report);
+        assert!(html.contains("Fusillade Report"));
+    }
+
+    #[test]
+    fn test_truncate_endpoint_unicode() {
+        // Unicode truncation should not panic on multi-byte chars
+        let name = "GET /api/\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}";
+        let truncated = truncate_endpoint(name, 20);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.chars().count() <= 20);
+    }
+
+    #[test]
+    fn test_truncate_endpoint_short() {
+        assert_eq!(truncate_endpoint("GET /api/users", 60), "GET /api/users");
+    }
+
+    #[test]
+    fn test_escape_html_special_chars() {
+        assert_eq!(
+            escape_html("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert('xss')&lt;/script&gt;"
+        );
+        assert_eq!(escape_html("a&b"), "a&amp;b");
+        assert_eq!(escape_html("\"quoted\""), "&quot;quoted&quot;");
+        assert_eq!(escape_html("normal text"), "normal text");
+    }
+
+    #[test]
+    fn test_checks_html_tuple_correctness() {
+        // Verify checks correctly compute passed and failed from (total, passes) tuple
+        let report = ReportStats {
+            total_requests: 100,
+            total_duration_ms: 10000,
+            checks: HashMap::from([("status is 200".to_string(), (100, 95))]),
+            ..Default::default()
+        };
+
+        let html = generate_html(&report);
+        // Should show 95 passed (passes) and 5 failed (total - passes)
+        assert!(html.contains("95"));
+        assert!(html.contains("5"));
     }
 }

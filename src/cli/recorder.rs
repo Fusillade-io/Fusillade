@@ -149,7 +149,7 @@ fn save_flow(output: &PathBuf, requests: &[RecordedRequest]) -> Result<()> {
             js.push_str("        headers: {\n");
             for (k, v) in &req.headers {
                 if k.to_lowercase() != "content-length" && k.to_lowercase() != "host" {
-                    let escaped_v = v.replace("'", "'\\");
+                    let escaped_v = v.replace('\\', "\\\\").replace('\'', "\\'");
                     js.push_str(&format!("            '{}': '{}',\n", k, escaped_v));
                 }
             }

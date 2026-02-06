@@ -1,0 +1,9 @@
+target/
+.git/
+*.md
+scenarios/
+config/
+testdata/
+node_modules/
+fusillade_history.db
+.github/

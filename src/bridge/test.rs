@@ -50,7 +50,24 @@ impl<'js> JsExpectation<'js> {
 
     #[qjs(rename = "toBeTruthy")]
     pub fn to_be_truthy(&self, ctx: Ctx<'js>) -> Result<()> {
-        if self.actual.as_bool().unwrap_or(false) {
+        // Follow JavaScript truthiness rules:
+        // false, 0, "", null, undefined, NaN are falsy; everything else is truthy
+        let is_truthy = if self.actual.is_null() || self.actual.is_undefined() {
+            false
+        } else if let Some(b) = self.actual.as_bool() {
+            b
+        } else if let Some(n) = self.actual.as_int() {
+            n != 0
+        } else if let Some(n) = self.actual.as_float() {
+            n != 0.0 && !n.is_nan()
+        } else if let Some(s) = self.actual.as_string() {
+            !s.to_string().unwrap_or_default().is_empty()
+        } else {
+            // Objects, arrays, functions are truthy
+            true
+        };
+
+        if is_truthy {
             Ok(())
         } else {
             let msg = "AssertionError: Expected value to be truthy";

@@ -328,9 +328,10 @@ pub(crate) fn format_number(n: usize) -> String {
 }
 
 pub(crate) fn truncate_name(name: &str, max: usize) -> String {
-    if name.len() <= max {
+    if name.chars().count() <= max {
         name.to_string()
     } else {
-        format!("{}...", &name[..max - 3])
+        let truncated: String = name.chars().take(max - 3).collect();
+        format!("{}...", truncated)
     }
 }

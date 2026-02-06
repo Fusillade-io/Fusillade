@@ -64,7 +64,7 @@ pub fn convert_from_string(har_content: &str) -> Result<String> {
         if !req.headers.is_empty() {
             writeln!(&mut js, "        headers: {{")?;
             for header in req.headers {
-                let val = header.value.replace("'", "'\\'\'");
+                let val = header.value.replace('\\', "\\\\").replace('\'', "\\'");
                 writeln!(&mut js, "            '{}': '{}',", header.name, val)?;
             }
             writeln!(&mut js, "        }},")?;
@@ -72,7 +72,7 @@ pub fn convert_from_string(har_content: &str) -> Result<String> {
 
         if let Some(post) = req.post_data {
             if let Some(text) = post.text {
-                let escaped = text.replace("'", "'\\'\'");
+                let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
                 writeln!(&mut js, "        body: '{}',", escaped)?;
             }
         }

@@ -43,11 +43,15 @@ pub fn generate_csv(report: &ReportStats) -> String {
         out.push_str(&format!("http_req_status_{},counter,{}\n", code, count));
     }
 
-    // Checks (tuple: passed, failed)
-    for (name, (passed, failed)) in &report.checks {
+    // Checks (tuple: total, passes)
+    for (name, (total, passes)) in &report.checks {
         let safe_name = name.replace([' ', ':'], "_");
-        out.push_str(&format!("check_{}_passed,counter,{}\n", safe_name, passed));
-        out.push_str(&format!("check_{}_failed,counter,{}\n", safe_name, failed));
+        out.push_str(&format!("check_{}_passed,counter,{}\n", safe_name, passes));
+        out.push_str(&format!(
+            "check_{}_failed,counter,{}\n",
+            safe_name,
+            total - passes
+        ));
     }
 
     // Custom histograms
@@ -74,6 +78,38 @@ pub fn generate_csv(report: &ReportStats) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn test_csv_checks_tuple_correctness() {
+        // Verify checks use (total, passes) not (passed, failed)
+        let report = ReportStats {
+            checks: HashMap::from([("status is 200".to_string(), (100, 95))]),
+            ..Default::default()
+        };
+
+        let csv = generate_csv(&report);
+        assert!(csv.contains("check_status_is_200_passed,counter,95"));
+        assert!(csv.contains("check_status_is_200_failed,counter,5"));
+    }
+
+    #[test]
+    fn test_csv_checks_all_passed() {
+        let report = ReportStats {
+            checks: HashMap::from([("all pass".to_string(), (50, 50))]),
+            ..Default::default()
+        };
+
+        let csv = generate_csv(&report);
+        assert!(csv.contains("check_all_pass_passed,counter,50"));
+        assert!(csv.contains("check_all_pass_failed,counter,0"));
+    }
+
+    #[test]
+    fn test_csv_empty_report() {
+        let report = ReportStats::default();
+        let csv = generate_csv(&report);
+        assert!(csv.contains("http_req_count,counter,0"));
+    }
 
     #[test]
     fn test_csv_generation() {

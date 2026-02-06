@@ -5,6 +5,37 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-02-05
+
+### Security
+- **Path traversal protection** in distributed mode — asset file paths with `..` components or paths escaping the working directory are now rejected
+- **HTML report XSS fix** — endpoint names are now escaped in the per-endpoint table
+- **Token display safety** — short API tokens no longer panic on slice bounds
+
+### Fixed
+- **Division by zero** in HTML report when total_requests is 0
+- **Checks tuple semantics** — HTML and CSV reports now correctly interpret checks as `(total, passes)` instead of `(passed, failed)`
+- **Unicode truncation** — endpoint names, TUI labels, and HTML report use `.chars().count()` instead of `.len()` to avoid panics on multi-byte characters
+- **`toBeTruthy()` assertion** now follows JavaScript truthiness rules (0, "", null, undefined, NaN are falsy)
+- **Watch mode** no longer panics on unreadable scripts or parse errors — logs warning and retries
+- **RwLock poison** in distributed stats endpoint returns empty report instead of panicking
+- **Config deserialization** in distributed workers logs warning instead of silently using defaults on failure
+
+### Changed
+- Duration parsing now supports fractional values (`1.5s`, `0.5m`, `2.5h`)
+- Release builds now strip symbols and use `codegen-units = 1` for smaller binaries
+- Docker image uses `wget` instead of `curl` for healthchecks (smaller image)
+- Docker Compose workers wait for controller health before starting
+- Removed unused `bundler` module and dead CLI struct from `cli/mod.rs`
+- Added `Cargo.lock` to version control for reproducible builds
+- Added `rust-version = "1.83"` MSRV to Cargo.toml
+- Added `cargo:rerun-if-changed` directive for protobuf builds
+- Removed deprecated `version: '3.8'` from docker-compose.yaml
+
+### Added
+- `--capture-errors` flag now takes effect before test execution (was previously set too late)
+- Tests for path traversal detection, RwLock poison handling, Unicode truncation, checks tuple correctness, fractional duration parsing, and HTML escaping
+
 ## [1.4.0] - 2026-02-04
 
 ### Added

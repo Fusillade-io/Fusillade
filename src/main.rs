@@ -35,10 +35,7 @@ fn run_cloud_test(
     let auth = match fusillade::cli::cloud::load_token() {
         Some(a) => a,
         None => {
-            eprintln!("Error: Not logged in to Fusillade Cloud.");
-            eprintln!("Run 'fusillade login <token>' first.");
-            eprintln!("Get your API key at https://fusillade.io/settings");
-            return Ok(());
+            anyhow::bail!("Not logged in to Fusillade Cloud. Run 'fusillade login <token>' first. Get your API key at https://fusillade.io/settings");
         }
     };
 
@@ -418,11 +415,21 @@ fn main() -> Result<()> {
                 loop {
                     // Run test with reduced settings for dev workflow
                     let engine = Engine::new()?;
-                    let script_content = std::fs::read_to_string(&scenario).unwrap();
-                    let mut watch_config = engine
-                        .extract_config(scenario.clone(), script_content.clone())
-                        .unwrap()
-                        .unwrap_or_default();
+                    let script_content = match std::fs::read_to_string(&scenario) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("[Watch] Failed to read script: {}", e);
+                            continue;
+                        }
+                    };
+                    let mut watch_config =
+                        match engine.extract_config(scenario.clone(), script_content.clone()) {
+                            Ok(c) => c.unwrap_or_default(),
+                            Err(e) => {
+                                eprintln!("[Watch] Failed to parse script config: {}", e);
+                                continue;
+                            }
+                        };
 
                     // Use provided values or defaults for watch mode
                     if let Some(w) = workers {
@@ -490,12 +497,14 @@ fn main() -> Result<()> {
 
             // Local mode: Run test locally
             let engine = Engine::new()?;
-            let script_content = std::fs::read_to_string(&scenario).unwrap();
+            let script_content = std::fs::read_to_string(&scenario).map_err(|e| {
+                anyhow::anyhow!("Failed to read script '{}': {}", scenario.display(), e)
+            })?;
 
             // Start with config from script's export const options
             let mut final_config = engine
                 .extract_config(scenario.clone(), script_content.clone())
-                .unwrap()
+                .map_err(|e| anyhow::anyhow!("Failed to parse script config: {}", e))?
                 .unwrap_or_default();
 
             // Merge external config file if provided (overrides script config)
@@ -755,6 +764,15 @@ fn main() -> Result<()> {
                 }
             }
 
+            // Set capture errors path if flag is provided (must be set before test runs)
+            if let Some(ref path_opt) = capture_errors {
+                let path = path_opt
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "fusillade-errors.json".to_string());
+                fusillade::bridge::set_capture_errors_path(path);
+            }
+
             // Headless mode: either --headless or --json enables non-TUI mode
             let headless_mode = headless || json;
             let engine_arc = Arc::new(engine);
@@ -983,14 +1001,6 @@ fn main() -> Result<()> {
                     }
                     Err(e) => eprintln!("Failed to open history database: {}", e),
                 }
-            }
-
-            // Set capture errors path if flag is provided
-            if let Some(path_opt) = capture_errors {
-                let path = path_opt
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "fusillade-errors.json".to_string());
-                fusillade::bridge::set_capture_errors_path(path);
             }
 
             Ok(())
@@ -1259,7 +1269,12 @@ fn main() -> Result<()> {
             match fusillade::cli::cloud::load_token() {
                 Some(auth) => {
                     println!("Logged in to Fusillade Cloud");
-                    println!("  Token: {}...", &auth.token[..12]);
+                    let display_token = if auth.token.len() >= 12 {
+                        &auth.token[..12]
+                    } else {
+                        &auth.token
+                    };
+                    println!("  Token: {}...", display_token);
                     println!("  API:   {}", fusillade::cli::cloud::get_api_url());
                 }
                 None => {

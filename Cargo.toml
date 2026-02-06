@@ -1,7 +1,8 @@
 [package]
 name = "fusillade"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
+rust-version = "1.83"
 license = "AGPL-3.0-only"
 default-run = "fusillade"
 
@@ -97,3 +98,5 @@ path = "src/bin/fusi.rs"
 
 [profile.release]
 lto = "thin"
+strip = true
+codegen-units = 1

@@ -910,6 +910,21 @@ mod tests {
         assert!(ui::truncate_name(&s31, 30).ends_with("..."));
     }
 
+    #[test]
+    fn test_truncate_name_unicode() {
+        // Multi-byte UTF-8 characters should not cause panics
+        let emoji_name = "\u{1F600}".repeat(20); // 20 emoji chars
+        let truncated = ui::truncate_name(&emoji_name, 10);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.chars().count() <= 10);
+
+        // CJK characters
+        let cjk = "\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}\u{7aef}\u{70b9}\u{540d}\u{79f0}\u{5f88}\u{957f}\u{7684}\u{63cf}\u{8ff0}";
+        let truncated = ui::truncate_name(cjk, 8);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.chars().count() <= 8);
+    }
+
     // ── Rendering smoke tests (ensure no panics) ─────────────────
 
     #[test]

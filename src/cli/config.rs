@@ -138,8 +138,6 @@ pub struct Config {
     pub no_pool: Option<bool>,
 }
 
-impl Config {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

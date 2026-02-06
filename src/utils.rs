@@ -21,19 +21,19 @@ pub fn parse_duration_str(s: &str) -> Option<Duration> {
             .map(Duration::from_millis)
     } else if s.ends_with('s') {
         s.trim_end_matches('s')
-            .parse::<u64>()
+            .parse::<f64>()
             .ok()
-            .map(Duration::from_secs)
+            .map(Duration::from_secs_f64)
     } else if s.ends_with('m') {
         s.trim_end_matches('m')
-            .parse::<u64>()
+            .parse::<f64>()
             .ok()
-            .map(|m| Duration::from_secs(m * 60))
+            .map(|m| Duration::from_secs_f64(m * 60.0))
     } else if s.ends_with('h') {
         s.trim_end_matches('h')
-            .parse::<u64>()
+            .parse::<f64>()
             .ok()
-            .map(|h| Duration::from_secs(h * 3600))
+            .map(|h| Duration::from_secs_f64(h * 3600.0))
     } else {
         // Try parsing as milliseconds number
         s.parse::<u64>().ok().map(Duration::from_millis)
@@ -120,6 +120,21 @@ mod tests {
             parse_duration_str_or_warn("500ms", 60, "test"),
             Duration::from_millis(500)
         );
+    }
+
+    #[test]
+    fn test_parse_fractional_seconds() {
+        assert_eq!(
+            parse_duration_str("1.5s"),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(parse_duration_str("0.5s"), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn test_parse_fractional_minutes() {
+        assert_eq!(parse_duration_str("1.5m"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration_str("0.5m"), Some(Duration::from_secs(30)));
     }
 
     #[test]
