@@ -318,7 +318,7 @@ Fusillade is configured via the `export const options` object in your script.
 | Option | Type | Description | Example |
 | :--- | :--- | :--- | :--- |
 | `workers` | Number | Number of concurrent workers. | `20` |
-| `duration` | String | Total duration of the test. | `'30s'`, `'1m'` |
+| `duration` | String | Total duration of the test. Supports fractional values. | `'30s'`, `'1.5m'`, `'0.5h'` |
 | `stages` | Array | Ramping schedule (target workers over time). | `[{ duration: '10s', target: 50 }]` |
 | `thresholds` | Object | Pass/fail criteria. | `{ 'http_req_duration': ['p95 < 500'] }` |
 | `stop` | String | Wait time for active iterations to finish after test duration expires. Defaults to `'30s'`. | `'30s'` |
@@ -336,6 +336,8 @@ Fusillade is configured via the `export const options` object in your script.
 | `insecure` | Boolean | Skip TLS certificate verification. Use for self-signed certificates. **Warning:** Insecure, only use for testing. | `true` |
 | `max_redirects` | Number | Maximum HTTP redirects to follow. Default: 10. Set to 0 to disable. | `5` |
 | `user_agent` | String | Default User-Agent header for all HTTP requests. | `'MyApp/1.0'` |
+
+**Duration format:** All duration strings accept `ms`, `s`, `m`, and `h` suffixes with fractional values: `'500ms'`, `'1.5s'`, `'0.5m'`, `'2.5h'`. A plain number is treated as milliseconds.
 
 ### Config Aliases
 
@@ -1163,7 +1165,7 @@ Fusillade provides a built-in unit testing framework for verifying logic before 
 * `expect(value)`: Starts an assertion.
     * `.toBe(expected)`: Strict equality check.
     * `.toEqual(expected)`: Deep equality check (via JSON).
-    * `.toBeTruthy()`: Checks if value is truthy.
+    * `.toBeTruthy()`: Checks if value is truthy. Follows JavaScript truthiness rules: `false`, `0`, `""`, `null`, `undefined`, and `NaN` are falsy — everything else is truthy.
 
 ```javascript
 describe("Cart Logic", () => {
