@@ -2516,6 +2516,9 @@ All error responses include a machine-readable `code` field:
 | `domain_blocked` | 403 | Target domain is blocklisted |
 | `invalid_script` | 400 | Script failed validation |
 | `invalid_state` | 400 | Invalid state transition |
+| `script_too_large` | 400 | Script or asset exceeds size limit |
+| `limit_exceeded` | 403 | Maximum templates or schedules per org reached |
+| `idempotency_error` | 400 | Idempotency-Key too long or invalid |
 | `rate_limited` | 429 | Too many requests |
 | `internal_error` | 500 | Server error |
 
@@ -2698,15 +2701,46 @@ curl -X POST https://api.fusillade.io/api/v1/schedules \
 
 **Metrics:** `p95` (default), `avg`, `error_rate`, `rps`. **Periods:** `7d`, `30d` (default), `90d`, up to `365d`.
 
+### Other Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/me` | Current user profile |
+| PATCH | `/api/v1/me` | Update profile |
+| POST | `/api/v1/auth/change-password` | Change password |
+| POST | `/api/v1/auth/logout` | Logout |
+| GET | `/api/v1/keys` | List API keys |
+| POST | `/api/v1/keys` | Create API key |
+| DELETE | `/api/v1/keys/:id` | Delete API key |
+| GET | `/api/v1/quota` | Current quota usage |
+| GET | `/api/v1/regions` | Available regions for your tier |
+| GET | `/api/v1/team` | List team members |
+| POST | `/api/v1/team/invite` | Invite team member |
+| GET | `/api/v1/team/invites` | List pending invitations |
+| DELETE | `/api/v1/team/invites/:id` | Cancel invitation |
+| POST | `/api/v1/team/invites/:id/resend` | Resend invitation email |
+| DELETE | `/api/v1/team/:user_id` | Remove team member |
+| POST | `/api/v1/tests/validate` | Validate script syntax |
+| GET | `/api/v1/tests/:id/workers` | Active workers for a test |
+| GET | `/api/v1/tests/:id/queue` | Queue status for a test |
+| GET | `/api/v1/invites/:token` | Get invite details (public) |
+| POST | `/api/v1/invites/:token/accept` | Accept invitation (public) |
+| GET | `/health` | Health check (public) |
+| GET | `/health/deep` | Deep health check with DB/Redis (public) |
+
 ### WebSocket (Live Metrics)
 
 Stream real-time metrics from a running test:
 
 ```javascript
-const ws = new WebSocket('wss://api.fusillade.io/ws/runs/<test_id>', '<jwt_token>');
+// Browser: pass token via Sec-WebSocket-Protocol header
+const ws = new WebSocket('wss://api.fusillade.io/ws/runs/<test_id>', ['auth', '<jwt_token>']);
 ws.onmessage = (e) => console.log(JSON.parse(e.data));
 // Message types: "metric" (periodic stats), "status" (state changes), "summary" (final results)
+
+// Query parameter fallback (e.g. for CLI/server-side):
+// wss://api.fusillade.io/ws/runs/<test_id>?token=<jwt_token>
 ```
 
-Authentication via `Sec-WebSocket-Protocol` header (browsers cannot set custom headers on WebSocket).
+Authentication via `Sec-WebSocket-Protocol` header with format `auth, <jwt_token>`. Browsers cannot set custom headers on WebSocket connections, so the token is passed as a sub-protocol. A query parameter fallback (`?token=`) is also supported.
 
