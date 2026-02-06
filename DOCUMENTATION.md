@@ -2465,3 +2465,248 @@ fusillade::bridge::get_dropped_metrics_count()
 
 Metric channels use bounded capacity with automatic scaling based on worker count. When channels are full, worker threads block (backpressure) rather than dropping metrics. This ensures all metrics are captured at the cost of potential throughput reduction under extreme load.
 
+---
+
+## 15. Cloud REST API
+
+The Fusillade Cloud platform at `https://api.fusillade.io` provides a REST API for programmatic test management, automation, and CI/CD integration. Full interactive documentation is available at [fusillade.io/docs/api](https://fusillade.io/docs/api).
+
+### Authentication
+
+All protected endpoints require either a **Bearer token** (JWT from login) or a **scoped API key**.
+
+```bash
+# Login to get a JWT token
+curl -X POST https://api.fusillade.io/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "..."}'
+
+# Create a scoped API key
+curl -X POST https://api.fusillade.io/api/v1/keys \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "CI Agent", "scopes": ["test:create"]}'
+```
+
+**Scopes:** `full` > `test:create` > `test:read` > `read` (hierarchical).
+
+### Error Codes
+
+All error responses include a machine-readable `code` field:
+
+```json
+{
+  "error": "Worker limit exceeded. Your plan allows up to 1000 workers.",
+  "code": "worker_limit_exceeded"
+}
+```
+
+| Code | HTTP | Description |
+|------|------|-------------|
+| `invalid_auth` | 401 | Invalid or expired token/API key |
+| `insufficient_scope` | 403 | API key lacks required scope |
+| `forbidden` | 403 | Action not permitted |
+| `not_found` | 404 | Resource not found |
+| `validation_error` | 400 | Invalid input |
+| `conflict` | 409 | Duplicate resource |
+| `quota_exceeded` | 403 | Monthly minute quota exhausted |
+| `worker_limit_exceeded` | 403 | Workers exceed plan limit |
+| `duration_limit_exceeded` | 403 | Duration exceeds plan limit |
+| `region_restricted` | 403 | Region not available on plan |
+| `domain_blocked` | 403 | Target domain is blocklisted |
+| `invalid_script` | 400 | Script failed validation |
+| `invalid_state` | 400 | Invalid state transition |
+| `rate_limited` | 429 | Too many requests |
+| `internal_error` | 500 | Server error |
+
+### Idempotency
+
+Include an `Idempotency-Key` header on POST requests to prevent duplicate creation from retries. Supported on test, webhook, and template creation. Keys expire after 24 hours.
+
+```bash
+curl -X POST https://api.fusillade.io/api/v1/tests \
+  -H "Authorization: Bearer <token>" \
+  -H "Idempotency-Key: my-unique-key-123" \
+  -F "name=Load Test" \
+  -F "script=@test.js" \
+  -F "workers=100" \
+  -F "duration=60"
+```
+
+### Tests
+
+```bash
+# Create a test
+curl -X POST https://api.fusillade.io/api/v1/tests \
+  -H "Authorization: Bearer <token>" \
+  -F "name=API Load Test" \
+  -F "script=@test.js" \
+  -F "workers=100" \
+  -F "duration=60" \
+  -F "region=eu-hel1"
+
+# Wait for ready (long-poll, timeout 5 min)
+curl -X POST "https://api.fusillade.io/api/v1/tests?wait=true" \
+  -H "Authorization: Bearer <token>" \
+  -F "name=CI Test" -F "script=@test.js" -F "workers=50" -F "duration=60"
+
+# Wait for completion (timeout 30 min)
+curl -X POST "https://api.fusillade.io/api/v1/tests?wait=true&wait_for=completed" \
+  -H "Authorization: Bearer <token>" \
+  -F "name=CI Test" -F "script=@test.js" -F "workers=50" -F "duration=60"
+```
+
+| Method | Endpoint | Scope | Description |
+|--------|----------|-------|-------------|
+| POST | `/api/v1/tests` | test:create | Create test (multipart) |
+| GET | `/api/v1/tests` | test:read | List tests (paginated) |
+| GET | `/api/v1/tests/:id` | test:read | Test details + metrics |
+| POST | `/api/v1/tests/:id/start` | test:create | Start a ready test |
+| POST | `/api/v1/tests/:id/stop` | test:create | Stop a running test |
+| POST | `/api/v1/tests/:id/pause` | test:create | Pause a running test |
+| POST | `/api/v1/tests/:id/resume` | test:create | Resume a paused test |
+| DELETE | `/api/v1/tests/:id` | full | Delete a test |
+
+**Status flow:** `provisioning` -> `ready` -> `pending` -> `running` -> `completed` / `failed`
+
+### Test Comparison (Regression Detection)
+
+Compare a test against a baseline to detect regressions. A test is flagged as a regression if p95 latency increased >10% or error rate increased >0.5 percentage points.
+
+```bash
+curl "https://api.fusillade.io/api/v1/tests/<current_id>/compare/<baseline_id>" \
+  -H "Authorization: Bearer <token>"
+
+# Response:
+# {
+#   "baseline": { "name": "...", "p95_latency_ms": 89.2, ... },
+#   "current":  { "name": "...", "p95_latency_ms": 102.4, ... },
+#   "delta":    { "p95_latency_ms": 13.2, "error_rate": 0.001, ... },
+#   "regression": true,
+#   "regression_reasons": ["p95 latency increased 14.8%"]
+# }
+```
+
+**CI/CD gate example:**
+
+```bash
+TEST_ID=$(curl -s -X POST "https://api.fusillade.io/api/v1/tests?wait=true&wait_for=completed" \
+  -H "Authorization: Bearer $FUSILLADE_API_KEY" \
+  -F "name=CI Run" -F "script=@test.js" -F "workers=50" -F "duration=60" | jq -r '.test_id')
+
+REGRESSION=$(curl -s "https://api.fusillade.io/api/v1/tests/$TEST_ID/compare/$BASELINE_ID" \
+  -H "Authorization: Bearer $FUSILLADE_API_KEY" | jq -r '.regression')
+
+if [ "$REGRESSION" = "true" ]; then
+  echo "Performance regression detected"; exit 1
+fi
+```
+
+### Webhooks
+
+Receive HTTP callbacks on test lifecycle events. Deliveries include HMAC-SHA256 signatures (`X-Fusillade-Signature: t=<timestamp>,v1=<hmac_hex>`).
+
+**Events:** `test.completed`, `test.failed`, `test.started`, `test.ready`, `test.threshold_breached`, `test.scheduled`
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/webhooks` | Create webhook |
+| GET | `/api/v1/webhooks` | List webhooks |
+| PATCH | `/api/v1/webhooks/:id` | Update webhook |
+| DELETE | `/api/v1/webhooks/:id` | Delete webhook |
+| GET | `/api/v1/webhooks/:id/deliveries` | List deliveries |
+| POST | `/api/v1/webhooks/:id/test` | Send test delivery |
+
+```bash
+curl -X POST https://api.fusillade.io/api/v1/webhooks \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://your-server.com/webhook", "events": ["test.completed", "test.failed", "test.ready"]}'
+```
+
+**Signature verification (Node.js):**
+
+```javascript
+const crypto = require('crypto');
+function verifyWebhook(body, signature, secret) {
+  const [tPart, vPart] = signature.split(',');
+  const timestamp = tPart.replace('t=', '');
+  const payload = timestamp + '.' + body;
+  const computed = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(vPart.replace('v1=', '')));
+}
+```
+
+Retry policy: exponential backoff (30s, 120s, 480s), max 3 attempts. URLs must be HTTPS; private IPs are blocked.
+
+### Templates
+
+Save test configurations as reusable templates.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/templates` | Create template |
+| GET | `/api/v1/templates` | List templates |
+| GET | `/api/v1/templates/:id` | Get template |
+| PATCH | `/api/v1/templates/:id` | Update template |
+| DELETE | `/api/v1/templates/:id` | Delete template |
+| POST | `/api/v1/templates/:id/run` | Run from template (with optional overrides) |
+
+```bash
+# Create template
+curl -X POST https://api.fusillade.io/api/v1/templates \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "API Smoke Test", "script_content": "export default function() { http.get(\"https://api.example.com/health\"); }", "workers": 10, "duration_seconds": 30, "region": "eu-hel1"}'
+
+# Run with overrides
+curl -X POST "https://api.fusillade.io/api/v1/templates/<id>/run" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"workers": 50, "duration_seconds": 120}'
+```
+
+### Schedules
+
+Automate recurring tests with cron expressions.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/schedules` | Create schedule |
+| GET | `/api/v1/schedules` | List schedules |
+| GET | `/api/v1/schedules/:id` | Get schedule |
+| PATCH | `/api/v1/schedules/:id` | Update schedule |
+| DELETE | `/api/v1/schedules/:id` | Delete schedule |
+| POST | `/api/v1/schedules/:id/pause` | Pause schedule |
+| POST | `/api/v1/schedules/:id/resume` | Resume schedule |
+| POST | `/api/v1/schedules/:id/trigger` | Trigger immediately |
+
+```bash
+curl -X POST https://api.fusillade.io/api/v1/schedules \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Nightly API Test", "script_content": "export default function() { http.get(\"https://api.example.com/health\"); }", "workers": 50, "duration_seconds": 60, "region": "eu-hel1", "cron_expression": "0 0 2 * * * *", "timezone": "UTC"}'
+```
+
+### Analytics
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/analytics/trends` | Performance trends (params: `metric`, `period`, `target_url`) |
+| GET | `/api/v1/analytics/compare` | Side-by-side comparison (params: `test_ids`, up to 10) |
+| GET | `/api/v1/tests/:id/compare/:baseline_id` | Regression detection against baseline |
+
+**Metrics:** `p95` (default), `avg`, `error_rate`, `rps`. **Periods:** `7d`, `30d` (default), `90d`, up to `365d`.
+
+### WebSocket (Live Metrics)
+
+Stream real-time metrics from a running test:
+
+```javascript
+const ws = new WebSocket('wss://api.fusillade.io/ws/runs/<test_id>', '<jwt_token>');
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+// Message types: "metric" (periodic stats), "status" (state changes), "summary" (final results)
+```
+
+Authentication via `Sec-WebSocket-Protocol` header (browsers cannot set custom headers on WebSocket).
+
