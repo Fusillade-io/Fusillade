@@ -256,8 +256,13 @@ mod raw_http {
             Some(i) => (&without_scheme[..i], &without_scheme[i..]),
             None => (without_scheme, "/"),
         };
+        let host_port = if host_port.contains(':') {
+            host_port.to_string()
+        } else {
+            format!("{}:80", host_port)
+        };
         Some(ParsedUrl {
-            host_port: host_port.to_string(),
+            host_port,
             path: path.to_string(),
         })
     }
@@ -2461,4 +2466,61 @@ pub fn register_sync_http(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::raw_http::parse_url;
+
+    #[test]
+    fn parse_url_ip_no_port() {
+        let parsed = parse_url("http://70.34.195.10/api/search/").unwrap();
+        assert_eq!(parsed.host_port, "70.34.195.10:80");
+        assert_eq!(parsed.path, "/api/search/");
+    }
+
+    #[test]
+    fn parse_url_ip_with_port() {
+        let parsed = parse_url("http://192.168.1.1:8080/path").unwrap();
+        assert_eq!(parsed.host_port, "192.168.1.1:8080");
+        assert_eq!(parsed.path, "/path");
+    }
+
+    #[test]
+    fn parse_url_hostname_no_port() {
+        let parsed = parse_url("http://example.com/api/test").unwrap();
+        assert_eq!(parsed.host_port, "example.com:80");
+        assert_eq!(parsed.path, "/api/test");
+    }
+
+    #[test]
+    fn parse_url_hostname_with_port() {
+        let parsed = parse_url("http://example.com:3000/api").unwrap();
+        assert_eq!(parsed.host_port, "example.com:3000");
+        assert_eq!(parsed.path, "/api");
+    }
+
+    #[test]
+    fn parse_url_no_path() {
+        let parsed = parse_url("http://example.com").unwrap();
+        assert_eq!(parsed.host_port, "example.com:80");
+        assert_eq!(parsed.path, "/");
+    }
+
+    #[test]
+    fn parse_url_ip_no_path() {
+        let parsed = parse_url("http://10.0.0.1").unwrap();
+        assert_eq!(parsed.host_port, "10.0.0.1:80");
+        assert_eq!(parsed.path, "/");
+    }
+
+    #[test]
+    fn parse_url_rejects_https() {
+        assert!(parse_url("https://example.com/api").is_none());
+    }
+
+    #[test]
+    fn parse_url_rejects_garbage() {
+        assert!(parse_url("not-a-url").is_none());
+    }
 }
