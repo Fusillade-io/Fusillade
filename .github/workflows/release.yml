@@ -92,3 +92,106 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: artifacts/*
+
+  deploy-fly-worker:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout data-plane
+        uses: actions/checkout@v4
+        with:
+          repository: Fusillade-io/data-plane
+          token: ${{ secrets.REPO_TOKEN }}
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy worker image
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Clean up default machines
+        run: |
+          MACHINES=$(flyctl machines list -a fusillade-worker --json 2>/dev/null | jq -r '.[].id' 2>/dev/null || echo "")
+          for id in $MACHINES; do
+            echo "Destroying default machine $id"
+            flyctl machines destroy "$id" -a fusillade-worker --force || true
+          done
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  rebuild-vultr-snapshot:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout controlPanel
+        uses: actions/checkout@v4
+        with:
+          repository: Fusillade-io/controlPanel
+          token: ${{ secrets.REPO_TOKEN }}
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "StrictHostKeyChecking no" >> ~/.ssh/ssh_config
+
+      - name: Rebuild snapshot on production server
+        run: |
+          ssh -i ~/.ssh/id_ed25519 root@api.fusillade.io << 'SSHEOF'
+            set -e
+            cd /root/fusi/controlPanel
+
+            # Copy latest CLI to static directory for worker binary download
+            echo "Downloading latest CLI..."
+            curl -sSL https://github.com/Fusillade-io/Fusillade/releases/latest/download/fusillade-linux-x64 \
+              -o static/fusillade-worker-cli-new
+            if [ $(stat -c%s static/fusillade-worker-cli-new) -gt 1000000 ]; then
+              mv static/fusillade-worker-cli-new static/fusillade-worker
+              chmod +x static/fusillade-worker
+              echo "CLI updated in static directory"
+            else
+              echo "ERROR: Downloaded CLI too small, aborting"
+              rm -f static/fusillade-worker-cli-new
+              exit 1
+            fi
+
+            # Source env for API keys
+            export $(grep -E '^(VULTR_API_KEY|VULTR_SSH_KEY_ID)=' .env | xargs)
+
+            # Run snapshot builder
+            echo "Building new Vultr worker snapshot..."
+            cd scripts
+            SNAPSHOT_OUTPUT=$(bash build-worker-snapshot.sh 2>&1)
+            echo "$SNAPSHOT_OUTPUT"
+
+            # Extract new snapshot ID
+            NEW_SNAPSHOT_ID=$(echo "$SNAPSHOT_OUTPUT" | grep "^Snapshot ID:" | tail -1 | awk '{print $3}')
+            if [ -z "$NEW_SNAPSHOT_ID" ]; then
+              echo "ERROR: Could not extract snapshot ID"
+              exit 1
+            fi
+
+            echo "New snapshot ID: $NEW_SNAPSHOT_ID"
+
+            # Get old snapshot ID before updating
+            cd /root/fusi/controlPanel
+            OLD_SNAPSHOT_ID=$(grep VULTR_WORKER_SNAPSHOT_ID .env | cut -d= -f2)
+
+            # Update .env with new snapshot ID
+            sed -i "s/VULTR_WORKER_SNAPSHOT_ID=.*/VULTR_WORKER_SNAPSHOT_ID=$NEW_SNAPSHOT_ID/" .env
+            echo "Updated .env with new snapshot ID"
+
+            # Delete old snapshot
+            if [ -n "$OLD_SNAPSHOT_ID" ] && [ "$OLD_SNAPSHOT_ID" != "$NEW_SNAPSHOT_ID" ]; then
+              echo "Deleting old snapshot $OLD_SNAPSHOT_ID..."
+              curl -s -X DELETE "https://api.vultr.com/v2/snapshots/$OLD_SNAPSHOT_ID" \
+                -H "Authorization: Bearer $VULTR_API_KEY" || true
+            fi
+
+            # Restart API to pick up new snapshot ID
+            systemctl restart fusillade-api
+            echo "API restarted with new snapshot"
+          SSHEOF
