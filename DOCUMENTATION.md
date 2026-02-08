@@ -47,6 +47,12 @@ Initialize a new project with a sample script and configuration:
 fusillade init -o my-test.js --config
 ```
 
+To generate a TypeScript template instead:
+
+```bash
+fusillade init -o my-test.ts --typescript
+```
+
 ### Running a Test
 
 To run a load test, you need a flow script. Configuration is extracted from the `export const options` in the script.
@@ -58,6 +64,56 @@ fusillade run scenarios/test.js
 > [!TIP]
 > You can use the shorter alias `fusi` for all commands (e.g., `fusi run scenarios/test.js`).
 
+
+### TypeScript Support
+
+Fusillade natively supports TypeScript (`.ts` and `.mts` files). TypeScript is transpiled to JavaScript at load time using type-stripping — no type checking is performed, only syntactic type removal. This gives you full IDE autocompletion and type safety during development with zero runtime overhead.
+
+```bash
+fusillade run scenarios/test.ts
+fusillade validate scenarios/test.ts
+```
+
+**File: `scenarios/checkout.ts`**
+
+```typescript
+interface Options {
+    workers: number;
+    duration: string;
+    thresholds: Record<string, string[]>;
+}
+
+export const options: Options = {
+    workers: 10,
+    duration: '30s',
+    thresholds: {
+        'http_req_duration': ['p95 < 500'],
+        'http_req_failed': ['rate < 0.01'],
+    },
+};
+
+export default function(): void {
+    const res = http.get('https://httpbin.org/get');
+    check(res, {
+        'status is 200': (r: any) => r.status === 200,
+    });
+    sleep(1);
+}
+```
+
+TypeScript imports also work — any `.ts` file imported by your scenario is automatically transpiled:
+
+```typescript
+// support/helpers.ts
+export function authHeaders(token: string): Record<string, string> {
+    return { Authorization: `Bearer ${token}` };
+}
+
+// scenarios/test.ts
+import { authHeaders } from '../support/helpers.ts';
+```
+
+> **Note:** Type-stripping only removes type annotations, interfaces, type aliases, and enums. It does not perform type checking. Use your IDE or `tsc --noEmit` for type validation during development.
 
 ### Writing a Test Scenario
 
@@ -1738,19 +1794,21 @@ Output shows percentage change for each metric:
 Initialize a new test script with a starter template.
 
 **Options:**
-* `-o, --output <FILE>`: Output file path (default: `test.js`).
+* `-o, --output <FILE>`: Output file path (default: `test.js`, or `test.ts` with `--typescript`).
 * `--config`: Also create a `fusillade.yaml` config file.
+* `-t, --typescript`: Generate a TypeScript template instead of JavaScript.
 
 **Example:**
 ```bash
 fusillade init -o scenarios/my_test.js --config
+fusillade init -o scenarios/my_test.ts --typescript
 ```
 
 ### `fusillade validate`
-Validate a script without running it. Checks for JavaScript syntax errors, configuration validity, and import resolution.
+Validate a script without running it. Checks for syntax errors, configuration validity, and import resolution. Supports both JavaScript and TypeScript files.
 
 **Arguments:**
-* `<SCENARIO>`: Path to the JavaScript scenario file.
+* `<SCENARIO>`: Path to the scenario file (`.js` or `.ts`).
 
 **Options:**
 * `-c, --config <FILE>`: Optional config file to validate alongside the script.
@@ -1758,6 +1816,7 @@ Validate a script without running it. Checks for JavaScript syntax errors, confi
 **Example:**
 ```bash
 fusillade validate scenarios/checkout.js --config config/stress.yaml
+fusillade validate scenarios/checkout.ts
 ```
 
 ### `fusillade completion`
@@ -2265,6 +2324,7 @@ When running with `--headless --interactive`, Fusillade accepts commands via std
 | `fusillade run <file> --estimate-cost` | Estimate transfer costs first |
 | `fusillade init` | Create starter test script |
 | `fusillade init -o test.js --config` | Create script and config file |
+| `fusillade init -t` | Create TypeScript starter script |
 | `fusillade validate <file>` | Validate script without running |
 | `fusillade completion <shell>` | Generate shell completions |
 | `fusillade export <errors.json> --format curl` | Export failures to cURL |

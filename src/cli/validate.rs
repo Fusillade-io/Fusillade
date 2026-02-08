@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
+use crate::engine::typescript::maybe_transpile;
 use crate::engine::Engine;
 
 /// Validate a Fusillade script without running it.
@@ -11,9 +12,10 @@ use crate::engine::Engine;
 pub fn run_validate(scenario: &Path, config_path: Option<&Path>) -> Result<()> {
     println!("Validating {}...", scenario.display());
 
-    // Read script content
+    // Read script content (transpile if TypeScript)
     let script_content = std::fs::read_to_string(scenario)
         .map_err(|e| anyhow::anyhow!("Failed to read script: {}", e))?;
+    let script_content = maybe_transpile(script_content, &scenario.display().to_string())?;
 
     // Create engine to validate
     let engine = Engine::new()?;
@@ -148,5 +150,49 @@ export default function() {
 
         let result = run_validate(&script_path, Some(&config_path));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_typescript_script() {
+        let temp_dir = TempDir::new().unwrap();
+        let script_path = temp_dir.path().join("test.ts");
+        fs::write(
+            &script_path,
+            r#"
+interface Options {
+    workers: number;
+    duration: string;
+}
+export const options: Options = {
+    workers: 5,
+    duration: '10s',
+};
+export default function(): void {
+    http.get('https://example.com');
+}
+"#,
+        )
+        .unwrap();
+
+        let result = run_validate(&script_path, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_typescript_no_options() {
+        let temp_dir = TempDir::new().unwrap();
+        let script_path = temp_dir.path().join("test.ts");
+        fs::write(
+            &script_path,
+            r#"
+export default function(): void {
+    http.get('https://example.com');
+}
+"#,
+        )
+        .unwrap();
+
+        let result = run_validate(&script_path, None);
+        assert!(result.is_ok());
     }
 }

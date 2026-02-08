@@ -9,8 +9,8 @@ use http::Method;
 #[allow(unused_imports)]
 use may::coroutine;
 use rquickjs::{
-    loader::{FileResolver, ScriptLoader},
-    CatchResultExt, CaughtError, Context, Ctx, Function, Module, Object, Runtime, Value,
+    loader::FileResolver, CatchResultExt, CaughtError, Context, Ctx, Function, Module, Object,
+    Runtime, Value,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -92,6 +92,7 @@ pub mod distributed;
 pub mod http_client;
 pub mod io_bridge;
 pub mod memory;
+pub mod typescript;
 
 impl Engine {
     pub fn new() -> Result<Self> {
@@ -106,8 +107,9 @@ impl Engine {
         let resolver = FileResolver::default()
             .with_path("./")
             .with_path("./scenarios")
-            .with_path("./support");
-        let loader = ScriptLoader::default();
+            .with_path("./support")
+            .with_pattern("{}.ts");
+        let loader = typescript::TsLoader::new();
         runtime.set_loader(resolver, loader);
         let context = Context::full(&runtime)?;
         Ok((runtime, context))
@@ -2643,5 +2645,75 @@ export default function() {
             "Expected success for valid script, got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn test_typescript_extract_config() {
+        let engine = Engine::new().unwrap();
+
+        let ts_script = r#"
+interface Options {
+    workers: number;
+    duration: string;
+}
+
+export const options: Options = { workers: 5, duration: '10s' };
+
+export default function(): void {
+    console.log('typescript test');
+}
+"#;
+
+        // Transpile then extract config
+        let js = typescript::transpile_typescript(ts_script, "test.ts").unwrap();
+        let result = engine.extract_config(std::path::PathBuf::from("test.ts"), js);
+
+        assert!(
+            result.is_ok(),
+            "Expected success for TypeScript script, got: {:?}",
+            result
+        );
+        let config = result.unwrap().unwrap();
+        assert_eq!(config.workers, Some(5));
+        assert_eq!(config.duration.as_deref(), Some("10s"));
+    }
+
+    #[test]
+    fn test_typescript_with_generics_extracts() {
+        let engine = Engine::new().unwrap();
+
+        let ts_script = r#"
+function identity<T>(val: T): T { return val; }
+type Duration = string;
+
+export const options = {
+    workers: identity<number>(3),
+    duration: '5s' as Duration,
+};
+
+export default function(): void {}
+"#;
+
+        let js = typescript::transpile_typescript(ts_script, "test.ts").unwrap();
+        let result = engine.extract_config(std::path::PathBuf::from("test.ts"), js);
+        assert!(
+            result.is_ok(),
+            "Generics should transpile, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_typescript_syntax_error() {
+        let ts_script = "const x: = ;; {{";
+        let result = typescript::transpile_typescript(ts_script, "bad.ts");
+        assert!(result.is_err(), "Expected error for invalid TypeScript");
+    }
+
+    #[test]
+    fn test_maybe_transpile_js_passthrough() {
+        let js_source = "export const options = { workers: 1 };".to_string();
+        let result = typescript::maybe_transpile(js_source.clone(), "test.js").unwrap();
+        assert_eq!(result, js_source, "JS should pass through unchanged");
     }
 }

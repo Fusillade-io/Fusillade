@@ -1,6 +1,6 @@
 [package]
 name = "fusillade"
-version = "1.4.4"
+version = "1.5.0"
 edition = "2021"
 rust-version = "1.83"
 license = "AGPL-3.0-only"
@@ -77,6 +77,9 @@ may = "0.3"
 
 # System info for memory monitoring
 sysinfo = "0.32"
+
+# TypeScript transpilation
+oxc = { version = "0.112", features = ["transformer", "codegen", "semantic"] }
 
 [build-dependencies]
 tonic-build = "0.12"
