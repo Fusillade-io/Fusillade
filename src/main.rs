@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use fusillade::engine::distributed::{ControllerServer, WorkerServer};
+use fusillade::engine::typescript::maybe_transpile;
 use fusillade::engine::Engine;
 use fusillade::parse_duration_str;
 
@@ -42,6 +43,7 @@ fn run_cloud_test(
     // Read script content
     let script_content = std::fs::read_to_string(&scenario)
         .map_err(|e| anyhow::anyhow!("Failed to read script: {}", e))?;
+    let script_content = maybe_transpile(script_content, &scenario.to_string_lossy())?;
 
     let script_name = scenario
         .file_name()
@@ -131,7 +133,7 @@ enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
         /// Run in headless mode (no TUI, suitable for CI/CD)
-        #[arg(long)]
+        #[arg(long, visible_alias = "no-tui")]
         headless: bool,
         #[arg(long)]
         json: bool,
@@ -229,6 +231,9 @@ enum Commands {
         /// Also create a fusillade.yaml config file
         #[arg(long)]
         config: bool,
+        /// Generate a TypeScript template instead of JavaScript
+        #[arg(short, long)]
+        typescript: bool,
     },
     /// Validate a script without running it
     Validate {
@@ -422,6 +427,14 @@ fn main() -> Result<()> {
                             continue;
                         }
                     };
+                    let script_content =
+                        match maybe_transpile(script_content, &scenario.to_string_lossy()) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!("[Watch] TypeScript transpile error: {}", e);
+                                continue;
+                            }
+                        };
                     let mut watch_config =
                         match engine.extract_config(scenario.clone(), script_content.clone()) {
                             Ok(c) => c.unwrap_or_default(),
@@ -500,6 +513,7 @@ fn main() -> Result<()> {
             let script_content = std::fs::read_to_string(&scenario).map_err(|e| {
                 anyhow::anyhow!("Failed to read script '{}': {}", scenario.display(), e)
             })?;
+            let script_content = maybe_transpile(script_content, &scenario.to_string_lossy())?;
 
             // Start with config from script's export const options
             let mut final_config = engine
@@ -1005,9 +1019,11 @@ fn main() -> Result<()> {
 
             Ok(())
         }
-        Commands::Init { output, config } => {
-            fusillade::cli::init::run_init(output.as_deref(), config)
-        }
+        Commands::Init {
+            output,
+            config,
+            typescript,
+        } => fusillade::cli::init::run_init(output.as_deref(), config, typescript),
         Commands::Validate { scenario, config } => {
             fusillade::cli::validate::run_validate(&scenario, config.as_deref())
         }

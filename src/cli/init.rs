@@ -25,6 +25,35 @@ export default function() {
 }
 "#;
 
+const DEFAULT_TS_SCRIPT: &str = r#"// Fusillade Load Test Script (TypeScript)
+// Documentation: https://fusillade.io/docs
+
+interface Options {
+    workers: number;
+    duration: string;
+    thresholds: Record<string, string[]>;
+}
+
+export const options: Options = {
+    workers: 10,
+    duration: '30s',
+    thresholds: {
+        'http_req_duration': ['p95 < 500'],
+        'http_req_failed': ['rate < 0.01'],
+    },
+};
+
+export default function(): void {
+    const res = http.get('https://httpbin.org/get');
+
+    check(res, {
+        'status is 200': (r: any) => r.status === 200,
+    });
+
+    sleep(1);
+}
+"#;
+
 const DEFAULT_CONFIG: &str = r#"# Fusillade Configuration
 # Use with: fusillade run script.js --config fusillade.yaml
 
@@ -49,8 +78,9 @@ criteria:
 "#;
 
 /// Initialize a new Fusillade project with starter files.
-pub fn run_init(output: Option<&Path>, with_config: bool) -> Result<()> {
-    let script_path = output.unwrap_or(Path::new("test.js"));
+pub fn run_init(output: Option<&Path>, with_config: bool, typescript: bool) -> Result<()> {
+    let default_name = if typescript { "test.ts" } else { "test.js" };
+    let script_path = output.unwrap_or(Path::new(default_name));
 
     if script_path.exists() {
         anyhow::bail!(
@@ -66,7 +96,12 @@ pub fn run_init(output: Option<&Path>, with_config: bool) -> Result<()> {
         }
     }
 
-    fs::write(script_path, DEFAULT_SCRIPT)?;
+    let template = if typescript {
+        DEFAULT_TS_SCRIPT
+    } else {
+        DEFAULT_SCRIPT
+    };
+    fs::write(script_path, template)?;
     println!("✓ Created {}", script_path.display());
 
     if with_config {
@@ -93,7 +128,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let script_path = temp_dir.path().join("test.js");
 
-        run_init(Some(&script_path), false).unwrap();
+        run_init(Some(&script_path), false, false).unwrap();
 
         assert!(script_path.exists());
         let content = fs::read_to_string(&script_path).unwrap();
@@ -110,7 +145,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(temp_dir.path()).unwrap();
 
-        run_init(Some(&script_path), true).unwrap();
+        run_init(Some(&script_path), true, false).unwrap();
 
         std::env::set_current_dir(original_dir).unwrap();
 
@@ -125,7 +160,7 @@ mod tests {
 
         fs::write(&script_path, "existing content").unwrap();
 
-        let result = run_init(Some(&script_path), false);
+        let result = run_init(Some(&script_path), false, false);
         assert!(result.is_err());
     }
 
@@ -141,5 +176,40 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("workers:"));
         assert!(DEFAULT_CONFIG.contains("duration:"));
         assert!(DEFAULT_CONFIG.contains("criteria:"));
+    }
+
+    #[test]
+    fn test_run_init_typescript() {
+        let temp_dir = TempDir::new().unwrap();
+        let script_path = temp_dir.path().join("test.ts");
+
+        run_init(Some(&script_path), false, true).unwrap();
+
+        assert!(script_path.exists());
+        let content = fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains("interface Options"));
+        assert!(content.contains("export const options: Options"));
+        assert!(content.contains("export default function(): void"));
+    }
+
+    #[test]
+    fn test_default_ts_script_has_valid_content() {
+        assert!(DEFAULT_TS_SCRIPT.contains("interface Options"));
+        assert!(DEFAULT_TS_SCRIPT.contains("export const options: Options"));
+        assert!(DEFAULT_TS_SCRIPT.contains("export default function(): void"));
+        assert!(DEFAULT_TS_SCRIPT.contains("httpbin.org"));
+    }
+
+    #[test]
+    fn test_run_init_typescript_default_extension() {
+        // Verify the default name logic picks .ts for typescript mode
+        let temp_dir = TempDir::new().unwrap();
+        let script_path = temp_dir.path().join("test.ts");
+
+        run_init(Some(&script_path), false, true).unwrap();
+
+        assert!(script_path.exists());
+        let content = fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains("interface Options"));
     }
 }
