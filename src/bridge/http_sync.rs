@@ -234,17 +234,9 @@ fn execute_via_bridge(
     Ok(hyper_response_to_sync(response, timings))
 }
 
-/// Minimal raw HTTP/1.1 client using std::net::TcpStream (may-cooperative).
-/// Eliminates ureq overhead: no per-request URL parsing, no middleware, no connection pool locking.
+/// URL parser for HTTP URLs - used in test utilities.
+#[cfg(test)]
 mod raw_http {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::TcpStream;
-
-    /// Result of a raw HTTP request: (status_code, headers, body)
-    type RawResult = Result<(u16, HashMap<String, String>, Vec<u8>), String>;
-
     pub struct ParsedUrl {
         pub host_port: String,
         pub path: String,
@@ -265,154 +257,6 @@ mod raw_http {
             host_port,
             path: path.to_string(),
         })
-    }
-
-    pub struct RawConn {
-        stream: RefCell<Option<BufReader<TcpStream>>>,
-        host_port: RefCell<String>,
-    }
-
-    impl RawConn {
-        pub fn new() -> Self {
-            RawConn {
-                stream: RefCell::new(None),
-                host_port: RefCell::new(String::new()),
-            }
-        }
-
-        pub fn get(
-            &self,
-            parsed: &ParsedUrl,
-            extra_headers: &HashMap<String, String>,
-            discard_body: bool,
-        ) -> RawResult {
-            // Reconnect if host changed or connection dropped
-            let need_connect = {
-                let hp = self.host_port.borrow();
-                let stream = self.stream.borrow();
-                *hp != parsed.host_port || stream.is_none()
-            };
-
-            if need_connect {
-                match TcpStream::connect(&parsed.host_port) {
-                    Ok(tcp) => {
-                        tcp.set_nodelay(true).ok();
-                        *self.host_port.borrow_mut() = parsed.host_port.clone();
-                        *self.stream.borrow_mut() = Some(BufReader::new(tcp));
-                    }
-                    Err(e) => return Err(e.to_string()),
-                }
-            }
-
-            // Try the request; on failure, reconnect once and retry
-            match self.do_get(parsed, extra_headers, discard_body) {
-                Ok(r) => Ok(r),
-                Err(_) => {
-                    // Reconnect and retry
-                    match TcpStream::connect(&parsed.host_port) {
-                        Ok(tcp) => {
-                            tcp.set_nodelay(true).ok();
-                            *self.stream.borrow_mut() = Some(BufReader::new(tcp));
-                        }
-                        Err(e) => return Err(e.to_string()),
-                    }
-                    self.do_get(parsed, extra_headers, discard_body)
-                }
-            }
-        }
-
-        fn do_get(
-            &self,
-            parsed: &ParsedUrl,
-            extra_headers: &HashMap<String, String>,
-            discard_body: bool,
-        ) -> RawResult {
-            let mut stream_ref = self.stream.borrow_mut();
-            let reader = stream_ref.as_mut().ok_or("no connection")?;
-
-            // Write request
-            let inner = reader.get_mut();
-            let mut req = format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n",
-                parsed.path, parsed.host_port
-            );
-            for (k, v) in extra_headers {
-                req.push_str(k);
-                req.push_str(": ");
-                req.push_str(v);
-                req.push_str("\r\n");
-            }
-            req.push_str("\r\n");
-            inner.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
-
-            // Read status line
-            let mut line = String::new();
-            reader.read_line(&mut line).map_err(|e| e.to_string())?;
-            let status = line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(0);
-
-            // Read headers
-            let mut headers = HashMap::new();
-            let mut content_length: usize = 0;
-            let mut chunked = false;
-            loop {
-                line.clear();
-                reader.read_line(&mut line).map_err(|e| e.to_string())?;
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-                if let Some((k, v)) = line.trim_end().split_once(": ") {
-                    let k_lower = k.to_lowercase();
-                    if k_lower == "content-length" {
-                        content_length = v.parse().unwrap_or(0);
-                    } else if k_lower == "transfer-encoding" && v.contains("chunked") {
-                        chunked = true;
-                    }
-                    headers.insert(k.to_string(), v.to_string());
-                }
-            }
-
-            // Read body
-            let body = if chunked {
-                // Simple chunked reader
-                let mut body = Vec::new();
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line).map_err(|e| e.to_string())?;
-                    let chunk_size = usize::from_str_radix(line.trim(), 16).unwrap_or(0);
-                    if chunk_size == 0 {
-                        // Read trailing \r\n
-                        line.clear();
-                        let _ = reader.read_line(&mut line);
-                        break;
-                    }
-                    let mut chunk = vec![0u8; chunk_size];
-                    reader.read_exact(&mut chunk).map_err(|e| e.to_string())?;
-                    if !discard_body {
-                        body.extend_from_slice(&chunk);
-                    }
-                    // Read trailing \r\n
-                    line.clear();
-                    let _ = reader.read_line(&mut line);
-                }
-                body
-            } else if content_length > 0 {
-                let mut body = vec![0u8; content_length];
-                reader.read_exact(&mut body).map_err(|e| e.to_string())?;
-                if discard_body {
-                    Vec::new()
-                } else {
-                    body
-                }
-            } else {
-                Vec::new()
-            };
-
-            Ok((status, headers, body))
-        }
     }
 }
 
@@ -461,7 +305,6 @@ pub fn register_sync_http(
     let tx_get = tx.clone();
     let sink_get = global_response_sink;
     let bridge_get = io_bridge.clone();
-    let raw_conn = raw_http::RawConn::new();
     http.set(
         "get",
         Function::new(
@@ -557,204 +400,114 @@ pub fn register_sync_http(
 
                 let start = Instant::now();
 
-                // Use raw TCP for http:// URLs (fast path), fall back to ureq for https://
-                let parsed = raw_http::parse_url(&url_str);
-                let use_raw = parsed.is_some() && url_str.starts_with("http://");
-
-                if use_raw {
-                    let parsed = parsed.unwrap();
-                    match raw_conn.get(&parsed, &custom_headers, sink_get) {
-                        Ok((status, headers, body)) => {
-                            let duration = start.elapsed();
-                            let timings = RequestTimings {
-                                duration,
-                                waiting: duration,
-                                ..Default::default()
-                            };
-
-                            let metric_name: Cow<str> = match &name_tag {
-                                Some(n) => Cow::Borrowed(n.as_str()),
-                                None => Cow::Borrowed(&url_str),
-                            };
-
-                            let _ = tx.send(Metric::Request {
-                                name: format!(
-                                    "{}{}",
-                                    crate::bridge::group::get_current_group_prefix(),
-                                    metric_name
-                                ),
-                                timings,
-                                status,
-                                error: None,
-                                tags,
-                            });
-
-                            let set_cookie_headers = headers
-                                .iter()
-                                .filter(|(k, _)| k.to_lowercase() == "set-cookie")
-                                .map(|(_, v)| v.clone())
-                                .collect();
-
-                            Ok(SyncHttpResponse {
-                                status,
-                                status_text: status_text_for_code(status),
-                                body,
-                                headers,
-                                timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers,
-                                error: None,
-                                error_code: None,
-                            })
-                        }
-                        Err(e) => {
-                            let duration = start.elapsed();
-                            let timings = RequestTimings {
-                                duration,
-                                ..Default::default()
-                            };
-
-                            let metric_name: Cow<str> = match &name_tag {
-                                Some(n) => Cow::Borrowed(n.as_str()),
-                                None => Cow::Borrowed(&url_str),
-                            };
-
-                            let (error_type, error_code) = categorize_error(&e);
-                            let _ = tx.send(Metric::Request {
-                                name: format!(
-                                    "{}{}",
-                                    crate::bridge::group::get_current_group_prefix(),
-                                    metric_name
-                                ),
-                                timings,
-                                status: 0,
-                                error: Some(e.clone()),
-                                tags,
-                            });
-
-                            Ok(SyncHttpResponse {
-                                status: 0,
-                                status_text: status_text_for_code(0),
-                                body: e.into_bytes(),
-                                headers: HashMap::new(),
-                                timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers: Vec::new(),
-                                error: Some(error_type),
-                                error_code: Some(error_code),
-                            })
-                        }
+                // Use ureq agent with connection pooling for all requests
+                let result = AGENT.with(|agent| {
+                    let mut req = agent.get(&url_str);
+                    for (k, v) in &custom_headers {
+                        req = req.set(k, v);
                     }
-                } else {
-                    // Fallback to ureq for https:// and other schemes
-                    let result = AGENT.with(|agent| {
-                        let mut req = agent.get(&url_str);
-                        for (k, v) in &custom_headers {
-                            req = req.set(k, v);
-                        }
-                        req.call()
-                    });
+                    req.call()
+                });
 
-                    let waiting = start.elapsed();
+                let waiting = start.elapsed();
 
-                    match result {
-                        Ok(response) => {
-                            let status = response.status();
-                            let mut headers = HashMap::new();
-                            let mut set_cookie_headers = Vec::new();
-                            for name in response.headers_names() {
-                                if let Some(val) = response.header(&name) {
-                                    if name.to_lowercase() == "set-cookie" {
-                                        set_cookie_headers.push(val.to_string());
-                                    }
-                                    headers.insert(name, val.to_string());
+                match result {
+                    Ok(response) => {
+                        let status = response.status();
+                        let mut headers = HashMap::new();
+                        let mut set_cookie_headers = Vec::new();
+                        for name in response.headers_names() {
+                            if let Some(val) = response.header(&name) {
+                                if name.to_lowercase() == "set-cookie" {
+                                    set_cookie_headers.push(val.to_string());
                                 }
+                                headers.insert(name, val.to_string());
                             }
-
-                            let body_start = Instant::now();
-                            let body = if sink_get {
-                                let _ = response.into_string();
-                                Vec::new()
-                            } else {
-                                response.into_string().unwrap_or_default().into_bytes()
-                            };
-                            let receiving = body_start.elapsed();
-                            let duration = start.elapsed();
-
-                            let timings = RequestTimings {
-                                duration,
-                                waiting,
-                                receiving,
-                                ..Default::default()
-                            };
-
-                            let metric_name: Cow<str> = match &name_tag {
-                                Some(n) => Cow::Borrowed(n.as_str()),
-                                None => Cow::Borrowed(&url_str),
-                            };
-
-                            let _ = tx.send(Metric::Request {
-                                name: format!(
-                                    "{}{}",
-                                    crate::bridge::group::get_current_group_prefix(),
-                                    metric_name
-                                ),
-                                timings,
-                                status,
-                                error: None,
-                                tags,
-                            });
-
-                            Ok(SyncHttpResponse {
-                                status,
-                                status_text: status_text_for_code(status),
-                                body,
-                                headers,
-                                timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers,
-                                error: None,
-                                error_code: None,
-                            })
                         }
-                        Err(e) => {
-                            let duration = start.elapsed();
-                            let timings = RequestTimings {
-                                duration,
-                                ..Default::default()
-                            };
 
-                            let metric_name: Cow<str> = match &name_tag {
-                                Some(n) => Cow::Borrowed(n.as_str()),
-                                None => Cow::Borrowed(&url_str),
-                            };
+                        let body_start = Instant::now();
+                        let body = if sink_get {
+                            let _ = response.into_string();
+                            Vec::new()
+                        } else {
+                            response.into_string().unwrap_or_default().into_bytes()
+                        };
+                        let receiving = body_start.elapsed();
+                        let duration = start.elapsed();
 
-                            let error_msg = e.to_string();
-                            let (error_type, error_code) = categorize_error(&error_msg);
-                            let _ = tx.send(Metric::Request {
-                                name: format!(
-                                    "{}{}",
-                                    crate::bridge::group::get_current_group_prefix(),
-                                    metric_name
-                                ),
-                                timings,
-                                status: 0,
-                                error: Some(error_msg.clone()),
-                                tags,
-                            });
+                        let timings = RequestTimings {
+                            duration,
+                            waiting,
+                            receiving,
+                            ..Default::default()
+                        };
 
-                            Ok(SyncHttpResponse {
-                                status: 0,
-                                status_text: status_text_for_code(0),
-                                body: error_msg.into_bytes(),
-                                headers: HashMap::new(),
-                                timings,
-                                proto: "h1".to_string(),
-                                set_cookie_headers: Vec::new(),
-                                error: Some(error_type),
-                                error_code: Some(error_code),
-                            })
-                        }
+                        let metric_name: Cow<str> = match &name_tag {
+                            Some(n) => Cow::Borrowed(n.as_str()),
+                            None => Cow::Borrowed(&url_str),
+                        };
+
+                        let _ = tx.send(Metric::Request {
+                            name: format!(
+                                "{}{}",
+                                crate::bridge::group::get_current_group_prefix(),
+                                metric_name
+                            ),
+                            timings,
+                            status,
+                            error: None,
+                            tags,
+                        });
+
+                        Ok(SyncHttpResponse {
+                            status,
+                            status_text: status_text_for_code(status),
+                            body,
+                            headers,
+                            timings,
+                            proto: "h1".to_string(),
+                            set_cookie_headers,
+                            error: None,
+                            error_code: None,
+                        })
+                    }
+                    Err(e) => {
+                        let duration = start.elapsed();
+                        let timings = RequestTimings {
+                            duration,
+                            ..Default::default()
+                        };
+
+                        let metric_name: Cow<str> = match &name_tag {
+                            Some(n) => Cow::Borrowed(n.as_str()),
+                            None => Cow::Borrowed(&url_str),
+                        };
+
+                        let error_msg = e.to_string();
+                        let (error_type, error_code) = categorize_error(&error_msg);
+                        let _ = tx.send(Metric::Request {
+                            name: format!(
+                                "{}{}",
+                                crate::bridge::group::get_current_group_prefix(),
+                                metric_name
+                            ),
+                            timings,
+                            status: 0,
+                            error: Some(error_msg.clone()),
+                            tags,
+                        });
+
+                        Ok(SyncHttpResponse {
+                            status: 0,
+                            status_text: status_text_for_code(0),
+                            body: error_msg.into_bytes(),
+                            headers: HashMap::new(),
+                            timings,
+                            proto: "h1".to_string(),
+                            set_cookie_headers: Vec::new(),
+                            error: Some(error_type),
+                            error_code: Some(error_code),
+                        })
                     }
                 }
             },
