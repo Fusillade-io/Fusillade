@@ -221,11 +221,13 @@ impl StatsdExporter {
             self.prefix, report.total_data_received
         ));
 
-        // Checks metrics
+        // Checks metrics — tuple is (total, passes), matching stats/mod.rs convention
         let (checks_passed, checks_failed): (usize, usize) = report
             .checks
             .values()
-            .fold((0, 0), |(p, f), (passed, failed)| (p + passed, f + failed));
+            .fold((0, 0), |(p, f), (total, passes)| {
+                (p + passes, f + (total - passes))
+            });
 
         if checks_passed > 0 || checks_failed > 0 {
             metrics.push(format!("{}.checks.passed:{}|c", self.prefix, checks_passed));
@@ -342,7 +344,8 @@ mod tests {
                 rate: 0.9,
             },
         );
-        report.checks.insert("status_ok".to_string(), (95, 5));
+        // Checks tuple: (total, passes) — 100 total checks, 95 passed
+        report.checks.insert("status_ok".to_string(), (100, 95));
 
         report
     }
@@ -456,6 +459,55 @@ mod tests {
         assert!(metrics
             .iter()
             .any(|m| m.contains("fusillade.checks.failed:5|c")));
+    }
+
+    #[test]
+    fn test_checks_tuple_semantics() {
+        // Verify (total, passes) is correctly interpreted
+        let mut report = ReportStats::default();
+        report.checks.insert("my_check".to_string(), (100, 95));
+
+        let exporter = StatsdExporter::new("localhost");
+        let metrics = exporter.build_metrics(&report);
+
+        assert!(metrics
+            .iter()
+            .any(|m| m.contains("fusillade.checks.passed:95|c")));
+        assert!(metrics
+            .iter()
+            .any(|m| m.contains("fusillade.checks.failed:5|c")));
+    }
+
+    #[test]
+    fn test_checks_all_passed() {
+        let mut report = ReportStats::default();
+        report.checks.insert("all_pass".to_string(), (50, 50));
+
+        let exporter = StatsdExporter::new("localhost");
+        let metrics = exporter.build_metrics(&report);
+
+        assert!(metrics
+            .iter()
+            .any(|m| m.contains("fusillade.checks.passed:50|c")));
+        assert!(metrics
+            .iter()
+            .any(|m| m.contains("fusillade.checks.failed:0|c")));
+    }
+
+    #[test]
+    fn test_checks_all_failed() {
+        let mut report = ReportStats::default();
+        report.checks.insert("all_fail".to_string(), (50, 0));
+
+        let exporter = StatsdExporter::new("localhost");
+        let metrics = exporter.build_metrics(&report);
+
+        assert!(metrics
+            .iter()
+            .any(|m| m.contains("fusillade.checks.passed:0|c")));
+        assert!(metrics
+            .iter()
+            .any(|m| m.contains("fusillade.checks.failed:50|c")));
     }
 
     #[test]

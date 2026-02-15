@@ -2161,12 +2161,12 @@ pub fn register_sync_http(
         };
         globalThis.__http_callBeforeRequestHooks = function(req) {
             for (var i = 0; i < globalThis.__http_hooks.beforeRequest.length; i++) {
-                try { globalThis.__http_hooks.beforeRequest[i](req); } catch(e) {}
+                try { globalThis.__http_hooks.beforeRequest[i](req); } catch(e) { console.error('[Hook] beforeRequest error:', e); }
             }
         };
         globalThis.__http_callAfterResponseHooks = function(res) {
             for (var i = 0; i < globalThis.__http_hooks.afterResponse.length; i++) {
-                try { globalThis.__http_hooks.afterResponse[i](res); } catch(e) {}
+                try { globalThis.__http_hooks.afterResponse[i](res); } catch(e) { console.error('[Hook] afterResponse error:', e); }
             }
         };
     "#,

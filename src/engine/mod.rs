@@ -15,11 +15,21 @@ use rquickjs::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 use std::thread::JoinHandle;
 use tokio::time::{Duration, Instant};
+
+/// Counter for JS runtimes intentionally leaked via `std::mem::forget`.
+///
+/// rquickjs can trigger assertion failures during `Runtime::drop` when closures
+/// are stored in JS globals, because the drop order of pointers inside the
+/// QuickJS heap is not guaranteed. As a pragmatic workaround we call `run_gc()`
+/// and `drop(context)` to release as many resources as possible, then `forget`
+/// the Runtime to skip the problematic destructor. Each forgotten runtime leaks
+/// approximately `heap_size` bytes (default 256 KB).
+static LEAKED_RUNTIMES: AtomicUsize = AtomicUsize::new(0);
 
 /// Format a CaughtError with detailed message and stack trace (including line numbers)
 fn format_js_error(error: &CaughtError) -> String {
@@ -212,6 +222,7 @@ impl Engine {
         // (rquickjs can fail to clean up all objects due to closures stored in globals)
         runtime.run_gc();
         drop(context);
+        LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
         std::mem::forget(runtime);
         config
     }
@@ -472,6 +483,8 @@ impl Engine {
             // Configure may green thread scheduler with fixed stack size
             // 32KB works for 50K+ workers and complex scripts. Override via options.stack_size if needed.
             let may_stack_size = 32 * 1024;
+            // JS heap limit per worker (default 256KB). Override via options.heap_size.
+            let heap_size = config.heap_size.unwrap_or(256 * 1024);
             // Scale May workers proportionally to total workers
             // Each May thread can block on HTTP I/O, so we need many threads for high concurrency
             // Formula: 1 May worker per ~200 Fusillade workers, minimum of CPU count, max 128
@@ -523,7 +536,7 @@ impl Engine {
                         eprintln!("[Memory] Warning: {:.1}% used ({} available). Throttling worker spawns.",
                             info.usage_percent() * 100.0,
                             memory::format_bytes(info.available_bytes));
-                        throttle_flag.store(true, Ordering::Relaxed);
+                        throttle_flag.store(true, Ordering::Release);
                     },
                     move |info| {
                         // Critical threshold (95%): signal for worker reduction
@@ -532,7 +545,7 @@ impl Engine {
                             info.usage_percent() * 100.0,
                             memory::format_bytes(info.available_bytes)
                         );
-                        critical_flag.store(true, Ordering::Relaxed);
+                        critical_flag.store(true, Ordering::Release);
                     },
                 ))
             } else {
@@ -658,14 +671,26 @@ impl Engine {
                                         may::coroutine::Builder::new()
                                             .stack_size(stack_sz)
                                             .spawn(move || {
-                                                let (runtime, context) = Self::create_runtime().unwrap();
-                                                runtime.set_memory_limit(256 * 1024);
+                                                let (runtime, context) = match Self::create_runtime() {
+                                                    Ok(rc) => rc,
+                                                    Err(e) => {
+                                                        eprintln!("[Worker {}] Failed to create JS runtime: {}", worker_id, e);
+                                                        return;
+                                                    }
+                                                };
+                                                runtime.set_memory_limit(heap_size);
                                                 context.with(|ctx| {
-                                                    crate::bridge::register_globals_sync(
+                                                    if let Err(e) = crate::bridge::register_globals_sync(
                                                         &ctx, tx.clone(), client, shared_data, worker_id,
                                                         agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge
-                                                    ).unwrap();
-                                                    ctx.globals().set("__SCENARIO", scenario_name.clone()).unwrap();
+                                                    ) {
+                                                        eprintln!("[Worker {}] Failed to register globals: {}", worker_id, e);
+                                                        return;
+                                                    }
+                                                    if let Err(e) = ctx.globals().set("__SCENARIO", scenario_name.clone()) {
+                                                        eprintln!("[Worker {}] Failed to set scenario: {}", worker_id, e);
+                                                        return;
+                                                    }
                                                     crate::bridge::set_current_scenario(scenario_name.clone());
 
                                                     let module = match Module::declare(
@@ -779,7 +804,8 @@ impl Engine {
                                                 });
                                                 runtime.run_gc();
                                                 std::mem::drop(context);
-                                                std::mem::forget(runtime);
+                                                LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
+        std::mem::forget(runtime);
                                             })
                                     };
                                     worker_handles
@@ -948,11 +974,16 @@ impl Engine {
                                         may::coroutine::Builder::new()
                                             .stack_size(stack_sz)
                                             .spawn(move || {
-                                                let (runtime, context) =
-                                                    Self::create_runtime().unwrap();
-                                                runtime.set_memory_limit(256 * 1024);
+                                                let (runtime, context) = match Self::create_runtime() {
+                                                    Ok(rc) => rc,
+                                                    Err(e) => {
+                                                        eprintln!("[Worker {}] Failed to create JS runtime: {}", worker_id, e);
+                                                        return;
+                                                    }
+                                                };
+                                                runtime.set_memory_limit(heap_size);
                                                 context.with(|ctx| {
-                                                    crate::bridge::register_globals_sync(
+                                                    if let Err(e) = crate::bridge::register_globals_sync(
                                                         &ctx,
                                                         tx.clone(),
                                                         client,
@@ -964,11 +995,15 @@ impl Engine {
                                                         drop_rate,
                                                         response_sink,
                                                         io_bridge,
-                                                    )
-                                                    .unwrap();
-                                                    ctx.globals()
-                                                        .set("__SCENARIO", scenario_name.clone())
-                                                        .unwrap();
+                                                    ) {
+                                                        eprintln!("[Worker {}] Failed to register globals: {}", worker_id, e);
+                                                        return;
+                                                    }
+                                                    if let Err(e) = ctx.globals()
+                                                        .set("__SCENARIO", scenario_name.clone()) {
+                                                        eprintln!("[Worker {}] Failed to set scenario: {}", worker_id, e);
+                                                        return;
+                                                    }
                                                     crate::bridge::set_current_scenario(scenario_name.clone());
 
                                                     let module = match Module::declare(
@@ -1135,7 +1170,8 @@ impl Engine {
                                                 });
                                                 runtime.run_gc();
                                                 std::mem::drop(context);
-                                                std::mem::forget(runtime);
+                                                LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
+        std::mem::forget(runtime);
                                             })
                                     };
 
@@ -1297,13 +1333,25 @@ impl Engine {
                                         may::coroutine::Builder::new()
                                 .stack_size(stack_sz)
                                 .spawn(move || {
-                                let (runtime, context) = Self::create_runtime().unwrap();
-                                runtime.set_memory_limit(256 * 1024); // 256KB per worker max JS heap
+                                let (runtime, context) = match Self::create_runtime() {
+                                    Ok(rc) => rc,
+                                    Err(e) => {
+                                        eprintln!("[Worker {}] Failed to create JS runtime: {}", worker_id, e);
+                                        return;
+                                    }
+                                };
+                                runtime.set_memory_limit(heap_size);
                                 context.with(|ctx| {
                                     // Use standard HTTP path with hyper/Tokio (better connection pooling)
-                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge).unwrap();
+                                    if let Err(e) = crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge) {
+                                        eprintln!("[Worker {}] Failed to register globals: {}", worker_id, e);
+                                        return;
+                                    }
                                     // Set scenario name global for automatic tagging
-                                    ctx.globals().set("__SCENARIO", scenario_name.clone()).unwrap();
+                                    if let Err(e) = ctx.globals().set("__SCENARIO", scenario_name.clone()) {
+                                        eprintln!("[Worker {}] Failed to set scenario: {}", worker_id, e);
+                                        return;
+                                    }
                                     crate::bridge::set_current_scenario(scenario_name.clone());
 
                                     // Module declaration with better error handling
@@ -1435,7 +1483,8 @@ impl Engine {
                                                 // Cleanup: run GC and forget runtime to prevent assertion failures
                                                 runtime.run_gc();
                                                 std::mem::drop(context);
-                                                std::mem::forget(runtime);
+                                                LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
+        std::mem::forget(runtime);
                                             })
                                     };
                                     active_workers.push((
@@ -1633,12 +1682,12 @@ impl Engine {
 
                     if target_workers > active_legacy_workers.len() {
                         // Memory-safe mode: Skip spawning if memory is throttled
-                        if memory_throttle.load(Ordering::Relaxed) {
+                        if memory_throttle.load(Ordering::Acquire) {
                             // Check if memory has recovered (below warning threshold)
                             let info = memory::MemoryInfo::current();
                             if info.usage_percent() < memory::WARN_THRESHOLD_PERCENT {
-                                memory_throttle.store(false, Ordering::Relaxed);
-                                memory_critical.store(false, Ordering::Relaxed);
+                                memory_throttle.store(false, Ordering::Release);
+                                memory_critical.store(false, Ordering::Release);
                                 eprintln!(
                                     "[Memory] Recovered: {:.1}% used. Resuming worker spawning.",
                                     info.usage_percent() * 100.0
@@ -1679,12 +1728,21 @@ impl Engine {
                                 may::coroutine::Builder::new()
                                 .stack_size(stack_sz)
                                 .spawn(move || {
-                                let (runtime, context) = Self::create_runtime().unwrap();
-                                runtime.set_memory_limit(256 * 1024); // 256KB per worker max JS heap
+                                let (runtime, context) = match Self::create_runtime() {
+                                    Ok(rc) => rc,
+                                    Err(e) => {
+                                        eprintln!("[Worker {}] Failed to create JS runtime: {}", worker_id, e);
+                                        return;
+                                    }
+                                };
+                                runtime.set_memory_limit(heap_size);
                                 context.with(|ctx| {
                                     // Pass std::sync::mpsc::Sender directly - no bridge thread needed!
                                     // Clone tx since we need it for both bridge and iteration metrics
-                                    crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge).unwrap();
+                                    if let Err(e) = crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge) {
+                                        eprintln!("[Worker {}] Failed to register globals: {}", worker_id, e);
+                                        return;
+                                    }
 
                                     // Module declaration with better error handling
                                     let module = match Module::declare(ctx.clone(), script_path.to_string_lossy().to_string(), script_content).catch(&ctx) {
@@ -1799,7 +1857,8 @@ impl Engine {
                                 // Cleanup: run GC and forget runtime to prevent assertion failures
                                 runtime.run_gc();
                                 std::mem::drop(context);
-                                std::mem::forget(runtime);
+                                LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
+        std::mem::forget(runtime);
                             })
                             };
                             active_legacy_workers
@@ -2072,6 +2131,17 @@ impl Engine {
                 }
             }
 
+            // Report leaked JS runtimes (see LEAKED_RUNTIMES doc comment for rationale)
+            let leaked = LEAKED_RUNTIMES.swap(0, Ordering::Relaxed);
+            if leaked > 0 {
+                let approx_bytes = leaked * heap_size;
+                let approx_mb = approx_bytes as f64 / 1_048_576.0;
+                eprintln!(
+                    "Note: {} JS runtime(s) were leaked to prevent shutdown crashes (~{:.1} MB)",
+                    leaked, approx_mb
+                );
+            }
+
             Ok(report)
         });
 
@@ -2208,6 +2278,7 @@ impl Engine {
         // Cleanup: run GC and forget runtime to prevent assertion failures
         runtime.run_gc();
         drop(context);
+        LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
         std::mem::forget(runtime);
         result
     }
@@ -2248,6 +2319,7 @@ impl Engine {
         // Cleanup: run GC and forget runtime to prevent assertion failures
         runtime.run_gc();
         drop(context);
+        LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
         std::mem::forget(runtime);
         Ok(())
     }
@@ -2313,6 +2385,7 @@ impl Engine {
         // Cleanup: run GC and forget runtime to prevent assertion failures
         runtime.run_gc();
         drop(context);
+        LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
         std::mem::forget(runtime);
         Ok(())
     }
@@ -2429,6 +2502,7 @@ impl Engine {
         // Cleanup: run GC and forget runtime to prevent assertion failures
         runtime.run_gc();
         drop(context);
+        LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
         std::mem::forget(runtime);
         Ok(())
     }
@@ -2715,5 +2789,22 @@ export default function(): void {}
         let js_source = "export const options = { workers: 1 };".to_string();
         let result = typescript::maybe_transpile(js_source.clone(), "test.js").unwrap();
         assert_eq!(result, js_source, "JS should pass through unchanged");
+    }
+
+    #[test]
+    fn test_leaked_runtimes_counter() {
+        // Reset counter
+        LEAKED_RUNTIMES.store(0, Ordering::Relaxed);
+        assert_eq!(LEAKED_RUNTIMES.load(Ordering::Relaxed), 0);
+
+        LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
+        LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
+        LEAKED_RUNTIMES.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(LEAKED_RUNTIMES.load(Ordering::Relaxed), 3);
+
+        // swap returns old value and resets
+        let leaked = LEAKED_RUNTIMES.swap(0, Ordering::Relaxed);
+        assert_eq!(leaked, 3);
+        assert_eq!(LEAKED_RUNTIMES.load(Ordering::Relaxed), 0);
     }
 }

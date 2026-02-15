@@ -9,7 +9,7 @@ use tokio::runtime::Runtime;
 use fusillade::engine::distributed::{ControllerServer, WorkerServer};
 use fusillade::engine::typescript::maybe_transpile;
 use fusillade::engine::Engine;
-use fusillade::parse_duration_str;
+use fusillade::{parse_duration_str, safe_truncate};
 
 /// Parse drop probability with range validation (0.0-1.0)
 fn parse_drop_probability(s: &str) -> Result<f64, String> {
@@ -81,7 +81,13 @@ fn run_cloud_test(
 
     match response {
         Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp.json().unwrap_or_default();
+            let body: serde_json::Value = match resp.json() {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Warning: Failed to parse cloud response: {}", e);
+                    serde_json::Value::Object(Default::default())
+                }
+            };
             let test_id = body
                 .get("test_id")
                 .and_then(|v| v.as_str())
@@ -213,8 +219,8 @@ enum Commands {
         /// Skip TLS certificate verification (insecure, use for self-signed certs)
         #[arg(long)]
         insecure: bool,
-        /// Maximum number of HTTP redirects to follow (0 to disable)
-        #[arg(long, default_value = "10")]
+        /// Maximum number of HTTP redirects to follow (0 to disable, max 100)
+        #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(0..=100))]
         max_redirects: u32,
         /// Default User-Agent header for HTTP requests
         #[arg(long)]
@@ -866,9 +872,12 @@ fn main() -> Result<()> {
                 if atty::is(atty::Stream::Stdin) {
                     print!("Proceed? [y/N] ");
                     use std::io::Write;
-                    std::io::stdout().flush().unwrap();
+                    let _ = std::io::stdout().flush();
                     let mut input = String::new();
-                    std::io::stdin().read_line(&mut input).unwrap();
+                    if std::io::stdin().read_line(&mut input).is_err() {
+                        println!("Aborted (could not read input).");
+                        return Ok(());
+                    }
                     if !input.trim().eq_ignore_ascii_case("y") {
                         println!("Aborted.");
                         return Ok(());
@@ -1164,10 +1173,10 @@ fn main() -> Result<()> {
                             let status = response.status();
                             let body = response.text().unwrap_or_default();
                             println!("  Status: {}", status);
-                            if body.len() < 500 {
+                            if body.chars().count() <= 500 {
                                 println!("  Body: {}", body);
                             } else {
-                                println!("  Body: {}... (truncated)", &body[..500]);
+                                println!("  Body: {}... (truncated)", safe_truncate(&body, 500));
                             }
                         }
                         Err(e) => {
@@ -1210,10 +1219,10 @@ fn main() -> Result<()> {
                             let status = response.status();
                             let body = response.text().unwrap_or_default();
                             println!("  Status: {}", status);
-                            if body.len() < 500 {
+                            if body.chars().count() <= 500 {
                                 println!("  Body: {}", body);
                             } else {
-                                println!("  Body: {}... (truncated)", &body[..500]);
+                                println!("  Body: {}... (truncated)", safe_truncate(&body, 500));
                             }
                         }
                         Err(e) => {

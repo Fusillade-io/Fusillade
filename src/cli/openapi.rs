@@ -206,8 +206,8 @@ fn resolve_path_params(path: &str, operation: &Operation) -> String {
                         other => other.to_string(),
                     })
                     .unwrap_or_else(|| param.name.clone());
-                let replacement = format!("${{{}}}", value);
-                resolved = resolved.replace(&placeholder, &replacement);
+                // Replace {param} with the literal example value
+                resolved = resolved.replace(&placeholder, &value);
             }
         }
     }
@@ -321,7 +321,7 @@ paths:
           example: 42
 "#;
         let result = convert_from_yaml_string(yaml).unwrap();
-        assert!(result.contains("${42}"));
+        assert!(result.contains("/users/42"));
         assert!(!result.contains("{id}"));
     }
 

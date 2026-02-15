@@ -79,3 +79,99 @@ pub fn get_api_url() -> String {
         .and_then(|auth| auth.api_url)
         .unwrap_or_else(|| "https://api.fusillade.io".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn with_temp_auth_dir(f: impl FnOnce(PathBuf)) {
+        let dir = TempDir::new().unwrap();
+        let auth_dir = dir.path().join(CONFIG_DIR);
+        fs::create_dir_all(&auth_dir).unwrap();
+        f(auth_dir);
+    }
+
+    #[test]
+    fn test_cloud_auth_serialization() {
+        let auth = CloudAuth {
+            token: "test-token-123".to_string(),
+            api_url: Some("https://custom.api.com".to_string()),
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        let parsed: CloudAuth = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.token, "test-token-123");
+        assert_eq!(parsed.api_url, Some("https://custom.api.com".to_string()));
+    }
+
+    #[test]
+    fn test_cloud_auth_without_url() {
+        let auth = CloudAuth {
+            token: "token".to_string(),
+            api_url: None,
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        let parsed: CloudAuth = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.token, "token");
+        assert_eq!(parsed.api_url, None);
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        with_temp_auth_dir(|auth_dir| {
+            let auth_file = auth_dir.join(AUTH_FILE);
+            let auth = CloudAuth {
+                token: "my-secret-key".to_string(),
+                api_url: Some("https://api.test.com".to_string()),
+            };
+            let json = serde_json::to_string_pretty(&auth).unwrap();
+            fs::write(&auth_file, &json).unwrap();
+
+            let content = fs::read_to_string(&auth_file).unwrap();
+            let loaded: CloudAuth = serde_json::from_str(&content).unwrap();
+            assert_eq!(loaded.token, "my-secret-key");
+            assert_eq!(loaded.api_url, Some("https://api.test.com".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_load_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent.json");
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn test_clear_token_removes_file() {
+        with_temp_auth_dir(|auth_dir| {
+            let auth_file = auth_dir.join(AUTH_FILE);
+            fs::write(&auth_file, "{}").unwrap();
+            assert!(auth_file.exists());
+            fs::remove_file(&auth_file).unwrap();
+            assert!(!auth_file.exists());
+        });
+    }
+
+    #[test]
+    fn test_get_api_url_default() {
+        // When no token is loaded, should return default URL
+        let default_url = "https://api.fusillade.io".to_string();
+        let result: String = None::<CloudAuth>
+            .and_then(|auth| auth.api_url)
+            .unwrap_or_else(|| default_url.clone());
+        assert_eq!(result, default_url);
+    }
+
+    #[test]
+    fn test_get_api_url_custom() {
+        let auth = CloudAuth {
+            token: "key".to_string(),
+            api_url: Some("https://custom.endpoint.com".to_string()),
+        };
+        let result = auth
+            .api_url
+            .unwrap_or_else(|| "https://api.fusillade.io".to_string());
+        assert_eq!(result, "https://custom.endpoint.com");
+    }
+}

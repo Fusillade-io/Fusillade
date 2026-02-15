@@ -60,6 +60,14 @@ message Metric {
     uint32 status = 3;
     optional string error = 4;
     uint64 timestamp = 5;
+    uint64 blocked_ns = 6;
+    uint64 connecting_ns = 7;
+    uint64 tls_ns = 8;
+    uint64 sending_ns = 9;
+    uint64 waiting_ns = 10;
+    uint64 receiving_ns = 11;
+    uint64 response_size = 12;
+    uint64 request_size = 13;
 }
 
 message Empty {}

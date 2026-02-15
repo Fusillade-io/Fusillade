@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
-struct RecordedRequest {
+pub(crate) struct RecordedRequest {
     method: String,
     url: String,
     headers: std::collections::HashMap<String, String>,
@@ -67,7 +67,17 @@ async fn handle_proxy(State(state): State<RecorderState>, req: Request) -> Respo
 
     let mut headers = std::collections::HashMap::new();
     for (name, value) in &parts.headers {
-        headers.insert(name.to_string(), value.to_str().unwrap_or("").to_string());
+        match value.to_str() {
+            Ok(v) => {
+                headers.insert(name.to_string(), v.to_string());
+            }
+            Err(_) => {
+                eprintln!(
+                    "[Recorder] Warning: non-UTF-8 header value for '{}', skipping",
+                    name
+                );
+            }
+        }
     }
 
     let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
@@ -125,7 +135,7 @@ async fn handle_proxy(State(state): State<RecorderState>, req: Request) -> Respo
     }
 }
 
-fn save_flow(output: &PathBuf, requests: &[RecordedRequest]) -> Result<()> {
+pub(crate) fn save_flow(output: &PathBuf, requests: &[RecordedRequest]) -> Result<()> {
     let mut js = String::new();
     // Fusillade provides http, check, sleep as globals
 
@@ -163,4 +173,111 @@ fn save_flow(output: &PathBuf, requests: &[RecordedRequest]) -> Result<()> {
 
     std::fs::write(output, js)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn make_request(method: &str, url: &str) -> RecordedRequest {
+        RecordedRequest {
+            method: method.to_string(),
+            url: url.to_string(),
+            headers: std::collections::HashMap::new(),
+            body: None,
+        }
+    }
+
+    #[test]
+    fn test_save_flow_basic() {
+        let tmp = NamedTempFile::new().unwrap();
+        let requests = vec![make_request("GET", "https://api.example.com/users")];
+        save_flow(&tmp.path().to_path_buf(), &requests).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("export const options"));
+        assert!(content.contains("export default function()"));
+        assert!(content.contains("method: 'GET'"));
+        assert!(content.contains("url: 'https://api.example.com/users'"));
+    }
+
+    #[test]
+    fn test_save_flow_multiple_requests() {
+        let tmp = NamedTempFile::new().unwrap();
+        let requests = vec![
+            make_request("GET", "https://api.example.com/users"),
+            make_request("POST", "https://api.example.com/users"),
+        ];
+        save_flow(&tmp.path().to_path_buf(), &requests).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(content.matches("http.request(").count(), 2);
+        assert!(content.contains("sleep(1)"));
+    }
+
+    #[test]
+    fn test_save_flow_post_with_body() {
+        let tmp = NamedTempFile::new().unwrap();
+        let requests = vec![RecordedRequest {
+            method: "POST".to_string(),
+            url: "https://api.example.com/users".to_string(),
+            headers: std::collections::HashMap::new(),
+            body: Some(r#"{"name":"test"}"#.to_string()),
+        }];
+        save_flow(&tmp.path().to_path_buf(), &requests).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("body:"));
+        assert!(content.contains("name"));
+    }
+
+    #[test]
+    fn test_save_flow_custom_headers() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer token123".to_string());
+        headers.insert("x-custom".to_string(), "value".to_string());
+
+        let requests = vec![RecordedRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com/data".to_string(),
+            headers,
+            body: None,
+        }];
+        save_flow(&tmp.path().to_path_buf(), &requests).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("authorization"));
+        assert!(content.contains("Bearer token123"));
+    }
+
+    #[test]
+    fn test_save_flow_empty() {
+        let tmp = NamedTempFile::new().unwrap();
+        save_flow(&tmp.path().to_path_buf(), &[]).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("export default function()"));
+        assert!(!content.contains("http.request("));
+    }
+
+    #[test]
+    fn test_save_flow_escapes_special_chars() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-test".to_string(), "it's a \"test\"".to_string());
+
+        let requests = vec![RecordedRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com".to_string(),
+            headers,
+            body: None,
+        }];
+        save_flow(&tmp.path().to_path_buf(), &requests).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        // Single quotes in header values should be escaped
+        assert!(content.contains("it\\'s"));
+    }
 }

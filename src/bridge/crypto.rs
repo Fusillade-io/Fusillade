@@ -119,12 +119,15 @@ pub fn register_sync<'js>(ctx: &Ctx<'js>) -> Result<()> {
         "hmac",
         Function::new(
             ctx.clone(),
-            move |algorithm: String, key: String, data: String| -> String {
+            move |algorithm: String, key: String, data: String| -> Result<String> {
                 match algorithm.as_str() {
-                    "md5" => hmac_md5(key.as_bytes(), data.as_bytes()),
-                    "sha1" => hmac_sha1(key.as_bytes(), data.as_bytes()),
-                    "sha256" => hmac_sha256(key.as_bytes(), data.as_bytes()),
-                    _ => "unsupported algorithm".to_string(),
+                    "md5" => Ok(hmac_md5(key.as_bytes(), data.as_bytes())),
+                    "sha1" => Ok(hmac_sha1(key.as_bytes(), data.as_bytes())),
+                    "sha256" => Ok(hmac_sha256(key.as_bytes(), data.as_bytes())),
+                    _ => Err(rquickjs::Error::new_from_js(
+                        "Unsupported HMAC algorithm (supported: md5, sha1, sha256)",
+                        "Error",
+                    )),
                 }
             },
         ),

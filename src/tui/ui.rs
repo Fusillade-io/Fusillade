@@ -335,3 +335,92 @@ pub(crate) fn truncate_name(name: &str, max: usize) -> String {
         format!("{}...", truncated)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_duration_zero() {
+        assert_eq!(format_duration(std::time::Duration::ZERO), "00:00");
+    }
+
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(format_duration(std::time::Duration::from_secs(90)), "01:30");
+    }
+
+    #[test]
+    fn test_format_duration_minutes() {
+        assert_eq!(
+            format_duration(std::time::Duration::from_secs(3661)),
+            "61:01"
+        );
+    }
+
+    #[test]
+    fn test_format_ms_sub_millisecond() {
+        assert_eq!(format_ms(0.5), "0.50ms");
+    }
+
+    #[test]
+    fn test_format_ms_milliseconds() {
+        assert_eq!(format_ms(45.3), "45.3ms");
+    }
+
+    #[test]
+    fn test_format_ms_seconds() {
+        assert_eq!(format_ms(1500.0), "1.5s");
+    }
+
+    #[test]
+    fn test_format_ms_zero() {
+        assert_eq!(format_ms(0.0), "0.00ms");
+    }
+
+    #[test]
+    fn test_format_number_small() {
+        assert_eq!(format_number(42), "42");
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn test_format_number_thousands() {
+        assert_eq!(format_number(1500), "1.5K");
+        assert_eq!(format_number(10000), "10.0K");
+    }
+
+    #[test]
+    fn test_format_number_millions() {
+        assert_eq!(format_number(1_500_000), "1.5M");
+        assert_eq!(format_number(10_000_000), "10.0M");
+    }
+
+    #[test]
+    fn test_format_number_zero() {
+        assert_eq!(format_number(0), "0");
+    }
+
+    #[test]
+    fn test_truncate_name_short() {
+        assert_eq!(truncate_name("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_name_exact() {
+        assert_eq!(truncate_name("1234567890", 10), "1234567890");
+    }
+
+    #[test]
+    fn test_truncate_name_long() {
+        assert_eq!(
+            truncate_name("GET /api/v1/users/profile", 15),
+            "GET /api/v1/..."
+        );
+    }
+
+    #[test]
+    fn test_truncate_name_utf8() {
+        assert_eq!(truncate_name("日本語テスト長い名前", 6), "日本語...");
+    }
+}

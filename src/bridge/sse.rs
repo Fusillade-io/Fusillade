@@ -81,13 +81,22 @@ impl JsSseClient {
                     Ok(Value::new_null(ctx))
                 }
                 Err(e) => {
+                    let err_kind = e.kind();
                     let err_msg = format!("SSE Read Error: {}", e);
                     let _ = self
                         .tx
                         .send(make_metric("sse::recv", start, Some(err_msg.clone())));
-                    eprintln!("{}", err_msg);
-                    *borrow = None;
-                    Ok(Value::new_null(ctx))
+                    // Transient errors: keep connection open, just return null
+                    if err_kind == std::io::ErrorKind::WouldBlock
+                        || err_kind == std::io::ErrorKind::TimedOut
+                        || err_kind == std::io::ErrorKind::Interrupted
+                    {
+                        Ok(Value::new_null(ctx))
+                    } else {
+                        eprintln!("{}", err_msg);
+                        *borrow = None;
+                        Ok(Value::new_null(ctx))
+                    }
                 }
             }
         } else {

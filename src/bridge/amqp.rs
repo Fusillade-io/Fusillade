@@ -266,7 +266,10 @@ impl JsAmqpClient {
                 .basic_ack(delivery_tag, BasicAckOptions::default())
                 .await
         })
-        .map_err(|_| rquickjs::Error::new_from_js("AMQP Ack failed", "NetworkError"))?;
+        .map_err(|e| {
+            eprintln!("[AMQP] Ack failed for delivery_tag {}: {}", delivery_tag, e);
+            rquickjs::Error::new_from_js("AMQP Ack failed", "NetworkError")
+        })?;
 
         Ok(())
     }
@@ -289,7 +292,13 @@ impl JsAmqpClient {
                 )
                 .await
         })
-        .map_err(|_| rquickjs::Error::new_from_js("AMQP Nack failed", "NetworkError"))?;
+        .map_err(|e| {
+            eprintln!(
+                "[AMQP] Nack failed for delivery_tag {}: {}",
+                delivery_tag, e
+            );
+            rquickjs::Error::new_from_js("AMQP Nack failed", "NetworkError")
+        })?;
 
         Ok(())
     }

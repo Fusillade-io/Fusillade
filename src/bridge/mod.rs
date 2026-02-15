@@ -7,8 +7,6 @@ mod encoding;
 mod file;
 mod group;
 mod grpc;
-#[allow(dead_code)]
-mod http;
 mod http_sync;
 pub mod metrics;
 mod mqtt;
