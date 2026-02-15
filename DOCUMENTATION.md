@@ -383,6 +383,7 @@ Fusillade is configured via the `export const options` object in your script.
 | `min_iteration_duration` | String | Minimum time each iteration must take. If an iteration finishes faster, it waits before starting the next. Useful for rate limiting. | `'1s'` |
 | `scenarios` | Object | Multiple named scenarios with independent configs (see below). | `{ fast: {...}, slow: {...} }` |
 | `stack_size` | Number | Worker thread stack size in bytes. Default: `32768` (32KB). Increase if encountering stack overflows with complex scripts. | `65536` |
+| `heap_size` | Number | JS engine heap size limit per worker in bytes. Default: `262144` (256KB). Increase if scripts use large data structures. | `524288` |
 | `response_sink` | Boolean | Sink (discard) response bodies to save memory. See [Response Sink Mode](#response-sink-mode) below. | `true` |
 | `abort_on_fail` | Boolean | Abort the test immediately if any threshold is breached. Useful for CI/CD to fail fast. When enabled, the test exits with a non-zero status code on threshold failure. | `true` |
 | `jitter` | String | Chaos: Add artificial latency before each request. | `'500ms'` |
@@ -1122,7 +1123,7 @@ check(response, {
 * `sleep(seconds)`: Pauses the worker for the specified duration (fractional seconds supported). Sleep time is automatically excluded from iteration response time metrics.
 * `sleepRandom(min, max)`: Pauses for a random duration between `min` and `max` seconds. Useful for realistic think times. Sleep time is automatically excluded from iteration response time metrics.
 * `print(message)`: Logs a message to stdout and the worker logs file.
-* `open(path)`: Reads a file from the local filesystem and returns its content as a string. Useful for loading data files (e.g., JSON or CSV). Only available during initialization, not inside the default function.
+* `open(path)`: Reads a file from the local filesystem and returns its content as a string. Useful for loading data files (e.g., JSON or CSV). Only available during initialization, not inside the default function. Paths must be relative to the script directory — absolute paths and `..` traversal are rejected for security.
 
 ### segment (Request Grouping)
 
@@ -1370,7 +1371,7 @@ Fusillade provides built-in globals for common operations:
 * `crypto.md5(data)`: Returns MD5 hash as hex string.
 * `crypto.sha1(data)`: Returns SHA1 hash as hex string.
 * `crypto.sha256(data)`: Returns SHA256 hash as hex string.
-* `crypto.hmac(algorithm, key, data)`: Returns HMAC using md5/sha1/sha256.
+* `crypto.hmac(algorithm, key, data)`: Returns HMAC using the specified algorithm. Supported algorithms: `md5`, `sha1`, `sha256`. Throws an error for unsupported algorithms.
 
 **encoding** - Base64:
 * `encoding.b64encode(data)`: Encode string to base64.

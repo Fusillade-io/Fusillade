@@ -263,13 +263,15 @@ fn ws_connect<'js>(ctx: Ctx<'js>, url: String, options: Option<Object<'js>>) -> 
             if let Some(ref tx) = tx {
                 let _ = tx.send(make_metric("ws::connect", start, None));
             }
+            let tx = tx.ok_or_else(|| {
+                rquickjs::Error::new_from_js(
+                    "WebSocket metric sender not configured (internal error)",
+                    "StateError",
+                )
+            })?;
             let ws = JsWebSocket {
                 inner: RefCell::new(Some(socket)),
-                tx: tx.unwrap_or_else(|| {
-                    // Fallback: create a dummy sender (should not happen in practice)
-                    let (s, _) = crossbeam_channel::unbounded();
-                    s
-                }),
+                tx,
                 url: url.clone(),
                 reconnect,
                 max_retries,

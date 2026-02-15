@@ -263,61 +263,61 @@ mod tests {
         // but we can verify the exporter is created correctly
         assert!(!exporter.endpoint.is_empty());
     }
-}
 
-#[test]
-fn test_export_custom_metrics() {
-    use crate::stats::{HistogramReport, RateReport};
+    #[test]
+    fn test_export_custom_metrics() {
+        use crate::stats::{HistogramReport, RateReport};
 
-    let mut report = ReportStats::default();
+        let mut report = ReportStats::default();
 
-    // Add custom histogram
-    report.histograms.insert(
-        "my_hist".to_string(),
-        HistogramReport {
-            avg: 50.0,
-            min: 10.0,
-            max: 100.0,
-            p90: 90.0,
-            p95: 95.0,
-            p99: 99.0,
-            count: 10,
-        },
-    );
+        // Add custom histogram
+        report.histograms.insert(
+            "my_hist".to_string(),
+            HistogramReport {
+                avg: 50.0,
+                min: 10.0,
+                max: 100.0,
+                p90: 90.0,
+                p95: 95.0,
+                p99: 99.0,
+                count: 10,
+            },
+        );
 
-    // Add custom counter
-    report.counters.insert("my_counter".to_string(), 42.0);
+        // Add custom counter
+        report.counters.insert("my_counter".to_string(), 42.0);
 
-    // Add custom gauge
-    report.gauges.insert("my_gauge".to_string(), 123.45);
+        // Add custom gauge
+        report.gauges.insert("my_gauge".to_string(), 123.45);
 
-    // Add custom rate
-    report.rates.insert(
-        "my_rate".to_string(),
-        RateReport {
-            total: 100,
-            success: 99,
-            rate: 0.99,
-        },
-    );
+        // Add custom rate
+        report.rates.insert(
+            "my_rate".to_string(),
+            RateReport {
+                total: 100,
+                success: 99,
+                rate: 0.99,
+            },
+        );
 
-    let payload = OtlpExporter::build_payload(&report);
-    let json = serde_json::to_string(&payload).unwrap();
+        let payload = OtlpExporter::build_payload(&report);
+        let json = serde_json::to_string(&payload).unwrap();
 
-    // Verify Histogram expansion
-    assert!(json.contains("my_hist.p95"));
-    assert!(json.contains("my_hist.avg"));
-    assert!(json.contains("my_hist.count"));
+        // Verify Histogram expansion
+        assert!(json.contains("my_hist.p95"));
+        assert!(json.contains("my_hist.avg"));
+        assert!(json.contains("my_hist.count"));
 
-    // Verify Counter
-    assert!(json.contains("my_counter"));
-    assert!(json.contains("\"value\":42.0"));
+        // Verify Counter
+        assert!(json.contains("my_counter"));
+        assert!(json.contains("\"value\":42.0"));
 
-    // Verify Gauge
-    assert!(json.contains("my_gauge"));
-    assert!(json.contains("\"value\":123.45"));
+        // Verify Gauge
+        assert!(json.contains("my_gauge"));
+        assert!(json.contains("\"value\":123.45"));
 
-    // Verify Rate
-    assert!(json.contains("my_rate"));
-    assert!(json.contains("\"value\":0.99"));
+        // Verify Rate
+        assert!(json.contains("my_rate"));
+        assert!(json.contains("\"value\":0.99"));
+    }
 }

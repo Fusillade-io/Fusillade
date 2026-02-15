@@ -9,6 +9,25 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Escape a string for safe embedding in JavaScript single-quoted string literals.
+fn escape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            '`' => out.push_str("\\`"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn make_metric(name: &str, start: Instant, error: Option<String>) -> Metric {
     let duration = start.elapsed();
     let timings = RequestTimings {
@@ -242,7 +261,7 @@ impl<'js> JsPage {
         let start = Instant::now();
 
         // Clear the input value via JavaScript
-        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = escape_js_string(&selector);
         let clear_script = format!(
             "(() => {{ const el = document.querySelector('{}'); if (el) {{ el.value = ''; el.dispatchEvent(new Event('input', {{bubbles: true}})); }} }})()",
             escaped
@@ -336,7 +355,7 @@ impl<'js> JsPage {
     #[qjs(rename = "setContent")]
     pub fn set_content(&self, ctx: Ctx<'_>, html: String) -> Result<()> {
         let start = Instant::now();
-        let escaped = html.replace('\\', "\\\\").replace('`', "\\`");
+        let escaped = escape_js_string(&html);
         let script = format!(
             "(() => {{ document.open(); document.write(`{}`); document.close(); }})()",
             escaped
@@ -357,7 +376,7 @@ impl<'js> JsPage {
 
     pub fn focus(&self, ctx: Ctx<'_>, selector: String) -> Result<()> {
         let start = Instant::now();
-        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = escape_js_string(&selector);
         let script = format!(
             "(() => {{ const el = document.querySelector('{}'); if (el) el.focus(); else throw new Error('Element not found'); }})()",
             escaped
@@ -378,10 +397,10 @@ impl<'js> JsPage {
 
     pub fn select(&self, ctx: Ctx<'js>, selector: String, values: Vec<String>) -> Result<()> {
         let start = Instant::now();
-        let escaped_sel = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped_sel = escape_js_string(&selector);
         let values_js = values
             .iter()
-            .map(|v| format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'")))
+            .map(|v| format!("'{}'", escape_js_string(v)))
             .collect::<Vec<_>>()
             .join(",");
         let script = format!(
@@ -450,7 +469,7 @@ impl<'js> JsPage {
         if let Ok(max_age) = cookie.get::<_, i64>("maxAge") {
             cookie_str.push_str(&format!("; max-age={}", max_age));
         }
-        let escaped = cookie_str.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = escape_js_string(&cookie_str);
         let script = format!("document.cookie = '{}'", escaped);
         self.inner.evaluate(&script, false).map_err(|e| {
             let msg = format!("setCookie failed: {}", e);
@@ -469,7 +488,7 @@ impl<'js> JsPage {
     #[qjs(rename = "deleteCookie")]
     pub fn delete_cookie(&self, ctx: Ctx<'_>, name: String) -> Result<()> {
         let start = Instant::now();
-        let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = escape_js_string(&name);
         let script = format!(
             "document.cookie = '{}=; expires=Thu, 01 Jan 1970 00:00:01 GMT; path=/'",
             escaped
@@ -495,7 +514,7 @@ impl<'js> JsPage {
     #[qjs(rename = "queryAll")]
     pub fn query_all(&self, ctx: Ctx<'js>, selector: String) -> Result<Value<'js>> {
         let start = Instant::now();
-        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = escape_js_string(&selector);
         let script = format!(
             "Array.from(document.querySelectorAll('{}')).map(el => ({{ tag: el.tagName.toLowerCase(), text: el.textContent || '', id: el.id || '', className: el.className || '' }}))",
             escaped
@@ -526,7 +545,7 @@ impl<'js> JsPage {
     ) -> Result<Value<'js>> {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(30000.0) as u64);
-        let escaped_pattern = url_pattern.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped_pattern = escape_js_string(&url_pattern);
 
         loop {
             if start.elapsed() > timeout {
@@ -624,6 +643,40 @@ pub fn register_sync(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_escape_js_string_basic() {
+        assert_eq!(escape_js_string("#myButton"), "#myButton");
+        assert_eq!(escape_js_string(".class-name"), ".class-name");
+    }
+
+    #[test]
+    fn test_escape_js_string_quotes() {
+        assert_eq!(escape_js_string("it's"), "it\\'s");
+        assert_eq!(escape_js_string("say \"hi\""), "say \\\"hi\\\"");
+        assert_eq!(escape_js_string("a`b"), "a\\`b");
+    }
+
+    #[test]
+    fn test_escape_js_string_control_chars() {
+        assert_eq!(escape_js_string("a\nb"), "a\\nb");
+        assert_eq!(escape_js_string("a\rb"), "a\\rb");
+        assert_eq!(escape_js_string("a\tb"), "a\\tb");
+        assert_eq!(escape_js_string("a\0b"), "a\\0b");
+    }
+
+    #[test]
+    fn test_escape_js_string_backslash() {
+        assert_eq!(escape_js_string("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn test_escape_js_string_combined() {
+        assert_eq!(
+            escape_js_string("it's a \"test\"\nwith\\stuff"),
+            "it\\'s a \\\"test\\\"\\nwith\\\\stuff"
+        );
+    }
 
     #[test]
     fn test_browser_make_metric_success() {

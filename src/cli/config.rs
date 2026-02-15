@@ -102,6 +102,10 @@ pub struct Config {
     pub drop: Option<f64>,
     /// Worker thread stack size in bytes (default: 32KB). Increase if encountering stack overflows with complex scripts.
     pub stack_size: Option<usize>,
+    /// Maximum JS heap memory per worker in bytes (default: 262144 / 256KB).
+    /// Increase for scripts with large data structures.
+    #[serde(alias = "heapSize")]
+    pub heap_size: Option<usize>,
     /// Sink (discard) response bodies to save memory. Body is still downloaded from the network
     /// (required for connection keep-alive), but immediately discarded instead of being stored.
     /// When enabled, response.body will be null. Useful for high-throughput tests
@@ -694,5 +698,37 @@ scenarios:
         let scenarios = config.scenarios.unwrap();
         assert_eq!(scenarios["realistic"].no_pool, Some(true));
         assert_eq!(scenarios["fast"].no_pool, None);
+    }
+
+    #[test]
+    fn test_config_heap_size_default() {
+        let yaml = r#"
+workers: 10
+duration: "30s"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.heap_size, None); // defaults to 256KB in engine
+    }
+
+    #[test]
+    fn test_config_heap_size_custom() {
+        let yaml = r#"
+workers: 10
+duration: "30s"
+heap_size: 524288
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.heap_size, Some(524288)); // 512KB
+    }
+
+    #[test]
+    fn test_config_heap_size_camel_case() {
+        let json = r#"{
+            "workers": 5,
+            "duration": "10s",
+            "heapSize": 1048576
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.heap_size, Some(1048576)); // 1MB
     }
 }

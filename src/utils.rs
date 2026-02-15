@@ -57,6 +57,15 @@ pub fn parse_duration_str_or_warn(s: &str, default_secs: u64, context: &str) -> 
     }
 }
 
+/// Safely truncate a string to at most `max_chars` characters, respecting UTF-8 boundaries.
+/// Returns a string slice up to the given character count.
+pub fn safe_truncate(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +156,33 @@ mod tests {
             parse_duration_str_or_warn("abc", 30, "duration"),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn test_safe_truncate_ascii() {
+        assert_eq!(safe_truncate("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn test_safe_truncate_utf8_boundary() {
+        let s = "abcd\u{1F600}efgh"; // emoji is 4 bytes
+        assert_eq!(safe_truncate(s, 5), "abcd\u{1F600}");
+        assert_eq!(safe_truncate(s, 4), "abcd");
+    }
+
+    #[test]
+    fn test_safe_truncate_short_string() {
+        assert_eq!(safe_truncate("hi", 500), "hi");
+    }
+
+    #[test]
+    fn test_safe_truncate_empty() {
+        assert_eq!(safe_truncate("", 10), "");
+    }
+
+    #[test]
+    fn test_safe_truncate_cjk() {
+        let s = "日本語テスト";
+        assert_eq!(safe_truncate(s, 3), "日本語");
     }
 }
