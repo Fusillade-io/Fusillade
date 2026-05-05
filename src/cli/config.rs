@@ -140,6 +140,11 @@ pub struct Config {
     /// Reduces throughput but provides realistic end-user latency measurements.
     #[serde(alias = "noPool")]
     pub no_pool: Option<bool>,
+    /// Expose all environment variables to JS scripts via __ENV.
+    /// By default only FUSILLADE_* and K6_* prefixed variables are exposed.
+    /// Enable this to restore behaviour where every env var is visible.
+    #[serde(alias = "envPassthrough")]
+    pub env_passthrough: Option<bool>,
 }
 
 #[cfg(test)]

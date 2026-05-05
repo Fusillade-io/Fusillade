@@ -73,24 +73,10 @@ fn validate_scenario_name(name: &str) -> Result<()> {
 }
 
 fn parse_duration_str(s: &str) -> Option<Duration> {
-    if s.ends_with("ms") {
-        s.trim_end_matches("ms")
-            .parse::<u64>()
-            .ok()
-            .map(Duration::from_millis)
-    } else if s.ends_with('s') {
-        s.trim_end_matches('s')
-            .parse::<u64>()
-            .ok()
-            .map(Duration::from_secs)
-    } else if s.ends_with('m') {
-        s.trim_end_matches('m')
-            .parse::<u64>()
-            .ok()
-            .map(|m| Duration::from_secs(m * 60))
-    } else {
-        s.parse::<u64>().ok().map(Duration::from_millis)
-    }
+    // Delegates to parse_duration; also accepts a bare integer as milliseconds
+    parse_duration(s)
+        .ok()
+        .or_else(|| s.parse::<u64>().ok().map(Duration::from_millis))
 }
 
 pub struct Engine {
@@ -157,6 +143,7 @@ impl Engine {
                 None,
                 false,
                 None,
+                false, // env_passthrough: config not yet known during extraction
             )?;
             let module_name = script_path.to_string_lossy().to_string();
             let module = Module::declare(ctx.clone(), module_name, script_content)?;
@@ -267,6 +254,7 @@ impl Engine {
                 &script_path,
                 &script_content,
                 Arc::new(std::sync::RwLock::new(StatsAggregator::new())),
+                config.env_passthrough.unwrap_or(false),
             )
             .unwrap_or_else(|e| {
                 eprintln!("Setup failed: {}", e);
@@ -294,6 +282,7 @@ impl Engine {
                 let pre_shared = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
                 crate::bridge::register_globals_sync(
                     &ctx, pre_tx, pre_client, pre_shared, 0, pre_agg, pre_tokio, None, None, false, None,
+                    config.env_passthrough.unwrap_or(false),
                 )
                 .ok();
 
@@ -574,6 +563,7 @@ impl Engine {
                     let min_iter_duration = min_iter_duration;
                     let jitter = config.jitter.clone();
                     let drop_rate = config.drop;
+                    let env_passthrough = config.env_passthrough.unwrap_or(false);
                     let shared_tokio_rt = shared_tokio_rt.clone();
                     let shared_http_client = shared_http_client.clone();
                     let control_state = control_state.clone();
@@ -660,6 +650,7 @@ impl Engine {
                                         scenario_config.stack_size.unwrap_or(may_stack_size);
                                     let response_sink =
                                         scenario_config.response_sink.unwrap_or(false);
+                                    let env_passthrough = env_passthrough;
                                     let tokio_rt = shared_tokio_rt.clone();
                                     let client = shared_http_client.clone();
                                     let control_state = control_state.clone();
@@ -682,7 +673,8 @@ impl Engine {
                                                 context.with(|ctx| {
                                                     if let Err(e) = crate::bridge::register_globals_sync(
                                                         &ctx, tx.clone(), client, shared_data, worker_id,
-                                                        agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge
+                                                        agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge,
+                                                        env_passthrough,
                                                     ) {
                                                         eprintln!("[Worker {}] Failed to register globals: {}", worker_id, e);
                                                         return;
@@ -957,6 +949,7 @@ impl Engine {
                                                     drop_rate: Option<f64>,
                                                     stack_sz: usize,
                                                     response_sink: bool,
+                                                    env_passthrough: bool,
                                                     tokio_rt: Arc<tokio::runtime::Runtime>,
                                                     client: HttpClient,
                                                     control_state: Arc<control::ControlState>,
@@ -995,6 +988,7 @@ impl Engine {
                                                         drop_rate,
                                                         response_sink,
                                                         io_bridge,
+                                                        env_passthrough,
                                                     ) {
                                                         eprintln!("[Worker {}] Failed to register globals: {}", worker_id, e);
                                                         return;
@@ -1210,6 +1204,7 @@ impl Engine {
                                                     .stack_size
                                                     .unwrap_or(may_stack_size),
                                                 scenario_config.response_sink.unwrap_or(false),
+                                                env_passthrough,
                                                 shared_tokio_rt.clone(),
                                                 shared_http_client.clone(),
                                                 control_state.clone(),
@@ -1319,6 +1314,7 @@ impl Engine {
                                         scenario_config.stack_size.unwrap_or(may_stack_size);
                                     let response_sink =
                                         scenario_config.response_sink.unwrap_or(false);
+                                    let env_passthrough = env_passthrough;
                                     let tokio_rt = shared_tokio_rt.clone();
                                     let client = shared_http_client.clone();
                                     let control_state = control_state.clone();
@@ -1343,7 +1339,7 @@ impl Engine {
                                 runtime.set_memory_limit(heap_size);
                                 context.with(|ctx| {
                                     // Use standard HTTP path with hyper/Tokio (better connection pooling)
-                                    if let Err(e) = crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge) {
+                                    if let Err(e) = crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge, env_passthrough) {
                                         eprintln!("[Worker {}] Failed to register globals: {}", worker_id, e);
                                         return;
                                     }
@@ -1715,6 +1711,7 @@ impl Engine {
                             let jitter = config.jitter.clone();
                             let drop_rate = config.drop;
                             let response_sink = config.response_sink.unwrap_or(false);
+                            let env_passthrough = config.env_passthrough.unwrap_or(false);
                             let control_state = control_state.clone();
                             // Legacy mode: use tiered stack sizes same as multi-scenario
                             let stack_sz = config.stack_size.unwrap_or(may_stack_size);
@@ -1739,7 +1736,7 @@ impl Engine {
                                 context.with(|ctx| {
                                     // Pass std::sync::mpsc::Sender directly - no bridge thread needed!
                                     // Clone tx since we need it for both bridge and iteration metrics
-                                    if let Err(e) = crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge) {
+                                    if let Err(e) = crate::bridge::register_globals_sync(&ctx, tx.clone(), client, shared_data, worker_id, agg, tokio_rt, jitter, drop_rate, response_sink, io_bridge, env_passthrough) {
                                         eprintln!("[Worker {}] Failed to register globals: {}", worker_id, e);
                                         return;
                                     }
@@ -2083,6 +2080,7 @@ impl Engine {
                 &script_content,
                 setup_data.as_deref().map(|s| s.to_string()),
                 aggregator.clone(),
+                config.env_passthrough.unwrap_or(false),
             );
 
             // Run handleSummary hook if defined
@@ -2093,6 +2091,7 @@ impl Engine {
                 &report,
                 test_duration,
                 aggregator.clone(),
+                config.env_passthrough.unwrap_or(false),
             );
 
             // Validate thresholds if criteria are defined
@@ -2224,6 +2223,7 @@ impl Engine {
         script_path: &Path,
         script_content: &str,
         aggregator: SharedAggregator,
+        env_passthrough: bool,
     ) -> Result<Option<String>> {
         let (runtime, context) = Self::create_runtime()?;
         let (_tx, _rx) = crossbeam_channel::unbounded::<Metric>();
@@ -2258,6 +2258,7 @@ impl Engine {
                 None,
                 false,
                 None,
+                env_passthrough,
             )?;
             let module = Module::declare(
                 ctx.clone(),
@@ -2311,6 +2312,7 @@ impl Engine {
                 None,
                 false,
                 None,
+                false, // env_passthrough: no config for exec command
             )?;
             let _ = ctx.eval::<Value, _>(script_content)?;
             Ok::<(), anyhow::Error>(())
@@ -2330,6 +2332,7 @@ impl Engine {
         script_content: &str,
         data: Option<String>,
         aggregator: SharedAggregator,
+        env_passthrough: bool,
     ) -> Result<()> {
         let (runtime, context) = Self::create_runtime()?;
         let (tx_print, rx_print) = crossbeam_channel::unbounded();
@@ -2363,6 +2366,7 @@ impl Engine {
                 None,
                 false,
                 None,
+                env_passthrough,
             )?;
             let module = Module::declare(
                 ctx.clone(),
@@ -2400,6 +2404,7 @@ impl Engine {
         report: &crate::stats::ReportStats,
         test_duration: Duration,
         aggregator: SharedAggregator,
+        env_passthrough: bool,
     ) -> Result<()> {
         let (runtime, context) = Self::create_runtime()?;
         let (tx_print, rx_print) = crossbeam_channel::unbounded();
@@ -2437,6 +2442,7 @@ impl Engine {
                 None,
                 false,
                 None,
+                env_passthrough,
             )?;
             let module = Module::declare(
                 ctx.clone(),
