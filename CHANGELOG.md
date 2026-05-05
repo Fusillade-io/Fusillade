@@ -5,6 +5,20 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v1.5.2
+
+### Security
+- **Cluster gRPC authentication** — controller and workers now support a shared-secret token via `--cluster-token` or `FUSILLADE_CLUSTER_TOKEN`. Without a token the controller logs a warning but still accepts connections (backwards-compatible). With a token, any worker presenting the wrong or missing `Authorization: Bearer <token>` header is rejected with `UNAUTHENTICATED`.
+- **`__ENV` variable filtering** — JS scripts now receive only `FUSILLADE_*` and `K6_*` environment variables by default, preventing accidental exposure of CI tokens and credentials. Pass `--env-passthrough` (or `env_passthrough: true` in config) to restore the old behaviour where all env vars are visible.
+
+### Fixed
+- **Startup panics replaced with user-friendly errors** — `Engine::new()`, `Runtime::new()`, `server.run()`, and `server.connect_to_controller()` in all subcommands now report a clear error message instead of panicking with no context.
+- **HAR / OpenAPI import size limit** — files larger than 100 MB are now rejected with a clear error before parsing, preventing accidental OOM on malformed or oversized inputs.
+- **Duplicate duration parser** — `parse_duration_str` now delegates to the canonical `parse_duration` implementation, eliminating a source of drift between the two functions.
+
+### Changed
+- `clap` dependency gains the `env` feature to support `--cluster-token` / `FUSILLADE_CLUSTER_TOKEN` env-var binding.
+
 ## [1.4.1] - 2026-02-05
 
 ### Security

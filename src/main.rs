@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use std::path::PathBuf;
@@ -228,6 +228,9 @@ enum Commands {
         /// Disable connection pooling (new connection per request, enables connection timing)
         #[arg(long)]
         no_pool: bool,
+        /// Expose all environment variables to JS scripts via __ENV (default: only FUSILLADE_* and K6_*)
+        #[arg(long)]
+        env_passthrough: bool,
     },
     /// Initialize a new test script with starter template
     Init {
@@ -260,10 +263,16 @@ enum Commands {
         listen: String,
         #[arg(short, long)]
         connect: Option<String>,
+        /// Shared secret token for authenticating with the controller (also: FUSILLADE_CLUSTER_TOKEN)
+        #[arg(long, env = "FUSILLADE_CLUSTER_TOKEN")]
+        cluster_token: Option<String>,
     },
     Controller {
         #[arg(short, long, default_value = "0.0.0.0:9000")]
         listen: String,
+        /// Shared secret token workers must present to connect (also: FUSILLADE_CLUSTER_TOKEN)
+        #[arg(long, env = "FUSILLADE_CLUSTER_TOKEN")]
+        cluster_token: Option<String>,
     },
     Exec {
         script: String,
@@ -371,6 +380,7 @@ fn main() -> Result<()> {
             max_redirects,
             user_agent,
             no_pool,
+            env_passthrough,
         } => {
             // Set log level for console.* API
             let log_level_enum = match log_level.to_lowercase().as_str() {
@@ -643,6 +653,9 @@ fn main() -> Result<()> {
             }
             if no_pool {
                 final_config.no_pool = Some(true);
+            }
+            if env_passthrough {
+                final_config.env_passthrough = Some(true);
             }
             final_config.max_redirects = Some(max_redirects);
             if let Some(ref ua) = user_agent {
@@ -1042,33 +1055,49 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Exec { script } => {
-            let engine = Engine::new().unwrap();
+            let engine = Engine::new().context("failed to initialize JS engine")?;
             let _ = engine.run_script(&script);
             Ok(())
         }
-        Commands::Worker { listen, connect } => {
-            let rt = Runtime::new().unwrap();
+        Commands::Worker {
+            listen,
+            connect,
+            cluster_token,
+        } => {
+            let rt = Runtime::new().context("failed to create Tokio runtime for worker")?;
             rt.block_on(async {
-                let engine = Engine::new().unwrap();
+                let engine = Engine::new().context("failed to initialize JS engine")?;
                 let server = WorkerServer::new(engine);
                 if let Some(addr) = connect {
-                    server.connect_to_controller(addr).await.unwrap();
+                    server
+                        .connect_to_controller(addr, cluster_token)
+                        .await
+                        .with_context(|| "failed to connect to controller")?;
                 } else {
-                    server.run(listen).await.unwrap();
+                    server
+                        .run(listen.clone())
+                        .await
+                        .with_context(|| format!("worker failed to bind on {listen}"))?;
                 }
-            });
+                Ok::<(), anyhow::Error>(())
+            })?;
             Ok(())
         }
-        Commands::Controller { listen } => {
-            let rt = Runtime::new().unwrap();
+        Commands::Controller {
+            listen,
+            cluster_token,
+        } => {
+            let rt = Runtime::new().context("failed to create Tokio runtime for controller")?;
             rt.block_on(async {
                 let aggregator = std::sync::Arc::new(std::sync::RwLock::new(
                     fusillade::stats::StatsAggregator::new(),
                 ));
-                let server = ControllerServer::new(aggregator);
-                server.run(listen).await
-            })
-            .unwrap();
+                let server = ControllerServer::new(aggregator, cluster_token);
+                server
+                    .run(listen.clone())
+                    .await
+                    .with_context(|| format!("controller failed on {listen}"))
+            })?;
             Ok(())
         }
         Commands::Convert { input, output } => {
@@ -1105,7 +1134,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Record { output, port } => {
-            let rt = Runtime::new().unwrap();
+            let rt = Runtime::new().context("failed to create Tokio runtime for recorder")?;
             rt.block_on(fusillade::cli::recorder::run_recorder(output, port))
         }
         Commands::Replay { input, parallel } => {
