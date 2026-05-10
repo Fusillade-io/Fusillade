@@ -5,7 +5,7 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v1.5.2
+## [1.5.2] - 2026-05-10
 
 ### Security
 - **Cluster gRPC authentication** — controller and workers now support a shared-secret token via `--cluster-token` or `FUSILLADE_CLUSTER_TOKEN`. Without a token the controller logs a warning but still accepts connections (backwards-compatible). With a token, any worker presenting the wrong or missing `Authorization: Bearer <token>` header is rejected with `UNAUTHENTICATED`.
