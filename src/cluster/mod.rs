@@ -31,6 +31,7 @@ pub type WorkerRegistry = Arc<RwLock<HashMap<String, WorkerInfo>>>;
 pub struct ClusterService {
     aggregator: SharedAggregator,
     workers: WorkerRegistry,
+    cluster_token: Option<String>,
 }
 
 impl ClusterService {
@@ -38,18 +39,42 @@ impl ClusterService {
         Self {
             aggregator,
             workers: Arc::new(RwLock::new(HashMap::new())),
+            cluster_token: None,
         }
     }
 
-    pub fn new_with_registry(aggregator: SharedAggregator, workers: WorkerRegistry) -> Self {
+    pub fn new_with_registry(
+        aggregator: SharedAggregator,
+        workers: WorkerRegistry,
+        cluster_token: Option<String>,
+    ) -> Self {
         Self {
             aggregator,
             workers,
+            cluster_token,
         }
     }
 
     pub fn workers(&self) -> WorkerRegistry {
         self.workers.clone()
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn check_auth(&self, request_meta: &tonic::metadata::MetadataMap) -> Result<(), Status> {
+        let expected = match &self.cluster_token {
+            Some(t) => t,
+            None => return Ok(()), // no token configured — open access
+        };
+        let provided = request_meta
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if provided == expected {
+            Ok(())
+        } else {
+            Err(Status::unauthenticated("Invalid or missing cluster token"))
+        }
     }
 }
 
@@ -101,6 +126,7 @@ impl Cluster for ClusterService {
         &self,
         request: Request<Streaming<WorkerMessage>>,
     ) -> Result<Response<Self::RegisterStream>, Status> {
+        self.check_auth(request.metadata())?;
         let mut stream = request.into_inner();
         let workers = self.workers.clone();
 
@@ -181,6 +207,7 @@ impl Cluster for ClusterService {
         &self,
         request: Request<Streaming<MetricBatch>>,
     ) -> Result<Response<Empty>, Status> {
+        self.check_auth(request.metadata())?;
         let mut stream = request.into_inner();
         while let Ok(Some(batch)) = stream.message().await {
             if let Ok(mut guard) = self.aggregator.write() {
@@ -611,8 +638,62 @@ mod tests {
             guard.insert("w1".to_string(), make_worker("1"));
         }
 
-        let service = ClusterService::new_with_registry(aggregator, registry);
+        let service = ClusterService::new_with_registry(aggregator, registry, None);
         let workers = service.workers();
         assert_eq!(workers.read().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_check_auth_no_token_allows_all() {
+        let aggregator: SharedAggregator = Arc::new(std::sync::RwLock::new(
+            crate::stats::StatsAggregator::default(),
+        ));
+        let service = ClusterService::new(aggregator);
+        let meta = tonic::metadata::MetadataMap::new();
+        assert!(service.check_auth(&meta).is_ok());
+    }
+
+    #[test]
+    fn test_check_auth_correct_token_allowed() {
+        let aggregator: SharedAggregator = Arc::new(std::sync::RwLock::new(
+            crate::stats::StatsAggregator::default(),
+        ));
+        let service = ClusterService::new_with_registry(
+            Arc::new(std::sync::RwLock::new(Default::default())),
+            make_registry(),
+            Some("secret123".to_string()),
+        );
+        let mut meta = tonic::metadata::MetadataMap::new();
+        meta.insert("authorization", "Bearer secret123".parse().unwrap());
+        assert!(service.check_auth(&meta).is_ok());
+    }
+
+    #[test]
+    fn test_check_auth_wrong_token_rejected() {
+        let aggregator: SharedAggregator = Arc::new(std::sync::RwLock::new(
+            crate::stats::StatsAggregator::default(),
+        ));
+        let service = ClusterService::new_with_registry(
+            aggregator,
+            make_registry(),
+            Some("secret123".to_string()),
+        );
+        let mut meta = tonic::metadata::MetadataMap::new();
+        meta.insert("authorization", "Bearer wrongtoken".parse().unwrap());
+        assert!(service.check_auth(&meta).is_err());
+    }
+
+    #[test]
+    fn test_check_auth_missing_token_rejected() {
+        let aggregator: SharedAggregator = Arc::new(std::sync::RwLock::new(
+            crate::stats::StatsAggregator::default(),
+        ));
+        let service = ClusterService::new_with_registry(
+            aggregator,
+            make_registry(),
+            Some("secret123".to_string()),
+        );
+        let meta = tonic::metadata::MetadataMap::new();
+        assert!(service.check_auth(&meta).is_err());
     }
 }

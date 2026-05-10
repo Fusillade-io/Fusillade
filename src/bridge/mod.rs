@@ -427,10 +427,13 @@ fn register_console(ctx: &Ctx, tx: Sender<Metric>) -> Result<()> {
     Ok(())
 }
 
-pub fn register_env(ctx: &Ctx) -> Result<()> {
+pub fn register_env(ctx: &Ctx, env_passthrough: bool) -> Result<()> {
     let env_obj = rquickjs::Object::new(ctx.clone())?;
     for (key, value) in std::env::vars() {
-        env_obj.set(key, value)?;
+        let expose = env_passthrough || key.starts_with("FUSILLADE_") || key.starts_with("K6_");
+        if expose {
+            env_obj.set(key, value)?;
+        }
     }
     ctx.globals().set("__ENV", env_obj)?;
     Ok(())
@@ -449,6 +452,7 @@ pub fn register_globals_sync<'js>(
     _drop: Option<f64>,
     response_sink: bool,
     io_bridge: Option<Arc<IoBridge>>,
+    env_passthrough: bool,
 ) -> Result<()> {
     let globals = ctx.globals();
     let tx_print = tx.clone();
@@ -513,7 +517,7 @@ pub fn register_globals_sync<'js>(
     sse::register_sync(ctx, tx.clone())?;
     metrics::register_sync(ctx, tx.clone())?;
     register_console(ctx, tx)?;
-    register_env(ctx)?;
+    register_env(ctx, env_passthrough)?;
 
     Ok(())
 }
@@ -529,6 +533,7 @@ pub fn register_globals_sync_fast<'js>(
     aggregator: SharedAggregator,
     response_sink: bool,
     io_bridge: Option<Arc<IoBridge>>,
+    env_passthrough: bool,
 ) -> Result<()> {
     let globals = ctx.globals();
     let tx_print = tx.clone();
@@ -588,7 +593,7 @@ pub fn register_globals_sync_fast<'js>(
     browser::register_sync(ctx, tx.clone())?;
     metrics::register_sync(ctx, tx.clone())?;
     register_console(ctx, tx)?;
-    register_env(ctx)?;
+    register_env(ctx, env_passthrough)?;
 
     Ok(())
 }
@@ -690,5 +695,43 @@ mod tests {
         assert_eq!(get_log_level(), LogLevel::Error);
         // Restore
         set_log_level(original);
+    }
+
+    #[test]
+    fn test_register_env_filters_by_default() {
+        // Set a test-only var that should be hidden by default
+        std::env::set_var("_FUSILLADE_TEST_SECRET_SHOULD_BE_HIDDEN", "secret");
+        // Set a FUSILLADE_* var that should always be visible
+        std::env::set_var("FUSILLADE_TEST_VAR", "visible");
+
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&runtime).unwrap();
+
+        ctx.with(|ctx| {
+            register_env(&ctx, false).unwrap();
+            let env: rquickjs::Object = ctx.globals().get("__ENV").unwrap();
+            // FUSILLADE_* prefix is always exposed
+            let val: Option<String> = env.get("FUSILLADE_TEST_VAR").unwrap();
+            assert_eq!(val, Some("visible".to_string()));
+            // Unprefixed sensitive var is NOT exposed
+            let hidden: Option<String> =
+                env.get("_FUSILLADE_TEST_SECRET_SHOULD_BE_HIDDEN").unwrap();
+            assert!(hidden.is_none());
+        });
+    }
+
+    #[test]
+    fn test_register_env_passthrough_exposes_all() {
+        std::env::set_var("_FUSILLADE_TEST_PASSTHROUGH_KEY", "pass");
+
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&runtime).unwrap();
+
+        ctx.with(|ctx| {
+            register_env(&ctx, true).unwrap();
+            let env: rquickjs::Object = ctx.globals().get("__ENV").unwrap();
+            let val: Option<String> = env.get("_FUSILLADE_TEST_PASSTHROUGH_KEY").unwrap();
+            assert_eq!(val, Some("pass".to_string()));
+        });
     }
 }
