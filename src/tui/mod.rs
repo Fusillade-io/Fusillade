@@ -107,7 +107,7 @@ impl App {
                 errors: r.error_count,
             })
             .collect();
-        endpoints.sort_by(|a, b| b.reqs.cmp(&a.reqs));
+        endpoints.sort_by_key(|b| std::cmp::Reverse(b.reqs));
 
         self.snapshot = Some(TuiSnapshot {
             total_requests: report.total_requests,

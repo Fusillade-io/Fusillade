@@ -2,6 +2,8 @@
 //! This module provides a drop-in replacement for http.rs that uses blocking I/O
 //! directly compatible with May green threads.
 //!
+// ureq::Error is large by design; suppressing here since we can't change the external type.
+#![allow(clippy::result_large_err)]
 //! When an IoBridge is provided (no_pool mode), requests are routed through
 //! Hyper with connection pooling disabled, providing per-request DNS+TCP and TLS timing.
 

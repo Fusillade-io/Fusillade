@@ -1279,7 +1279,7 @@ impl Engine {
                                     may::coroutine::JoinHandle<()>,
                                     Arc<AtomicBool>,
                                 )> = Vec::new();
-                                let mut next_worker_id = 1;
+                                let next_worker_id = 1usize;
 
                                 // For shared-iterations, create a shared counter across all workers
                                 let shared_iteration_counter = Arc::new(AtomicU64::new(0));
@@ -1293,9 +1293,8 @@ impl Engine {
                                     executor == ExecutorType::SharedIterations;
 
                                 // Spawn all workers at once (constant-workers style)
-                                for _ in 0..workers {
-                                    let worker_id = next_worker_id;
-                                    next_worker_id += 1;
+                                for i in 0..workers {
+                                    let worker_id = next_worker_id + i;
                                     let tx = tx.clone();
                                     let shared_data = shared_data.clone();
 
