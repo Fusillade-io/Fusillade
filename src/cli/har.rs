@@ -1,8 +1,10 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::fs;
 use std::path::Path;
+
+const MAX_IMPORT_FILE_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
 
 #[derive(Deserialize, Serialize, Debug)]
 struct Har {
@@ -39,7 +41,16 @@ struct PostData {
 }
 
 pub fn convert_to_js<P: AsRef<Path>>(input: P) -> Result<String> {
-    let content = fs::read_to_string(input)?;
+    let path = input.as_ref();
+    let size = fs::metadata(path)?.len();
+    if size > MAX_IMPORT_FILE_BYTES {
+        bail!(
+            "HAR file is too large ({} bytes, max {} bytes)",
+            size,
+            MAX_IMPORT_FILE_BYTES
+        );
+    }
+    let content = fs::read_to_string(path)?;
     convert_from_string(&content)
 }
 
@@ -205,5 +216,18 @@ mod tests {
         let invalid_json = "not valid json";
         let result = convert_from_string(invalid_json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_convert_to_js_rejects_oversized_file() {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // Write just over the limit
+        let data = vec![0u8; (MAX_IMPORT_FILE_BYTES + 1) as usize];
+        tmp.write_all(&data).unwrap();
+        let result = convert_to_js(tmp.path());
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("too large"), "unexpected error: {msg}");
     }
 }

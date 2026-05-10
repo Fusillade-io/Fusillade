@@ -1,6 +1,6 @@
 [package]
 name = "fusillade"
-version = "1.5.1"
+version = "1.5.2"
 edition = "2021"
 rust-version = "1.83"
 license = "AGPL-3.0-only"
@@ -11,7 +11,7 @@ tokio = { version = "1", features = ["full"] }
 rquickjs = { version = "0.11", features = ["loader", "futures", "macro", "classes", "properties"] } # Removed full-async to avoid runtime conflict
 ureq = { version = "2.10", features = ["json", "cookies"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies", "http2", "brotli", "gzip", "multipart", "stream"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

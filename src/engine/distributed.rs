@@ -62,7 +62,11 @@ impl WorkerServer {
         Ok(())
     }
 
-    pub async fn connect_to_controller(&self, controller_addr: String) -> Result<()> {
+    pub async fn connect_to_controller(
+        &self,
+        controller_addr: String,
+        cluster_token: Option<String>,
+    ) -> Result<()> {
         let grpc_addr = if controller_addr.starts_with("http") {
             controller_addr
         } else {
@@ -76,7 +80,13 @@ impl WorkerServer {
         let (tx, rx) = tokio::sync::mpsc::channel(10);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-        let request = tonic::Request::new(stream);
+        let mut request = tonic::Request::new(stream);
+        if let Some(ref token) = cluster_token {
+            let bearer = format!("Bearer {}", token)
+                .parse::<tonic::metadata::MetadataValue<_>>()
+                .map_err(|e| anyhow::anyhow!("Invalid cluster token: {}", e))?;
+            request.metadata_mut().insert("authorization", bearer);
+        }
         let response = client.register(request).await?;
         let mut inbound = response.into_inner();
 
@@ -335,14 +345,26 @@ pub struct ControllerState {
 
 pub struct ControllerServer {
     aggregator: SharedAggregator,
+    cluster_token: Option<String>,
 }
 
 impl ControllerServer {
-    pub fn new(aggregator: SharedAggregator) -> Self {
-        Self { aggregator }
+    pub fn new(aggregator: SharedAggregator, cluster_token: Option<String>) -> Self {
+        Self {
+            aggregator,
+            cluster_token,
+        }
     }
 
     pub async fn run(self, addr: String) -> Result<()> {
+        if self.cluster_token.is_none() {
+            eprintln!(
+                "WARNING: Cluster running without authentication — \
+                 anyone on the network can register as a worker. \
+                 Use --cluster-token or FUSILLADE_CLUSTER_TOKEN to enable auth."
+            );
+        }
+
         // Create shared worker registry
         let workers: WorkerRegistry =
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
@@ -357,6 +379,7 @@ impl ControllerServer {
         let cluster_service = crate::cluster::ClusterService::new_with_registry(
             self.aggregator.clone(),
             workers.clone(),
+            self.cluster_token.clone(),
         );
         let svc = crate::cluster::proto::cluster_server::ClusterServer::new(cluster_service);
 
