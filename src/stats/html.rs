@@ -284,7 +284,7 @@ pub fn generate_html(report: &ReportStats) -> String {
         );
 
         let mut endpoints = real_endpoints;
-        endpoints.sort_by(|a, b| b.1.total_requests.cmp(&a.1.total_requests));
+        endpoints.sort_by_key(|b| std::cmp::Reverse(b.1.total_requests));
 
         for (name, req) in endpoints {
             let error_class = if req.error_count > 0 { "error-bar" } else { "" };
