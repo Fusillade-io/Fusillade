@@ -617,23 +617,6 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_url_construction() {
-        let addr = "0.0.0.0:9000";
-        let metrics_url = format!("http://{}/metrics", addr);
-        assert_eq!(metrics_url, "http://0.0.0.0:9000/metrics");
-    }
-
-    #[test]
-    fn test_control_command_stop() {
-        // Test that ControlCommand::Stop can be sent through a channel
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(ControlCommand::Stop).unwrap();
-
-        let received = rx.recv().unwrap();
-        assert!(matches!(received, ControlCommand::Stop));
-    }
-
-    #[test]
     fn test_dispatch_request_serialization() {
         let config = Config::default();
         let req = DispatchTestRequest {

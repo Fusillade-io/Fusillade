@@ -43,6 +43,11 @@ jobs:
     name: Scenario Tests
     runs-on: ubuntu-latest
     needs: test
+    services:
+      httpbin:
+        image: kennethreitz/httpbin
+        ports:
+          - 8080:80
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -70,6 +75,9 @@ jobs:
         run: cargo build --release
 
       - name: Run scenario tests
+        env:
+          # Local httpbin service container keeps these hermetic (no httpbin.org)
+          FUSILLADE_BASE_URL: http://localhost:8080
         run: |
           # Unit tests (no HTTP required)
           ./target/release/fusillade run scenarios/unit_test.js --headless
@@ -82,7 +90,7 @@ jobs:
           ./target/release/fusillade run scenarios/iterations_test.js --headless
           ./target/release/fusillade run scenarios/lifecycle-test.js --headless
 
-          # HTTP tests (uses httpbin.org)
+          # HTTP tests (local httpbin service)
           ./target/release/fusillade run scenarios/check_test.js --headless
           ./target/release/fusillade run scenarios/http_test.js --headless
           ./target/release/fusillade run scenarios/timeout_test.js --headless

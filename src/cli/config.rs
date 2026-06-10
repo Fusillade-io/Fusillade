@@ -147,6 +147,56 @@ pub struct Config {
     pub env_passthrough: Option<bool>,
 }
 
+impl Config {
+    /// Merge `overrides` into `self`: every field that is set in `overrides`
+    /// replaces the corresponding field in `self`; unset (`None`) fields leave
+    /// `self` untouched. Used to apply the script -> config file -> CLI
+    /// priority chain.
+    ///
+    /// The exhaustive destructuring (no `..`) is deliberate: adding a field to
+    /// `Config` without handling it here is a compile error, so a new option
+    /// can't be silently dropped from config-file merging again.
+    pub fn merge_from(&mut self, overrides: Config) {
+        macro_rules! merge_fields {
+            ($($field:ident),+ $(,)?) => {
+                let Config { $($field),+ } = overrides;
+                $(
+                    if $field.is_some() {
+                        self.$field = $field;
+                    }
+                )+
+            };
+        }
+        merge_fields!(
+            workers,
+            duration,
+            schedule,
+            executor,
+            rate,
+            time_unit,
+            criteria,
+            min_iteration_duration,
+            warmup,
+            stop,
+            iterations,
+            scenarios,
+            jitter,
+            drop,
+            stack_size,
+            heap_size,
+            response_sink,
+            no_endpoint_tracking,
+            abort_on_fail,
+            memory_safe,
+            insecure,
+            max_redirects,
+            user_agent,
+            no_pool,
+            env_passthrough,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,45 +499,100 @@ memory_safe: true
     }
 
     #[test]
-    fn test_config_merge_priority() {
-        // Test that merging works correctly (simulating CLI > file > script priority)
-        let script_config = Config {
+    fn test_merge_from_overrides_set_fields_and_preserves_unset() {
+        let mut config = Config {
             workers: Some(10),
             duration: Some("30s".to_string()),
             jitter: Some("100ms".to_string()),
             ..Default::default()
         };
 
-        let file_config = Config {
-            workers: Some(50),                // Should override script
-            duration: Some("1m".to_string()), // Should override script
-            drop: Some(0.05),                 // New field from file
+        config.merge_from(Config {
+            workers: Some(50),
+            duration: Some("1m".to_string()),
+            drop: Some(0.05),
             ..Default::default()
+        });
+
+        assert_eq!(config.workers, Some(50)); // overridden
+        assert_eq!(config.duration, Some("1m".to_string())); // overridden
+        assert_eq!(config.jitter, Some("100ms".to_string())); // preserved
+        assert_eq!(config.drop, Some(0.05)); // newly set
+    }
+
+    /// Builds a Config with every single field set, so the every-field merge
+    /// tests below fail if a field is added to Config but forgotten in merge_from.
+    fn config_with_all_fields_set() -> Config {
+        let config = Config {
+            workers: Some(50),
+            duration: Some("2m".to_string()),
+            schedule: Some(vec![ScheduleStep {
+                duration: "30s".to_string(),
+                target: 25,
+            }]),
+            executor: Some(ExecutorType::RampingWorkers),
+            rate: Some(100),
+            time_unit: Some("1s".to_string()),
+            criteria: Some(HashMap::from([(
+                "http_req_duration".to_string(),
+                vec!["p95<500".to_string()],
+            )])),
+            min_iteration_duration: Some("1s".to_string()),
+            warmup: Some("https://example.com/health".to_string()),
+            stop: Some("10s".to_string()),
+            iterations: Some(100),
+            scenarios: Some(HashMap::from([(
+                "checkout".to_string(),
+                ScenarioConfig::default(),
+            )])),
+            jitter: Some("100ms".to_string()),
+            drop: Some(0.05),
+            stack_size: Some(65536),
+            heap_size: Some(1048576),
+            response_sink: Some(true),
+            no_endpoint_tracking: Some(true),
+            abort_on_fail: Some(true),
+            memory_safe: Some(true),
+            insecure: Some(true),
+            max_redirects: Some(3),
+            user_agent: Some("Fusillade/1.0".to_string()),
+            no_pool: Some(true),
+            env_passthrough: Some(true),
         };
+        // Every field must be Some, otherwise the merge tests below are vacuous.
+        let json = serde_json::to_value(&config).unwrap();
+        for (key, value) in json.as_object().unwrap() {
+            assert!(!value.is_null(), "field {} must be set in fixture", key);
+        }
+        config
+    }
 
-        // Simulate merging: file overrides script
-        let mut merged = script_config.clone();
-        if file_config.workers.is_some() {
-            merged.workers = file_config.workers;
-        }
-        if file_config.duration.is_some() {
-            merged.duration = file_config.duration;
-        }
-        if file_config.drop.is_some() {
-            merged.drop = file_config.drop;
-        }
+    #[test]
+    fn test_merge_from_every_field_overrides() {
+        let mut config = Config::default();
+        let overrides = config_with_all_fields_set();
 
-        assert_eq!(merged.workers, Some(50)); // From file
-        assert_eq!(merged.duration, Some("1m".to_string())); // From file
-        assert_eq!(merged.jitter, Some("100ms".to_string())); // From script (not in file)
-        assert_eq!(merged.drop, Some(0.05)); // From file
+        config.merge_from(overrides.clone());
 
-        // Simulate CLI override
-        let cli_workers = Some(100);
-        if cli_workers.is_some() {
-            merged.workers = cli_workers;
-        }
-        assert_eq!(merged.workers, Some(100)); // From CLI
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::to_value(&overrides).unwrap(),
+            "every field set in the override config must survive the merge"
+        );
+    }
+
+    #[test]
+    fn test_merge_from_none_never_clobbers() {
+        let mut config = config_with_all_fields_set();
+        let before = serde_json::to_value(&config).unwrap();
+
+        config.merge_from(Config::default());
+
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            before,
+            "merging an all-None config must not change anything"
+        );
     }
 
     #[test]

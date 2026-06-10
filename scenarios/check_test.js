@@ -1,6 +1,8 @@
 // Assertion Function Test Scenario
 // Comprehensive testing of the assertion() function
 
+const BASE = __ENV.FUSILLADE_BASE_URL || 'https://httpbin.org';
+
 export const options = {
     workers: 1,
     duration: '3s'
@@ -10,7 +12,7 @@ export default function () {
     print('Testing assertion() function...');
 
     // Test 1: HTTP response checking
-    let res = http.get('https://httpbin.org/status/200');
+    let res = http.get(BASE + '/status/200');
     assertion(res, {
         'status is 200': (r) => r.status === 200,
         'response has body': (r) => r.body !== undefined
@@ -30,8 +32,8 @@ export default function () {
     let testString = 'Fusillade Load Testing';
     assertion(testString, {
         'contains Fusillade': (s) => s.includes('Fusillade'),
-        'length is correct': (s) => s.length === 21,
-        'starts with T': (s) => s.startsWith('T')
+        'length is correct': (s) => s.length === 22,
+        'starts with F': (s) => s.startsWith('F')
     });
     print('String assertions completed');
 

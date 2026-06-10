@@ -23,7 +23,12 @@ unsafe impl<'js> JsLifetime<'js> for JsExpectation<'js> {
 impl<'js> JsExpectation<'js> {
     #[qjs(rename = "toBe")]
     pub fn to_be(&self, ctx: Ctx<'js>, expected: Value<'js>) -> Result<()> {
-        if self.actual == expected {
+        // Rust-side Value equality compares raw QuickJS value bits (pointer
+        // identity for strings, undefined padding for bools), so delegate to
+        // real JS strict equality instead.
+        let strict_eq: Function = ctx.eval("(a, b) => a === b")?;
+        let equal: bool = strict_eq.call((self.actual.clone(), expected))?;
+        if equal {
             Ok(())
         } else {
             let msg = "AssertionError: Expected values to be strictly equal";
@@ -121,4 +126,116 @@ pub fn register_sync(ctx: &Ctx) -> Result<()> {
     globals.set("expect", Function::new(ctx.clone(), expect_impl))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Evaluates `expr` in a fresh JS context with expect()/test()/describe()
+    /// registered. Returns Ok(()) if it ran cleanly, or the thrown error's
+    /// string form.
+    fn eval_expect(expr: &str) -> std::result::Result<(), String> {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+
+        context.with(|ctx| {
+            register_sync(&ctx).unwrap();
+            match ctx.eval::<(), _>(expr) {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    let caught = ctx.catch();
+                    Err(format!("{:?}", caught))
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn test_to_be_equal_numbers_pass() {
+        assert!(eval_expect("expect(42).toBe(42)").is_ok());
+    }
+
+    #[test]
+    fn test_to_be_different_numbers_throw() {
+        let err = eval_expect("expect(1).toBe(2)").unwrap_err();
+        assert!(err.contains("AssertionError"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_to_be_equal_strings_pass() {
+        assert!(eval_expect("expect('abc').toBe('abc')").is_ok());
+    }
+
+    #[test]
+    fn test_to_be_equal_bools_pass() {
+        assert!(eval_expect("expect(true).toBe(true)").is_ok());
+    }
+
+    #[test]
+    fn test_to_be_compares_strings_by_value_not_identity() {
+        // 'ab' + 'c' builds a fresh heap string: === must still see it as
+        // equal to the literal 'abc'.
+        assert!(eval_expect("expect('ab' + 'c').toBe('abc')").is_ok());
+    }
+
+    #[test]
+    fn test_to_be_number_vs_string_throws() {
+        let err = eval_expect("expect(1).toBe('1')").unwrap_err();
+        assert!(err.contains("AssertionError"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_to_equal_deep_objects_pass() {
+        assert!(eval_expect("expect({a: 1, b: [1, 2]}).toEqual({a: 1, b: [1, 2]})").is_ok());
+    }
+
+    #[test]
+    fn test_to_equal_different_objects_throw() {
+        let err = eval_expect("expect({a: 1}).toEqual({a: 2})").unwrap_err();
+        assert!(err.contains("AssertionError"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_to_be_truthy_truthy_values_pass() {
+        for expr in [
+            "expect(1).toBeTruthy()",
+            "expect('x').toBeTruthy()",
+            "expect({}).toBeTruthy()",
+            "expect([]).toBeTruthy()",
+            "expect(true).toBeTruthy()",
+        ] {
+            assert!(eval_expect(expr).is_ok(), "expected pass: {}", expr);
+        }
+    }
+
+    #[test]
+    fn test_to_be_truthy_falsy_values_throw() {
+        for expr in [
+            "expect(0).toBeTruthy()",
+            "expect('').toBeTruthy()",
+            "expect(null).toBeTruthy()",
+            "expect(undefined).toBeTruthy()",
+            "expect(false).toBeTruthy()",
+            "expect(NaN).toBeTruthy()",
+        ] {
+            let err = eval_expect(expr).expect_err(&format!("expected AssertionError: {}", expr));
+            assert!(err.contains("AssertionError"), "got: {}", err);
+        }
+    }
+
+    #[test]
+    fn test_test_swallows_assertion_failures() {
+        // test() reports failures to stdout but must not propagate them,
+        // so one failed test block doesn't abort the iteration.
+        assert!(eval_expect("test('fails', () => { expect(1).toBe(2); })").is_ok());
+    }
+
+    #[test]
+    fn test_describe_runs_body() {
+        assert!(eval_expect(
+            "let ran = false; describe('suite', () => { ran = true; }); if (!ran) throw 'body not run';"
+        )
+        .is_ok());
+    }
 }

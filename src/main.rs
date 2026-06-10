@@ -219,9 +219,9 @@ enum Commands {
         /// Skip TLS certificate verification (insecure, use for self-signed certs)
         #[arg(long)]
         insecure: bool,
-        /// Maximum number of HTTP redirects to follow (0 to disable, max 100)
-        #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(0..=100))]
-        max_redirects: u32,
+        /// Maximum number of HTTP redirects to follow (default: 10, 0 to disable, max 100)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=100))]
+        max_redirects: Option<u32>,
         /// Default User-Agent header for HTTP requests
         #[arg(long)]
         user_agent: Option<String>,
@@ -555,66 +555,7 @@ fn main() -> Result<()> {
                 };
 
                 // Merge file config into final_config (file overrides script)
-                if file_config.workers.is_some() {
-                    final_config.workers = file_config.workers;
-                }
-                if file_config.duration.is_some() {
-                    final_config.duration = file_config.duration;
-                }
-                if file_config.schedule.is_some() {
-                    final_config.schedule = file_config.schedule;
-                }
-                if file_config.executor.is_some() {
-                    final_config.executor = file_config.executor;
-                }
-                if file_config.rate.is_some() {
-                    final_config.rate = file_config.rate;
-                }
-                if file_config.time_unit.is_some() {
-                    final_config.time_unit = file_config.time_unit;
-                }
-                if file_config.criteria.is_some() {
-                    final_config.criteria = file_config.criteria;
-                }
-                if file_config.min_iteration_duration.is_some() {
-                    final_config.min_iteration_duration = file_config.min_iteration_duration;
-                }
-                if file_config.warmup.is_some() {
-                    final_config.warmup = file_config.warmup;
-                }
-                if file_config.stop.is_some() {
-                    final_config.stop = file_config.stop;
-                }
-                if file_config.iterations.is_some() {
-                    final_config.iterations = file_config.iterations;
-                }
-                if file_config.scenarios.is_some() {
-                    final_config.scenarios = file_config.scenarios;
-                }
-                if file_config.jitter.is_some() {
-                    final_config.jitter = file_config.jitter;
-                }
-                if file_config.drop.is_some() {
-                    final_config.drop = file_config.drop;
-                }
-                if file_config.stack_size.is_some() {
-                    final_config.stack_size = file_config.stack_size;
-                }
-                if file_config.response_sink.is_some() {
-                    final_config.response_sink = file_config.response_sink;
-                }
-                if file_config.no_endpoint_tracking.is_some() {
-                    final_config.no_endpoint_tracking = file_config.no_endpoint_tracking;
-                }
-                if file_config.abort_on_fail.is_some() {
-                    final_config.abort_on_fail = file_config.abort_on_fail;
-                }
-                if file_config.memory_safe.is_some() {
-                    final_config.memory_safe = file_config.memory_safe;
-                }
-                if file_config.no_pool.is_some() {
-                    final_config.no_pool = file_config.no_pool;
-                }
+                final_config.merge_from(file_config);
             }
 
             // CLI flags override everything (highest priority)
@@ -657,7 +598,9 @@ fn main() -> Result<()> {
             if env_passthrough {
                 final_config.env_passthrough = Some(true);
             }
-            final_config.max_redirects = Some(max_redirects);
+            if let Some(mr) = max_redirects {
+                final_config.max_redirects = Some(mr);
+            }
             if let Some(ref ua) = user_agent {
                 final_config.user_agent = Some(ua.clone());
             }

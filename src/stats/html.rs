@@ -531,6 +531,7 @@ fn escape_html(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn truncate_endpoint(s: &str, max_len: usize) -> String {
@@ -633,6 +634,12 @@ mod tests {
     fn test_escape_html() {
         assert_eq!(escape_html("<script>"), "&lt;script&gt;");
         assert_eq!(escape_html("a & b"), "a &amp; b");
+        assert_eq!(escape_html("say \"hi\""), "say &quot;hi&quot;");
+        assert_eq!(escape_html("it's"), "it&#39;s");
+        assert_eq!(
+            escape_html("' onmouseover='alert(1)"),
+            "&#39; onmouseover=&#39;alert(1)"
+        );
     }
 
     #[test]
@@ -776,7 +783,7 @@ mod tests {
     fn test_escape_html_special_chars() {
         assert_eq!(
             escape_html("<script>alert('xss')</script>"),
-            "&lt;script&gt;alert('xss')&lt;/script&gt;"
+            "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
         );
         assert_eq!(escape_html("a&b"), "a&amp;b");
         assert_eq!(escape_html("\"quoted\""), "&quot;quoted&quot;");

@@ -32,6 +32,10 @@ node_modules/
 # docs (archived for later release)
 archive.md
 
+# Internal working docs / agent scratch space
+audit.md
+.superpowers/
+
 # Benchmarks
 benchmarks/
 
