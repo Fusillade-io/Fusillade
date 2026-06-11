@@ -143,9 +143,9 @@ impl JsMqttClient {
 
     /// Subscribe to a topic pattern (supports MQTT wildcards + and #)
     /// Optional QoS: 0 = AtMostOnce, 1 = AtLeastOnce (default), 2 = ExactlyOnce
-    pub fn subscribe(&mut self, topic: String, qos: Option<u8>) -> Result<()> {
+    pub fn subscribe(&mut self, topic: String, qos: rquickjs::function::Opt<u8>) -> Result<()> {
         let start = Instant::now();
-        let qos_level = map_qos(qos);
+        let qos_level = map_qos(qos.0);
         if let Some(ref mut client) = self.client {
             match client.subscribe(&topic, qos_level) {
                 Ok(()) => {
@@ -205,9 +205,13 @@ impl JsMqttClient {
 
     /// Receive the next message from subscribed topics
     /// Returns { value: { topic, payload, qos } | null, reason: "timeout" | "closed" | "not_connected" | null }
-    pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
+    pub fn recv<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        timeout_ms: rquickjs::function::Opt<u64>,
+    ) -> Result<Value<'js>> {
         let start = Instant::now();
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
+        let timeout = Duration::from_millis(timeout_ms.0.unwrap_or(30_000));
 
         if let Some(ref rx) = self.message_rx {
             // Use recv_timeout for blocking with configurable timeout
@@ -256,16 +260,16 @@ impl JsMqttClient {
         &mut self,
         topic: String,
         payload: String,
-        qos: Option<u8>,
-        retain: Option<bool>,
+        qos: rquickjs::function::Opt<u8>,
+        retain: rquickjs::function::Opt<bool>,
     ) -> Result<()> {
         let start = Instant::now();
-        let qos_level = map_qos(qos);
+        let qos_level = map_qos(qos.0);
         if let Some(ref mut client) = self.client {
             match client.publish(
                 topic,
                 qos_level,
-                retain.unwrap_or(false),
+                retain.0.unwrap_or(false),
                 payload.as_bytes(),
             ) {
                 Ok(()) => {

@@ -541,10 +541,10 @@ impl<'js> JsPage {
         &self,
         ctx: Ctx<'js>,
         url_pattern: String,
-        timeout_ms: Option<f64>,
+        timeout_ms: rquickjs::function::Opt<f64>,
     ) -> Result<Value<'js>> {
         let start = Instant::now();
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30000.0) as u64);
+        let timeout = Duration::from_millis(timeout_ms.0.unwrap_or(30000.0) as u64);
         let escaped_pattern = escape_js_string(&url_pattern);
 
         loop {

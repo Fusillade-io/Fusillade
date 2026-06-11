@@ -327,8 +327,12 @@ unsafe impl<'js> JsLifetime<'js> for GrpcServerStream {
 impl GrpcServerStream {
     /// Receive the next message from the server stream
     /// Returns { value: message | null, reason: "timeout" | "closed" | "not_connected" | null }
-    pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
-        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
+    pub fn recv<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        timeout_ms: rquickjs::function::Opt<u64>,
+    ) -> Result<Value<'js>> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.0.unwrap_or(30_000));
         let borrow = self.message_rx.borrow();
 
         if let Some(ref rx) = *borrow {
@@ -501,8 +505,12 @@ impl GrpcBidiStream {
 
     /// Receive a message from the server
     /// Returns { value: message | null, reason: "timeout" | "closed" | "not_connected" | null }
-    pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
-        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
+    pub fn recv<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        timeout_ms: rquickjs::function::Opt<u64>,
+    ) -> Result<Value<'js>> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.0.unwrap_or(30_000));
         let borrow = self.message_rx.borrow();
 
         if let Some(ref rx) = *borrow {

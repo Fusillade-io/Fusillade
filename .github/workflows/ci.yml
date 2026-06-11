@@ -48,6 +48,19 @@ jobs:
         image: kennethreitz/httpbin
         ports:
           - 8080:80
+      # 1.6 allows anonymous connections by default (2.x requires a config file)
+      mosquitto:
+        image: eclipse-mosquitto:1.6
+        ports:
+          - 1883:1883
+      rabbitmq:
+        image: rabbitmq:3
+        ports:
+          - 5672:5672
+      ws-echo:
+        image: jmalloc/echo-server
+        ports:
+          - 8090:8080
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -76,8 +89,12 @@ jobs:
 
       - name: Run scenario tests
         env:
-          # Local httpbin service container keeps these hermetic (no httpbin.org)
+          # Local service containers keep these hermetic (no external services)
           FUSILLADE_BASE_URL: http://localhost:8080
+          FUSILLADE_MQTT_HOST: localhost
+          FUSILLADE_MQTT_PORT: "1883"
+          FUSILLADE_AMQP_URL: amqp://guest:guest@localhost:5672
+          FUSILLADE_WS_URL: ws://localhost:8090
         run: |
           # Unit tests (no HTTP required)
           ./target/release/fusillade run scenarios/unit_test.js --headless
@@ -94,6 +111,44 @@ jobs:
           ./target/release/fusillade run scenarios/check_test.js --headless
           ./target/release/fusillade run scenarios/http_test.js --headless
           ./target/release/fusillade run scenarios/timeout_test.js --headless
+
+          # Protocol tests (local broker service containers; these scenarios
+          # gate on a success-rate threshold and exit non-zero on failure)
+          ./target/release/fusillade run scenarios/ws_test.js --headless
+          ./target/release/fusillade run scenarios/mqtt_test.js --headless
+          ./target/release/fusillade run scenarios/amqp_test.js --headless
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install Protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage
+        run: |
+          cargo llvm-cov --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
 
   lint:
     name: Lint

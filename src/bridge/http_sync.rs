@@ -1172,6 +1172,136 @@ pub fn register_sync_http(
             opts.headers['Content-Type'] = 'application/json';
             return http.post(url, body, opts);
         };
+
+        // Wrapper layer: global defaults (http.setDefaults), object-form
+        // http.request, batch progress callbacks, and request/response hooks.
+        // The native methods only see plain (url, body, options) calls.
+        (function() {
+            var nativeHttp = {
+                get: http.get, post: http.post, put: http.put, del: http.del,
+                patch: http.patch, head: http.head, options: http.options,
+                request: http.request
+            };
+            var httpDefaults = { timeout: undefined, headers: undefined };
+
+            http.setDefaults = function(opts) {
+                opts = opts || {};
+                if ('timeout' in opts) httpDefaults.timeout = opts.timeout;
+                if ('headers' in opts) httpDefaults.headers = opts.headers;
+            };
+
+            function mergeDefaults(opts) {
+                var merged = {};
+                if (httpDefaults.headers) {
+                    merged.headers = {};
+                    for (var dk in httpDefaults.headers) merged.headers[dk] = httpDefaults.headers[dk];
+                }
+                if (httpDefaults.timeout !== undefined) merged.timeout = httpDefaults.timeout;
+                if (opts) {
+                    for (var k in opts) {
+                        if (k === 'headers' && merged.headers) {
+                            for (var hk in opts.headers) merged.headers[hk] = opts.headers[hk];
+                        } else {
+                            merged[k] = opts[k];
+                        }
+                    }
+                }
+                return merged;
+            }
+
+            function callNative(method, url, body, opts) {
+                switch (method) {
+                    case 'GET': return nativeHttp.get(url, opts);
+                    case 'POST': return nativeHttp.post(url, body == null ? '' : body, opts);
+                    case 'PUT': return nativeHttp.put(url, body == null ? '' : body, opts);
+                    case 'PATCH': return nativeHttp.patch(url, body == null ? '' : body, opts);
+                    case 'DELETE': return body == null
+                        ? nativeHttp.del(url, opts)
+                        : nativeHttp.request('DELETE', url, body, opts);
+                    case 'HEAD': return nativeHttp.head(url, opts);
+                    case 'OPTIONS': return nativeHttp.options(url, opts);
+                    default: return nativeHttp.request(method, url, body, opts);
+                }
+            }
+
+            function dispatch(method, url, body, opts) {
+                var merged = mergeDefaults(opts);
+                var req = {
+                    method: String(method || 'GET').toUpperCase(),
+                    url: url,
+                    body: body,
+                    headers: merged.headers || {}
+                };
+                // Hooks may mutate url, body, and headers before the request runs.
+                globalThis.__http_callBeforeRequestHooks(req);
+                merged.headers = req.headers;
+                var res = callNative(req.method, req.url, req.body, merged);
+                globalThis.__http_callAfterResponseHooks(res);
+                return res;
+            }
+
+            function optionsFromRequestObject(r) {
+                var o = {};
+                for (var k in r) {
+                    if (k !== 'method' && k !== 'url' && k !== 'body') o[k] = r[k];
+                }
+                return o;
+            }
+
+            http.get = function(url, opts) { return dispatch('GET', url, undefined, opts); };
+            http.post = function(url, body, opts) { return dispatch('POST', url, body, opts); };
+            http.put = function(url, body, opts) { return dispatch('PUT', url, body, opts); };
+            http.patch = function(url, body, opts) { return dispatch('PATCH', url, body, opts); };
+            http.del = function(url, opts) { return dispatch('DELETE', url, undefined, opts); };
+            http.head = function(url, opts) { return dispatch('HEAD', url, undefined, opts); };
+            http.options = function(url, opts) { return dispatch('OPTIONS', url, undefined, opts); };
+
+            http.request = function(methodOrReq, url, body, opts) {
+                if (methodOrReq && typeof methodOrReq === 'object') {
+                    var r = methodOrReq;
+                    return dispatch(r.method, r.url, r.body, optionsFromRequestObject(r));
+                }
+                return dispatch(methodOrReq, url, body, opts);
+            };
+
+            http.batch = function(requests, onProgress) {
+                var results = [];
+                for (var i = 0; i < requests.length; i++) {
+                    var r = requests[i];
+                    results.push(dispatch(r.method, r.url, r.body, optionsFromRequestObject(r)));
+                    if (typeof onProgress === 'function') {
+                        try { onProgress(i + 1, requests.length); } catch (e) {}
+                    }
+                }
+                return results;
+            };
+
+            http.url = function(base, params) {
+                if (!params) return base;
+                var parts = [];
+                for (var k in params) {
+                    parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(params[k]));
+                }
+                if (parts.length === 0) return base;
+                return base + (base.indexOf('?') === -1 ? '?' : '&') + parts.join('&');
+            };
+
+            http.formEncode = function(obj) {
+                var parts = [];
+                for (var k in obj) {
+                    parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(obj[k]));
+                }
+                return parts.join('&');
+            };
+
+            http.basicAuth = function(username, password) {
+                return 'Basic ' + encoding.b64encode(username + ':' + password);
+            };
+
+            http.bearerToken = function(token) {
+                return 'Bearer ' + token;
+            };
+        })();
     "#,
     )?;
 

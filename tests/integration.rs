@@ -81,21 +81,26 @@ fn handle_connection(mut stream: TcpStream, hits: Arc<AtomicUsize>) {
         let method = parts.next().unwrap_or("");
         let path = parts.next().unwrap_or("/");
 
-        let (status_line, response_body): (&str, Vec<u8>) = match (method, path) {
-            ("GET", "/ok") => ("200 OK", b"hello world".to_vec()),
-            ("GET", "/status/500") => ("500 Internal Server Error", b"oops".to_vec()),
-            ("POST", "/echo") => ("200 OK", body.clone()),
+        let (status_line, response_body, extra_header): (&str, Vec<u8>, &str) = match (method, path)
+        {
+            ("GET", "/ok") => ("200 OK", b"hello world".to_vec(), ""),
+            ("GET", "/status/500") => ("500 Internal Server Error", b"oops".to_vec(), ""),
+            ("POST", "/echo") => ("200 OK", body.clone(), ""),
+            // Echoes the raw request head so tests can assert on sent headers.
+            ("GET", "/echo-headers") => ("200 OK", head.clone().into_bytes(), ""),
+            ("GET", "/redirect") => ("302 Found", Vec::new(), "Location: /ok\r\n"),
             ("GET", "/slow") => {
                 std::thread::sleep(std::time::Duration::from_secs(3));
-                ("200 OK", b"finally".to_vec())
+                ("200 OK", b"finally".to_vec(), "")
             }
-            _ => ("404 Not Found", b"not found".to_vec()),
+            _ => ("404 Not Found", b"not found".to_vec(), ""),
         };
 
         let header = format!(
-            "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\n",
+            "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n{}Connection: keep-alive\r\n\r\n",
             status_line,
-            response_body.len()
+            response_body.len(),
+            extra_header
         );
         if stream.write_all(header.as_bytes()).is_err() || stream.write_all(&response_body).is_err()
         {
@@ -249,4 +254,169 @@ export default function () {{
     let report = run_script(script, iterations_config(1, 1));
 
     assert_eq!(report.checks.get("timed out with status 0"), Some(&(1, 1)));
+}
+
+#[test]
+fn duration_based_run_terminates_and_generates_load() {
+    let server = TestServer::start();
+    let script = format!(
+        r#"
+export default function () {{
+    http.get('{base}/ok');
+}}
+"#,
+        base = server.base_url
+    );
+
+    let config = Config {
+        workers: Some(2),
+        duration: Some("1s".to_string()),
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    let report = run_script(script, config);
+
+    // The run must stop on its own shortly after the configured duration
+    // (generous bound: engine teardown takes a few seconds).
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(30),
+        "duration-based run did not terminate promptly"
+    );
+    assert!(report.total_requests > 0, "no load was generated");
+    assert_eq!(
+        report.status_codes.get(&200),
+        Some(&report.total_requests),
+        "all requests should be 200s: {:?}",
+        report.status_codes
+    );
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+}
+
+#[test]
+fn redirects_are_followed_by_default() {
+    let server = TestServer::start();
+    let script = format!(
+        r#"
+export default function () {{
+    let res = http.get('{base}/redirect');
+    check(res, {{
+        'lands on 200': (r) => r.status === 200,
+        'final body served': (r) => r.body === 'hello world',
+    }});
+}}
+"#,
+        base = server.base_url
+    );
+
+    let report = run_script(script, iterations_config(1, 1));
+
+    assert_eq!(report.checks.get("lands on 200"), Some(&(1, 1)));
+    assert_eq!(report.checks.get("final body served"), Some(&(1, 1)));
+    // Redirect + follow-up both hit the server
+    assert_eq!(server.hits.load(Ordering::SeqCst), 2);
+}
+
+/// Documented wrapper APIs: http.setDefaults, object-form http.request,
+/// http.batch with onProgress, request/response hooks, and pure helpers
+/// (http.url, formEncode, basicAuth, bearerToken). One engine run keeps the
+/// suite fast.
+#[test]
+fn wrapper_apis_defaults_hooks_batch_and_helpers() {
+    let server = TestServer::start();
+    let script = format!(
+        r#"
+export default function () {{
+    // setDefaults applies to subsequent requests
+    http.setDefaults({{ headers: {{ 'X-Api-Key': 'sekrit' }} }});
+    let r1 = http.get('{base}/echo-headers');
+    check(r1, {{
+        'default header sent': (r) => r.body.includes('X-Api-Key: sekrit'),
+    }});
+
+    // per-request headers override defaults
+    let r2 = http.get('{base}/echo-headers', {{ headers: {{ 'X-Api-Key': 'override' }} }});
+    check(r2, {{
+        'override header wins': (r) => r.body.includes('X-Api-Key: override'),
+    }});
+
+    // object-form http.request
+    let r3 = http.request({{
+        method: 'POST',
+        url: '{base}/echo',
+        body: 'obj-form',
+        headers: {{ 'Content-Type': 'text/plain' }},
+    }});
+    check(r3, {{
+        'object form posts body': (r) => r.body === 'obj-form',
+    }});
+
+    // batch with progress callback
+    let progress = [];
+    let results = http.batch([
+        {{ method: 'GET', url: '{base}/ok' }},
+        {{ method: 'GET', url: '{base}/ok' }},
+    ], function (done, total) {{ progress.push(done + '/' + total); }});
+    check(results, {{
+        'batch returns both responses': (rs) =>
+            rs.length === 2 && rs[0].status === 200 && rs[1].status === 200,
+    }});
+    check(progress.join(','), {{
+        'progress callback fired per request': (p) => p === '1/2,2/2',
+    }});
+
+    // hooks: beforeRequest mutates outgoing headers, afterResponse observes status
+    let seenStatus = 0;
+    http.addHook('beforeRequest', (req) => {{ req.headers['X-Hooked'] = 'yes'; }});
+    http.addHook('afterResponse', (res) => {{ seenStatus = res.status; }});
+    let r4 = http.get('{base}/echo-headers');
+    http.clearHooks();
+    check(r4, {{
+        'hook header sent': (r) => r.body.includes('X-Hooked: yes'),
+    }});
+    check(seenStatus, {{
+        'afterResponse saw status': (s) => s === 200,
+    }});
+
+    // pure helpers
+    check(http.url('{base}/ok', {{ a: '1', b: 'x y' }}), {{
+        'url builder encodes params': (u) => u === '{base}/ok?a=1&b=x%20y',
+    }});
+    check(http.formEncode({{ a: '1', b: 'x y' }}), {{
+        'form encode': (s) => s === 'a=1&b=x%20y',
+    }});
+    check(http.basicAuth('user', 'pass'), {{
+        'basic auth helper': (v) => v === 'Basic dXNlcjpwYXNz',
+    }});
+    check(http.bearerToken('tok'), {{
+        'bearer token helper': (v) => v === 'Bearer tok',
+    }});
+}}
+"#,
+        base = server.base_url
+    );
+
+    let report = run_script(script, iterations_config(1, 1));
+
+    let expected_passing = [
+        "default header sent",
+        "override header wins",
+        "object form posts body",
+        "batch returns both responses",
+        "progress callback fired per request",
+        "hook header sent",
+        "afterResponse saw status",
+        "url builder encodes params",
+        "form encode",
+        "basic auth helper",
+        "bearer token helper",
+    ];
+    for name in expected_passing {
+        assert_eq!(
+            report.checks.get(name),
+            Some(&(1, 1)),
+            "check '{name}' did not pass: {:?}",
+            report.checks
+        );
+    }
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
 }

@@ -242,14 +242,18 @@ unsafe impl<'js> JsLifetime<'js> for WsMetricSender {
     type Changed<'to> = WsMetricSender;
 }
 
-fn ws_connect<'js>(ctx: Ctx<'js>, url: String, options: Option<Object<'js>>) -> Result<Value<'js>> {
+fn ws_connect<'js>(
+    ctx: Ctx<'js>,
+    url: String,
+    options: rquickjs::function::Opt<Object<'js>>,
+) -> Result<Value<'js>> {
     let tx = ctx.userdata::<WsMetricSender>().map(|w| w.0.clone());
     let start = Instant::now();
 
     // Parse options
     let mut reconnect = false;
     let mut max_retries: u32 = 3;
-    if let Some(ref opts) = options {
+    if let Some(ref opts) = options.0 {
         if let Ok(val) = opts.get::<_, bool>("reconnect") {
             reconnect = val;
         }

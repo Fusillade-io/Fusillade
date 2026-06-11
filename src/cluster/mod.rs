@@ -659,7 +659,7 @@ mod tests {
             crate::stats::StatsAggregator::default(),
         ));
         let service = ClusterService::new_with_registry(
-            Arc::new(std::sync::RwLock::new(Default::default())),
+            aggregator,
             make_registry(),
             Some("secret123".to_string()),
         );
@@ -695,5 +695,204 @@ mod tests {
         );
         let meta = tonic::metadata::MetadataMap::new();
         assert!(service.check_auth(&meta).is_err());
+    }
+
+    /// Controller <-> worker protocol over a real in-process gRPC server:
+    /// registration, command dispatch, metric aggregation, disconnect cleanup.
+    mod grpc_protocol {
+        use super::*;
+        use proto::cluster_client::ClusterClient;
+        use proto::RegisterRequest;
+
+        /// Start a ClusterServer on an ephemeral 127.0.0.1 port.
+        async fn start_controller(
+            token: Option<String>,
+        ) -> (String, SharedAggregator, WorkerRegistry) {
+            let aggregator: SharedAggregator = Arc::new(std::sync::RwLock::new(
+                crate::stats::StatsAggregator::default(),
+            ));
+            let registry = make_registry();
+            let service =
+                ClusterService::new_with_registry(aggregator.clone(), registry.clone(), token);
+            let svc = proto::cluster_server::ClusterServer::new(service);
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(svc)
+                    .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                    .await
+                    .unwrap();
+            });
+
+            (format!("http://{}", addr), aggregator, registry)
+        }
+
+        async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+            for _ in 0..250 {
+                if cond() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("timed out waiting for {}", what);
+        }
+
+        fn register_msg(id: &str) -> WorkerMessage {
+            WorkerMessage {
+                msg: Some(worker_message::Msg::Register(RegisterRequest {
+                    id: id.to_string(),
+                    address: "127.0.0.1:7777".to_string(),
+                    available_cpus: 4,
+                })),
+            }
+        }
+
+        #[tokio::test]
+        async fn register_dispatch_and_disconnect_cleanup() {
+            let (url, _aggregator, registry) = start_controller(None).await;
+            let mut client = ClusterClient::connect(url).await.unwrap();
+
+            let (tx, rx) = mpsc::channel(10);
+            tx.send(register_msg("worker-a")).await.unwrap();
+            let response = client
+                .register(tokio_stream::wrappers::ReceiverStream::new(rx))
+                .await
+                .unwrap();
+            let mut commands = response.into_inner();
+
+            // Registration lands in the controller's registry
+            let reg = registry.clone();
+            wait_until(
+                move || reg.read().unwrap().contains_key("worker-a"),
+                "worker registration",
+            )
+            .await;
+            assert_eq!(registry.read().unwrap()["worker-a"].available_cpus, 4);
+
+            // Dispatch fans out to the registered worker over the stream
+            let sent = dispatch_test_to_workers(
+                &registry,
+                "export default function() {}".to_string(),
+                "{}".to_string(),
+                HashMap::new(),
+                "http://controller/metrics".to_string(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(sent, 1);
+
+            let cmd = commands.message().await.unwrap().unwrap();
+            match cmd.cmd.unwrap() {
+                controller_command::Cmd::StartTest(st) => {
+                    assert_eq!(st.script_content, "export default function() {}");
+                    assert_eq!(st.metrics_url, "http://controller/metrics");
+                }
+                _ => panic!("expected StartTest"),
+            }
+
+            // Closing the worker's send stream removes it from the registry
+            drop(tx);
+            let reg = registry.clone();
+            wait_until(
+                move || reg.read().unwrap().is_empty(),
+                "worker removal after disconnect",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn report_metrics_aggregates_into_controller_stats() {
+            let (url, aggregator, _registry) = start_controller(None).await;
+            let mut client = ClusterClient::connect(url).await.unwrap();
+
+            let batch = MetricBatch {
+                worker_id: "worker-a".to_string(),
+                metrics: vec![
+                    proto::Metric {
+                        name: "GET /api".to_string(),
+                        duration_ns: 25_000_000,
+                        status: 200,
+                        error: None,
+                        timestamp: 0,
+                        blocked_ns: 0,
+                        connecting_ns: 0,
+                        tls_ns: 0,
+                        sending_ns: 0,
+                        waiting_ns: 20_000_000,
+                        receiving_ns: 5_000_000,
+                        response_size: 512,
+                        request_size: 128,
+                    },
+                    proto::Metric {
+                        name: "GET /api".to_string(),
+                        duration_ns: 40_000_000,
+                        status: 500,
+                        error: Some("server error".to_string()),
+                        timestamp: 0,
+                        blocked_ns: 0,
+                        connecting_ns: 0,
+                        tls_ns: 0,
+                        sending_ns: 0,
+                        waiting_ns: 0,
+                        receiving_ns: 0,
+                        response_size: 0,
+                        request_size: 128,
+                    },
+                ],
+            };
+
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(batch).await.unwrap();
+            drop(tx); // close the stream so the RPC completes
+            client
+                .report_metrics(tokio_stream::wrappers::ReceiverStream::new(rx))
+                .await
+                .unwrap();
+
+            let agg = aggregator.read().unwrap();
+            assert_eq!(agg.total_requests, 2);
+            assert_eq!(agg.status_codes.get(&200), Some(&1));
+            assert_eq!(agg.status_codes.get(&500), Some(&1));
+            assert_eq!(agg.errors.get("server error"), Some(&1));
+            assert_eq!(agg.total_data_sent, 256);
+            assert_eq!(agg.total_data_received, 512);
+        }
+
+        #[tokio::test]
+        async fn register_requires_valid_token_when_configured() {
+            let (url, _aggregator, registry) = start_controller(Some("sekrit".to_string())).await;
+
+            // Without a token the registration RPC is rejected outright
+            let mut client = ClusterClient::connect(url.clone()).await.unwrap();
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(register_msg("intruder")).await.unwrap();
+            let err = client
+                .register(tokio_stream::wrappers::ReceiverStream::new(rx))
+                .await
+                .expect_err("unauthenticated register must fail");
+            assert_eq!(err.code(), tonic::Code::Unauthenticated);
+            drop(tx);
+
+            // With the right bearer token it succeeds
+            let mut client = ClusterClient::connect(url).await.unwrap();
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(register_msg("worker-b")).await.unwrap();
+            let mut request = Request::new(tokio_stream::wrappers::ReceiverStream::new(rx));
+            request
+                .metadata_mut()
+                .insert("authorization", "Bearer sekrit".parse().unwrap());
+            client.register(request).await.unwrap();
+
+            let reg = registry.clone();
+            wait_until(
+                move || reg.read().unwrap().contains_key("worker-b"),
+                "authenticated worker registration",
+            )
+            .await;
+            assert!(!registry.read().unwrap().contains_key("intruder"));
+            drop(tx);
+        }
     }
 }

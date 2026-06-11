@@ -212,9 +212,13 @@ impl JsAmqpClient {
 
     /// Receive the next message from the queue
     /// Returns { value: { body, deliveryTag } | null, reason: "timeout" | "closed" | "not_connected" | null }
-    pub fn recv<'js>(&self, ctx: Ctx<'js>, timeout_ms: Option<u64>) -> Result<Value<'js>> {
+    pub fn recv<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        timeout_ms: rquickjs::function::Opt<u64>,
+    ) -> Result<Value<'js>> {
         let start = Instant::now();
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
+        let timeout = Duration::from_millis(timeout_ms.0.unwrap_or(30_000));
 
         if let Some(ref rx) = self.message_rx {
             match rx.recv_timeout(timeout) {
@@ -354,7 +358,7 @@ impl JsAmqpClient {
         &self,
         name: String,
         exchange_type: String,
-        opts: Option<Object<'_>>,
+        opts: rquickjs::function::Opt<Object<'_>>,
     ) -> Result<()> {
         let start = Instant::now();
         let channel = self.channel.as_ref().ok_or_else(|| {
@@ -370,7 +374,7 @@ impl JsAmqpClient {
         };
 
         let mut exchange_opts = ExchangeDeclareOptions::default();
-        if let Some(ref o) = opts {
+        if let Some(ref o) = opts.0 {
             if let Ok(durable) = o.get::<_, bool>("durable") {
                 exchange_opts.durable = durable;
             }
@@ -401,14 +405,18 @@ impl JsAmqpClient {
 
     /// Declare a queue with options
     #[qjs(rename = "declareQueue")]
-    pub fn declare_queue(&self, name: String, opts: Option<Object<'_>>) -> Result<()> {
+    pub fn declare_queue(
+        &self,
+        name: String,
+        opts: rquickjs::function::Opt<Object<'_>>,
+    ) -> Result<()> {
         let start = Instant::now();
         let channel = self.channel.as_ref().ok_or_else(|| {
             rquickjs::Error::new_from_js("AMQP Client not connected", "StateError")
         })?;
 
         let mut queue_opts = QueueDeclareOptions::default();
-        if let Some(ref o) = opts {
+        if let Some(ref o) = opts.0 {
             if let Ok(durable) = o.get::<_, bool>("durable") {
                 queue_opts.durable = durable;
             }

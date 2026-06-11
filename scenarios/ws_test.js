@@ -1,43 +1,46 @@
-// WebSocket Test Scenario
-// Tests WebSocket connection using a public echo server
+// WebSocket echo round-trip test.
+// Defaults to the public echo server; set FUSILLADE_WS_URL to use a local
+// echo server (CI runs jmalloc/echo-server).
+
+const URL = __ENV.FUSILLADE_WS_URL || 'wss://echo.websocket.org';
 
 export const options = {
     workers: 1,
-    duration: '3s'
+    iterations: 1,
+    thresholds: {
+        'ws_success': ['rate >= 1'],
+    },
+    abort_on_fail: true,
 };
 
 export default function () {
-    print('WebSocket test starting...');
+    print('WebSocket test starting against ' + URL + '...');
+    let ok = false;
 
     try {
-        // Connect to a public WebSocket echo server
-        // Connect to a public WebSocket echo server
-        // Using wss://echo.websocket.org
-        let socket = ws.connect('wss://echo.websocket.org');
+        let socket = ws.connect(URL);
         print('WebSocket connected');
 
-        // Send a message
         let testMessage = 'Hello from Fusillade!';
         socket.send(testMessage);
         print('Sent: ' + testMessage);
 
-        // Receive the echo
-        let received = socket.recv();
-        print('Received: ' + received);
+        // Some echo servers (echo.websocket.org, jmalloc/echo-server) send a
+        // greeting before echoing, so scan the first few messages.
+        for (let i = 0; i < 3; i++) {
+            let received = socket.recv();
+            print('Received: ' + received);
+            if (received === testMessage) {
+                ok = true;
+                break;
+            }
+        }
 
-        // Verify the echo
-        assertion(received === testMessage, {
-            'echo matches sent message': (v) => v === true
-        });
-
-        // Close the connection
         socket.close();
         print('WebSocket closed');
-
     } catch (e) {
-        // Graceful handling if WebSocket server is unavailable
         print('WebSocket Error (server may be unavailable): ' + e);
     }
 
-    sleep(0.5);
+    metrics.rateAdd('ws_success', ok);
 }
