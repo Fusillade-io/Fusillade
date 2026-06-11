@@ -5,6 +5,19 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `http.cookieJar()` — manual cookie management per the documented API (`set`, `get`, `cookiesForUrl`, `delete`, `clear`), backed by the same per-worker store that handles automatic cookies
+- `http.file(path, [filename], [contentType])` and multipart file uploads: `FormData` now expands file markers into proper multipart parts, and `http.post` wraps a bare file body automatically
+- Connection-pool reuse metrics in the default (pooled) HTTP path — previously every request counted as a pool miss
+- CI: gRPC and SSE scenarios run hermetically against `moul/grpcbin` and a local SSE stream, threshold-gated
+
+### Fixed
+- **All dynamic gRPC calls panicked** (`buffer full; poll_ready must be called first`) — the channel is now readied before dispatch in `invoke`, `serverStream`, `clientStream`, and `bidiStream`
+- Automatic cookies now also work in `--no-pool` mode (cookie handling covers both HTTP paths)
+- `http.batch` documentation claimed parallel execution; requests are issued sequentially within a worker (docs corrected)
+
 ## [1.6.0] - 2026-06-11
 
 ### Added

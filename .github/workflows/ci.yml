@@ -61,6 +61,10 @@ jobs:
         image: jmalloc/echo-server
         ports:
           - 8090:8080
+      grpcbin:
+        image: moul/grpcbin
+        ports:
+          - 9000:9000
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -95,6 +99,8 @@ jobs:
           FUSILLADE_MQTT_PORT: "1883"
           FUSILLADE_AMQP_URL: amqp://guest:guest@localhost:5672
           FUSILLADE_WS_URL: ws://localhost:8090
+          FUSILLADE_SSE_URL: http://localhost:8090/.sse
+          FUSILLADE_GRPC_URL: http://localhost:9000
         run: |
           # Unit tests (no HTTP required)
           ./target/release/fusillade run scenarios/unit_test.js --headless
@@ -117,6 +123,8 @@ jobs:
           ./target/release/fusillade run scenarios/ws_test.js --headless
           ./target/release/fusillade run scenarios/mqtt_test.js --headless
           ./target/release/fusillade run scenarios/amqp_test.js --headless
+          ./target/release/fusillade run scenarios/sse_test.js --headless
+          ./target/release/fusillade run scenarios/grpc_test.js --headless
 
   coverage:
     name: Coverage

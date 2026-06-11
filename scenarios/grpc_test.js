@@ -1,44 +1,40 @@
-// gRPC Test Scenario
-// Requires a running gRPC server (e.g., using grpc-reflection or known proto)
+// gRPC unary smoke test against a grpcbin-compatible hello service.
+// Set FUSILLADE_GRPC_URL to point at a server (CI runs moul/grpcbin);
+// defaults to a local grpcbin on the standard plaintext port.
 
-// Example using the classic Greeter service
-// You would need 'helloworld.proto' locally.
+const URL = __ENV.FUSILLADE_GRPC_URL || 'http://localhost:9000';
 
 export const options = {
     workers: 1,
-    duration: '1s'
+    iterations: 1,
+    thresholds: {
+        'grpc_success': ['rate >= 1'],
+    },
+    abort_on_fail: true,
 };
 
 const client = new GrpcClient();
-
-// Setup: Load protos and connect
-// In a real test, you'd probably do this in setup() or top-level if simple
-try {
-    client.load(['scenarios/helloworld.proto'], ['scenarios/']);
-    print("Proto loaded successfully");
-} catch (e) {
-    print("Proto load failed (expected if file missing): " + e);
-}
+client.load(['scenarios/hello.proto'], ['scenarios/']);
 
 export default function () {
-    // This part requires a real server.
-    // Uncomment and adapt when a server is available.
+    let ok = false;
 
+    print('Connecting to gRPC at ' + URL + '...');
     try {
-        client.connect('http://localhost:50051');
+        client.connect(URL);
 
-        let response = client.invoke('helloworld.Greeter/SayHello', {
-            name: 'Fusillade'
+        let response = client.invoke('hello.HelloService/SayHello', {
+            greeting: 'fusillade',
         });
+        print('Reply: ' + response.reply);
 
-        print('Greeting: ' + response.message);
-
-        assertion(response.message, {
-            'greeting is correct': (m) => m === 'Hello Fusillade'
+        check(response, {
+            'reply greets fusillade': (r) => r.reply === 'hello fusillade',
         });
+        ok = response.reply === 'hello fusillade';
     } catch (e) {
         print('gRPC Error (server likely unavailable): ' + e);
     }
 
-    sleep(1);
+    metrics.rateAdd('grpc_success', ok);
 }

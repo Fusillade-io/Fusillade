@@ -1,0 +1,17 @@
+// Minimal hello service as served by grpcbin (moul/grpcbin), used by
+// grpc_test.js in CI.
+syntax = "proto2";
+
+package hello;
+
+service HelloService {
+  rpc SayHello(HelloRequest) returns (HelloResponse);
+}
+
+message HelloRequest {
+  optional string greeting = 1;
+}
+
+message HelloResponse {
+  required string reply = 1;
+}

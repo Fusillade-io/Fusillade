@@ -9,7 +9,9 @@ default-run = "fusillade"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 rquickjs = { version = "0.11", features = ["loader", "futures", "macro", "classes", "properties"] } # Removed full-async to avoid runtime conflict
-ureq = { version = "2.10", features = ["json", "cookies"] }
+# No "cookies" feature: cookie handling lives in bridge::http_sync's
+# per-worker jar (http.cookieJar()), which covers both HTTP paths.
+ureq = { version = "2.10", features = ["json"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "cookies", "http2", "brotli", "gzip", "multipart", "stream"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"

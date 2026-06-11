@@ -737,6 +737,10 @@ impl GrpcClient {
         let response = rt
             .block_on(async {
                 let mut grpc = Grpc::new(channel);
+                // tonic requires ready() before dispatching on a buffered channel
+                grpc.ready()
+                    .await
+                    .map_err(|e| Status::unavailable(e.to_string()))?;
                 grpc.unary(request, path_http, codec).await
             })
             .map_err(|e| {
@@ -797,6 +801,9 @@ impl GrpcClient {
         let mut streaming: Streaming<DynamicMessage> = rt
             .block_on(async {
                 let mut grpc = Grpc::new(channel);
+                grpc.ready()
+                    .await
+                    .map_err(|e| Status::unavailable(e.to_string()))?;
                 grpc.server_streaming(request, path_http, codec).await
             })
             .map_err(|e| {
@@ -895,9 +902,13 @@ impl GrpcClient {
                 };
 
                 let mut grpc = Grpc::new(channel);
-                let result = grpc
-                    .client_streaming(Request::new(request_stream), path_http, codec)
-                    .await;
+                let result = match grpc.ready().await {
+                    Ok(()) => {
+                        grpc.client_streaming(Request::new(request_stream), path_http, codec)
+                            .await
+                    }
+                    Err(e) => Err(Status::unavailable(e.to_string())),
+                };
 
                 let response = match result {
                     Ok(resp) => Ok(resp.into_inner()),
@@ -962,9 +973,13 @@ impl GrpcClient {
                 };
 
                 let mut grpc = Grpc::new(channel);
-                let result = grpc
-                    .streaming(Request::new(request_stream), path_http, codec)
-                    .await;
+                let result = match grpc.ready().await {
+                    Ok(()) => {
+                        grpc.streaming(Request::new(request_stream), path_http, codec)
+                            .await
+                    }
+                    Err(e) => Err(Status::unavailable(e.to_string())),
+                };
 
                 if let Ok(response) = result {
                     let mut streaming = response.into_inner();

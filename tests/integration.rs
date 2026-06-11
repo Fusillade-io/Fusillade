@@ -89,6 +89,11 @@ fn handle_connection(mut stream: TcpStream, hits: Arc<AtomicUsize>) {
             // Echoes the raw request head so tests can assert on sent headers.
             ("GET", "/echo-headers") => ("200 OK", head.clone().into_bytes(), ""),
             ("GET", "/redirect") => ("302 Found", Vec::new(), "Location: /ok\r\n"),
+            ("GET", "/set-cookie") => (
+                "200 OK",
+                b"cookie set".to_vec(),
+                "Set-Cookie: session=abc123; Path=/\r\n",
+            ),
             ("GET", "/slow") => {
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 ("200 OK", b"finally".to_vec(), "")
@@ -176,6 +181,9 @@ export default function () {{
     assert_eq!(server.hits.load(Ordering::SeqCst), 6);
     assert!(report.avg_latency_ms > 0.0);
     assert!(report.total_data_received > 0);
+    // Repeated requests to one host reuse the per-thread connection pool
+    assert!(report.pool_hits > 0, "expected pooled connection reuse");
+    assert_eq!(report.pool_hits + report.pool_misses, 6);
 }
 
 #[test]
@@ -418,6 +426,143 @@ export default function () {{
         "bearer token helper",
     ];
     for name in expected_passing {
+        assert_eq!(
+            report.checks.get(name),
+            Some(&(1, 1)),
+            "check '{name}' did not pass: {:?}",
+            report.checks
+        );
+    }
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+}
+
+/// Documented cookie behavior: automatic Set-Cookie capture/resend plus the
+/// manual http.cookieJar() API (set/get/cookiesForUrl/delete/clear).
+#[test]
+fn cookie_jar_automatic_and_manual_management() {
+    let server = TestServer::start();
+    let script = format!(
+        r#"
+export default function () {{
+    // Server sets a cookie; the response object exposes it
+    let r1 = http.get('{base}/set-cookie');
+    check(r1, {{
+        'response exposes cookie': (r) =>
+            r.cookies['session'] && r.cookies['session'].value === 'abc123',
+    }});
+
+    // The cookie is automatically resent on the next request
+    let r2 = http.get('{base}/echo-headers');
+    check(r2, {{
+        'cookie auto resent': (r) => r.body.includes('session=abc123'),
+    }});
+
+    // Manual jar reads
+    let jar = http.cookieJar();
+    check(jar.get('{base}', 'session'), {{
+        'jar.get finds cookie': (c) => c !== null && c.value === 'abc123',
+    }});
+
+    // Manual set is sent on subsequent requests
+    jar.set('{base}', 'manual', 'xyz', {{ path: '/' }});
+    let r3 = http.get('{base}/echo-headers');
+    check(r3, {{
+        'manual cookie sent': (r) => r.body.includes('manual=xyz'),
+    }});
+    check(jar.cookiesForUrl('{base}/'), {{
+        'two cookies for url': (cs) => cs.length === 2,
+    }});
+
+    // Delete removes only the named cookie
+    jar.delete('{base}', 'session');
+    let r4 = http.get('{base}/echo-headers');
+    check(r4, {{
+        'deleted cookie not sent': (r) => !r.body.includes('session=abc123'),
+        'remaining cookie still sent': (r) => r.body.includes('manual=xyz'),
+    }});
+
+    // Clear empties the jar entirely
+    jar.clear();
+    let r5 = http.get('{base}/echo-headers');
+    check(r5, {{
+        'no cookies after clear': (r) => !r.body.includes('Cookie:'),
+    }});
+}}
+"#,
+        base = server.base_url
+    );
+
+    let report = run_script(script, iterations_config(1, 1));
+
+    let expected_passing = [
+        "response exposes cookie",
+        "cookie auto resent",
+        "jar.get finds cookie",
+        "manual cookie sent",
+        "two cookies for url",
+        "deleted cookie not sent",
+        "remaining cookie still sent",
+        "no cookies after clear",
+    ];
+    for name in expected_passing {
+        assert_eq!(
+            report.checks.get(name),
+            Some(&(1, 1)),
+            "check '{name}' did not pass: {:?}",
+            report.checks
+        );
+    }
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+}
+
+/// http.file() markers expand into multipart file parts, via FormData and
+/// as a bare body.
+#[test]
+fn http_file_builds_multipart_uploads() {
+    // open() resolves relative paths against the process cwd
+    let fixture = "itest_upload_fixture.txt";
+    std::fs::write(fixture, "file-payload-123").expect("write fixture");
+
+    let server = TestServer::start();
+    let script = format!(
+        r#"
+export default function () {{
+    const fd = new FormData();
+    fd.append('field1', 'plain-value');
+    fd.append('upload', http.file('{fixture}', 'data.txt', 'text/plain'));
+    let res = http.post('{base}/echo', fd.body(), {{
+        headers: {{ 'Content-Type': fd.contentType() }},
+    }});
+    check(res, {{
+        'multipart has plain field': (r) =>
+            r.body.includes('name="field1"') && r.body.includes('plain-value'),
+        'multipart has file part': (r) =>
+            r.body.includes('filename="data.txt"') &&
+            r.body.includes('Content-Type: text/plain') &&
+            r.body.includes('file-payload-123'),
+    }});
+
+    // A bare http.file() body is wrapped into multipart automatically
+    let res2 = http.post('{base}/echo', http.file('{fixture}'));
+    check(res2, {{
+        'bare marker auto multipart': (r) =>
+            r.body.includes('filename="{fixture}"') &&
+            r.body.includes('file-payload-123'),
+    }});
+}}
+"#,
+        fixture = fixture,
+        base = server.base_url
+    );
+
+    let report = run_script(script, iterations_config(1, 1));
+    let _ = std::fs::remove_file(fixture);
+
+    for name in [
+        "multipart has plain field",
+        "multipart has file part",
+        "bare marker auto multipart",
+    ] {
         assert_eq!(
             report.checks.get(name),
             Some(&(1, 1)),

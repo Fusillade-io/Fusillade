@@ -306,6 +306,7 @@ fn run_bridge_request(
     ) {
         Ok(mut resp) => {
             resp.timings.duration = start.elapsed();
+            store_response_cookies(url_str, &resp.set_cookie_headers);
             let _ = tx.send(Metric::Request {
                 name: metric_name(name_tag, url_str),
                 timings: resp.timings,
@@ -393,6 +394,8 @@ fn execute_ureq_request(
                 }
             }
 
+            store_response_cookies(url_str, &set_cookie_headers);
+
             let body_start = Instant::now();
             // Read the body even in sink mode so received bytes are tracked
             // and the connection stays reusable.
@@ -419,6 +422,7 @@ fn execute_ureq_request(
                 receiving,
                 request_size,
                 response_size,
+                pool_reused: pool_reuse_heuristic(url_str),
                 ..Default::default()
             };
 
@@ -507,6 +511,209 @@ fn default_content_type(headers: &mut HashMap<String, String>) {
     }
 }
 
+// Per-worker cookie jar: Set-Cookie responses are stored here and matching
+// cookies are injected into every outgoing request (both the pooled ureq path
+// and the IoBridge path). Also exposed to JS via http.cookieJar().
+thread_local! {
+    static COOKIE_JAR: std::cell::RefCell<cookie_store::CookieStore> =
+        std::cell::RefCell::new(cookie_store::CookieStore::default());
+}
+
+/// Merge the jar's cookies for `url` into the outgoing headers. A user-set
+/// Cookie header is kept; jar cookies are appended after it.
+fn apply_jar_cookies(url: &str, headers: &mut HashMap<String, String>) {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return;
+    };
+    let jar_cookies = COOKIE_JAR.with(|jar| {
+        let jar = jar.borrow();
+        let matched = jar.matches(&parsed);
+        if matched.is_empty() {
+            None
+        } else {
+            Some(
+                matched
+                    .iter()
+                    .map(|c| format!("{}={}", c.name(), c.value()))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        }
+    });
+    let Some(jar_cookies) = jar_cookies else {
+        return;
+    };
+    if let Some(existing) = headers
+        .iter_mut()
+        .find_map(|(k, v)| k.eq_ignore_ascii_case("cookie").then_some(v))
+    {
+        existing.push_str("; ");
+        existing.push_str(&jar_cookies);
+    } else {
+        headers.insert("Cookie".to_string(), jar_cookies);
+    }
+}
+
+/// Store response Set-Cookie headers into the worker's jar.
+fn store_response_cookies(url: &str, set_cookie_headers: &[String]) {
+    if set_cookie_headers.is_empty() {
+        return;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return;
+    };
+    COOKIE_JAR.with(|jar| {
+        jar.borrow_mut().store_response_cookies(
+            set_cookie_headers
+                .iter()
+                .filter_map(|h| Cookie::parse(h.clone()).ok()),
+            &parsed,
+        );
+    });
+}
+
+fn parse_jar_url(url: &str) -> Result<url::Url> {
+    url::Url::parse(url).map_err(|_| rquickjs::Error::new_from_js("invalid URL", "ValueError"))
+}
+
+fn stored_cookie_domain(cookie: &cookie_store::Cookie<'_>, fallback: &str) -> String {
+    match &cookie.domain {
+        cookie_store::CookieDomain::HostOnly(h) => h.clone(),
+        cookie_store::CookieDomain::Suffix(s) => s.clone(),
+        _ => fallback.to_string(),
+    }
+}
+
+fn stored_cookie_to_js<'js>(
+    ctx: &Ctx<'js>,
+    cookie: &cookie_store::Cookie<'_>,
+) -> Result<Object<'js>> {
+    let obj = Object::new(ctx.clone())?;
+    obj.set("name", cookie.name())?;
+    obj.set("value", cookie.value())?;
+    obj.set("domain", stored_cookie_domain(cookie, ""))?;
+    obj.set("path", &*cookie.path)?;
+    obj.set("secure", cookie.secure().unwrap_or(false))?;
+    obj.set("httpOnly", cookie.http_only().unwrap_or(false))?;
+    if let Some(cookie::Expiration::DateTime(dt)) = cookie.expires() {
+        obj.set("expires", dt.unix_timestamp())?;
+    }
+    if let Some(max_age) = cookie.max_age() {
+        obj.set("maxAge", max_age.whole_seconds())?;
+    }
+    if let Some(same_site) = cookie.same_site() {
+        let ss = match same_site {
+            SameSite::Strict => "Strict",
+            SameSite::Lax => "Lax",
+            SameSite::None => "None",
+        };
+        obj.set("sameSite", ss)?;
+    }
+    Ok(obj)
+}
+
+fn jar_set<'js>(
+    _ctx: Ctx<'js>,
+    url: String,
+    name: String,
+    value: String,
+    opts: rquickjs::function::Opt<Object<'js>>,
+) -> Result<()> {
+    let parsed = parse_jar_url(&url)?;
+    let mut cookie = Cookie::new(name, value);
+    if let Some(o) = opts.0 {
+        if let Ok(d) = o.get::<_, String>("domain") {
+            cookie.set_domain(d);
+        }
+        if let Ok(p) = o.get::<_, String>("path") {
+            cookie.set_path(p);
+        }
+        if let Ok(s) = o.get::<_, bool>("secure") {
+            cookie.set_secure(s);
+        }
+        if let Ok(h) = o.get::<_, bool>("httpOnly") {
+            cookie.set_http_only(h);
+        }
+        if let Ok(m) = o.get::<_, i64>("maxAge") {
+            cookie.set_max_age(cookie::time::Duration::seconds(m));
+        }
+    }
+    if cookie.path().is_none() {
+        cookie.set_path("/");
+    }
+    COOKIE_JAR.with(|jar| {
+        jar.borrow_mut()
+            .insert_raw(&cookie, &parsed)
+            .map(|_| ())
+            .map_err(|_| rquickjs::Error::new_from_js("cookie rejected for URL", "ValueError"))
+    })
+}
+
+fn jar_get<'js>(ctx: Ctx<'js>, url: String, name: String) -> Result<Value<'js>> {
+    let parsed = parse_jar_url(&url)?;
+    COOKIE_JAR.with(|jar| {
+        let jar = jar.borrow();
+        match jar.matches(&parsed).into_iter().find(|c| c.name() == name) {
+            Some(cookie) => Ok(stored_cookie_to_js(&ctx, cookie)?.into_value()),
+            None => Ok(Value::new_null(ctx.clone())),
+        }
+    })
+}
+
+fn jar_cookies_for_url<'js>(ctx: Ctx<'js>, url: String) -> Result<Vec<Object<'js>>> {
+    let parsed = parse_jar_url(&url)?;
+    COOKIE_JAR.with(|jar| {
+        let jar = jar.borrow();
+        jar.matches(&parsed)
+            .into_iter()
+            .map(|cookie| stored_cookie_to_js(&ctx, cookie))
+            .collect()
+    })
+}
+
+fn jar_delete<'js>(_ctx: Ctx<'js>, url: String, name: String) -> Result<()> {
+    let parsed = parse_jar_url(&url)?;
+    let host = parsed.host_str().unwrap_or("").to_string();
+    COOKIE_JAR.with(|jar| {
+        let mut jar = jar.borrow_mut();
+        let targets: Vec<(String, String)> = jar
+            .matches(&parsed)
+            .into_iter()
+            .filter(|c| c.name() == name)
+            .map(|c| (stored_cookie_domain(c, &host), c.path.to_string()))
+            .collect();
+        for (domain, path) in targets {
+            jar.remove(&domain, &path, &name);
+        }
+    });
+    Ok(())
+}
+
+fn jar_clear() {
+    COOKIE_JAR.with(|jar| jar.borrow_mut().clear());
+}
+
+// ureq doesn't expose whether a pooled connection was reused, so derive a
+// per-thread heuristic: the first successful request to a host:port is a
+// pool miss, subsequent ones count as hits (the thread-local agent keeps
+// the connection alive between requests).
+thread_local! {
+    static SEEN_HOSTS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn pool_reuse_heuristic(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let key = format!(
+        "{}:{}",
+        parsed.host_str().unwrap_or(""),
+        parsed.port_or_known_default().unwrap_or(0)
+    );
+    SEEN_HOSTS.with(|seen| !seen.borrow_mut().insert(key))
+}
+
 /// URL parser for HTTP URLs - used in test utilities.
 #[cfg(test)]
 mod raw_http {
@@ -588,7 +795,8 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let custom_headers = headers_from_options(options);
+                let mut custom_headers = headers_from_options(options);
+                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
                 let tx = tx_get.clone();
 
@@ -646,6 +854,7 @@ pub fn register_sync_http(
                 let tags = tags_from_options(options);
                 let mut custom_headers = headers_from_options(options);
                 default_content_type(&mut custom_headers);
+                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
                 let tx = tx_post.clone();
 
@@ -704,6 +913,7 @@ pub fn register_sync_http(
                 let tags = tags_from_options(options);
                 let mut custom_headers = headers_from_options(options);
                 default_content_type(&mut custom_headers);
+                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
                 let tx = tx_put.clone();
 
@@ -759,7 +969,8 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let custom_headers = headers_from_options(options);
+                let mut custom_headers = headers_from_options(options);
+                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
                 let tx = tx_del.clone();
 
@@ -818,6 +1029,7 @@ pub fn register_sync_http(
                 let tags = tags_from_options(options);
                 let mut custom_headers = headers_from_options(options);
                 default_content_type(&mut custom_headers);
+                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
                 let tx = tx_patch.clone();
 
@@ -874,7 +1086,8 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let custom_headers = headers_from_options(options);
+                let mut custom_headers = headers_from_options(options);
+                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
                 let tx = tx_head.clone();
 
@@ -930,7 +1143,8 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let custom_headers = headers_from_options(options);
+                let mut custom_headers = headers_from_options(options);
+                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
                 let tx = tx_options.clone();
 
@@ -988,7 +1202,8 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let custom_headers = headers_from_options(options);
+                let mut custom_headers = headers_from_options(options);
+                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
                 let tx = tx_request.clone();
                 let method_upper = method_str.to_uppercase();
@@ -1051,7 +1266,9 @@ pub fn register_sync_http(
                     let method: String = obj.get("method").unwrap_or_else(|_| "GET".to_string());
                     let url: String = obj.get("url")?;
                     let body: Option<String> = obj.get("body").ok();
-                    let headers: HashMap<String, String> = obj.get("headers").unwrap_or_default();
+                    let mut headers: HashMap<String, String> =
+                        obj.get("headers").unwrap_or_default();
+                    apply_jar_cookies(&url, &mut headers);
                     let name: Option<String> = obj.get("name").ok();
                     let tags: HashMap<String, String> = obj.get("tags").unwrap_or_default();
                     let timeout: Option<Duration> = obj
@@ -1107,6 +1324,19 @@ pub fn register_sync_http(
         ),
     )?;
 
+    // Manual cookie-jar API, backed by the same per-worker store that handles
+    // automatic cookies (http.cookieJar() in JS).
+    let jar_obj = Object::new(ctx.clone())?;
+    jar_obj.set("set", Function::new(ctx.clone(), jar_set))?;
+    jar_obj.set("get", Function::new(ctx.clone(), jar_get))?;
+    jar_obj.set(
+        "cookiesForUrl",
+        Function::new(ctx.clone(), jar_cookies_for_url),
+    )?;
+    jar_obj.set("delete", Function::new(ctx.clone(), jar_delete))?;
+    jar_obj.set("clear", Function::new(ctx.clone(), jar_clear))?;
+    http.set("__cookieJar", jar_obj)?;
+
     ctx.globals().set("http", http)?;
 
     // Initialize HTTP hooks infrastructure
@@ -1138,13 +1368,29 @@ pub fn register_sync_http(
         FormData.prototype.append = function(name, value) {
             this._fields.push({ name: name, value: String(value), isFile: false });
         };
+        globalThis.__parseFileMarker = function(value) {
+            if (typeof value !== 'string' || value.indexOf('__fusillade_file') === -1) return null;
+            try {
+                var parsed = JSON.parse(value);
+                return (parsed && parsed.__fusillade_file) ? parsed : null;
+            } catch (e) {
+                return null;
+            }
+        };
         FormData.prototype.body = function() {
             var body = '';
             for (var i = 0; i < this._fields.length; i++) {
                 var field = this._fields[i];
                 body += '--' + this._boundary + '\r\n';
-                body += 'Content-Disposition: form-data; name="' + field.name + '"\r\n\r\n';
-                body += field.value;
+                var file = globalThis.__parseFileMarker(field.value);
+                if (file) {
+                    body += 'Content-Disposition: form-data; name="' + field.name + '"; filename="' + file.filename + '"\r\n';
+                    body += 'Content-Type: ' + file.contentType + '\r\n\r\n';
+                    body += file.content;
+                } else {
+                    body += 'Content-Disposition: form-data; name="' + field.name + '"\r\n\r\n';
+                    body += field.value;
+                }
                 body += '\r\n';
             }
             body += '--' + this._boundary + '--\r\n';
@@ -1234,6 +1480,14 @@ pub fn register_sync_http(
                 };
                 // Hooks may mutate url, body, and headers before the request runs.
                 globalThis.__http_callBeforeRequestHooks(req);
+                // A bare http.file() marker body becomes a one-part multipart upload.
+                var file = globalThis.__parseFileMarker(req.body);
+                if (file) {
+                    var fd = new FormData();
+                    fd.append('file', req.body);
+                    req.body = fd.body();
+                    req.headers['Content-Type'] = fd.contentType();
+                }
                 merged.headers = req.headers;
                 var res = callNative(req.method, req.url, req.body, merged);
                 globalThis.__http_callAfterResponseHooks(res);
@@ -1300,6 +1554,21 @@ pub fn register_sync_http(
 
             http.bearerToken = function(token) {
                 return 'Bearer ' + token;
+            };
+
+            http.cookieJar = function() {
+                return http.__cookieJar;
+            };
+
+            // Reads a file and returns a JSON marker; FormData.body() and
+            // http.post() expand markers into multipart file parts.
+            http.file = function(path, filename, contentType) {
+                return JSON.stringify({
+                    __fusillade_file: true,
+                    content: open(path),
+                    filename: filename || String(path).split('/').pop(),
+                    contentType: contentType || 'application/octet-stream'
+                });
             };
         })();
     "#,

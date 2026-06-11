@@ -743,7 +743,7 @@ criteria:
 * `http.bearerToken(token)`: Generate Bearer auth header value (returns `"Bearer token"`).
 * `http.setDefaults(options)`: Set global defaults for all requests (timeout, headers).
 * `http.request({ method, url, body, headers, name, timeout })`: Generic request builder.
-* `http.batch(requests, [onProgress])`: Execute multiple requests in parallel. Returns array of responses. Optional `onProgress(completed, total)` callback fires for each completed result.
+* `http.batch(requests, [onProgress])`: Execute multiple requests, returning an array of responses in the same order. Requests are issued sequentially within the worker — use more workers for parallel load. Optional `onProgress(completed, total)` callback fires after each completed request.
 * `http.graphql(url, query, [variables], [options])`: GraphQL convenience wrapper. Sets `Content-Type: application/json` and builds `{"query": ..., "variables": ...}` body automatically.
 * `http.cookieJar()`: Returns the cookie jar for manual cookie management.
 * `http.addHook(hookType, fn)`: Register a request/response hook.
@@ -760,7 +760,7 @@ http.post('https://api.example.com/login', body, {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
 });
 
-// http.batch() example - parallel requests
+// http.batch() example - batched requests
 const responses = http.batch([
     { method: 'GET', url: 'https://api.example.com/users' },
     { method: 'GET', url: 'https://api.example.com/posts' },
