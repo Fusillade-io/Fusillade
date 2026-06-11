@@ -5,6 +5,33 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-06-11
+
+### Added
+- `http.setDefaults(options)` — set global default `timeout` and `headers`, merged into every subsequent request (per-request options win)
+- Object-form `http.request({ method, url, body, headers, name, timeout, tags })`
+- `http.batch(requests, onProgress)` — optional progress callback fires per completed request
+- `http.url(base, params)`, `http.formEncode(obj)`, `http.basicAuth(user, pass)`, and `http.bearerToken(token)` helpers
+- Request/response hooks registered via `http.addHook` are now actually invoked around every request; `beforeRequest` hooks may mutate `url`, `body`, and `headers` (previously the hook system was registered but never called)
+- End-to-end integration test suite (`tests/integration.rs`) driving the engine against a local HTTP server: request counts, status codes, checks, POST round-trips, timeouts, redirects, duration-based termination
+- In-process gRPC cluster protocol tests: worker registration, command dispatch over the stream, metric-batch aggregation, disconnect cleanup, and token authentication
+- CI: scenario tests now run hermetically against local service containers (httpbin, Mosquitto, RabbitMQ, WebSocket echo) instead of external services; new coverage job publishes an lcov report
+
+### Fixed
+- **Non-2xx responses were reported as status 0 with a network error** in the default (pooled) HTTP path — 4xx/5xx responses now keep their real status code, headers, and body in both JS and metrics
+- **`data_sent`/`data_received` were always 0** in the default HTTP path
+- **The per-request `timeout` option was silently ignored** in the default HTTP path; it now applies in both the pooled and `--no-pool` paths and accepts duration strings or milliseconds
+- **Custom headers were dropped on POST/PUT/PATCH requests** (PUT also hardcoded `Content-Type: application/json`); all user headers are now forwarded, with the JSON default applied only when no Content-Type is set
+- **Omitting optional JS arguments threw arity errors** across protocol bridges: `ws.connect(url)`, `mqtt.publish(topic, payload)`, `mqtt.subscribe(topic)`, parameterless `recv()` on MQTT/AMQP/gRPC streams, `amqp.declareQueue(name)`, `amqp.declareExchange(name, type)`, and browser `waitForResponse(pattern)` now work as documented
+- PUT/DELETE/HEAD requests now record `waiting`/`receiving` timings like other methods
+- HTML reports now escape single quotes (`'` → `&#39;`) in attacker-influenced strings
+- Config merging extracted into `Config::merge_from` and covered by tests against the real implementation (script options → config file → CLI flags)
+- Always-failing assertions in `check_test.js` corrected; `ws_test.js`/`mqtt_test.js`/`amqp_test.js` now gate on success-rate thresholds and exit non-zero on failure instead of swallowing errors
+
+### Changed
+- Scenario scripts honor `FUSILLADE_BASE_URL`, `FUSILLADE_MQTT_HOST`/`FUSILLADE_MQTT_PORT`, `FUSILLADE_AMQP_URL`, and `FUSILLADE_WS_URL` environment variables for hermetic or local testing
+- HTTP bridge internals consolidated: nine duplicated per-method request blocks replaced by shared helpers
+
 ## [1.5.2] - 2026-05-10
 
 ### Security

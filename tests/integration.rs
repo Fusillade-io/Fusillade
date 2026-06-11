@@ -114,9 +114,16 @@ fn handle_connection(mut stream: TcpStream, hits: Arc<AtomicUsize>) {
 static ENGINE_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_script(script: String, config: Config) -> ReportStats {
+    run_script_timed(script, config).0
+}
+
+/// Like `run_script`, but also returns how long the engine run itself took
+/// (excluding time spent waiting on ENGINE_LOCK behind other tests).
+fn run_script_timed(script: String, config: Config) -> (ReportStats, std::time::Duration) {
     let _guard = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let start = std::time::Instant::now();
     let engine = Arc::new(Engine::new().expect("engine"));
-    engine
+    let report = engine
         .run_load_test(
             PathBuf::from("integration_test.js"),
             script,
@@ -130,7 +137,8 @@ fn run_script(script: String, config: Config) -> ReportStats {
             None,
             None,
         )
-        .expect("load test run")
+        .expect("load test run");
+    (report, start.elapsed())
 }
 
 fn iterations_config(workers: usize, iterations: u64) -> Config {
@@ -273,14 +281,13 @@ export default function () {{
         duration: Some("1s".to_string()),
         ..Default::default()
     };
-    let start = std::time::Instant::now();
-    let report = run_script(script, config);
+    let (report, elapsed) = run_script_timed(script, config);
 
     // The run must stop on its own shortly after the configured duration
     // (generous bound: engine teardown takes a few seconds).
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(30),
-        "duration-based run did not terminate promptly"
+        elapsed < std::time::Duration::from_secs(30),
+        "duration-based run did not terminate promptly (took {elapsed:?})"
     );
     assert!(report.total_requests > 0, "no load was generated");
     assert_eq!(
