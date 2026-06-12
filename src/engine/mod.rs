@@ -476,10 +476,26 @@ impl Engine {
             let may_stack_size = 32 * 1024;
             // JS heap limit per worker (default 256KB). Override via options.heap_size.
             let heap_size = config.heap_size.unwrap_or(256 * 1024);
-            // Scale May workers proportionally to total workers
-            // Each May thread can block on HTTP I/O, so we need many threads for high concurrency
-            // Formula: 1 May worker per ~200 Fusillade workers, minimum of CPU count, max 128
-            let may_workers = (total_workers / 200).clamp(num_cpus::get(), 128);
+            // Scale May carrier threads toward an oversubscription of cores.
+            // The default HTTP path uses blocking ureq, and `may` parks the
+            // entire carrier thread for the duration of a blocking syscall — so
+            // in-flight request concurrency equals the carrier count, NOT the
+            // worker count. With too few carriers, throughput pins at
+            // (carriers / per-request latency) regardless of how many workers
+            // are spawned. Blocking threads spend most of their time waiting on
+            // the socket, so oversubscribing cores ~8x maximizes throughput;
+            // beyond that, context-switch overhead dominates and latency climbs.
+            // Capped so we never spawn more carriers than there are workers, and
+            // never blow past the point of diminishing returns. Override with
+            // FUSILLADE_MAY_WORKERS for tuning.
+            let cores = num_cpus::get();
+            // Oversubscribe cores ~8x, capped at 128, but never below `cores`
+            // (the .max(cores) keeps clamp's min <= max on >128-core machines).
+            let may_cap = (cores * 8).min(128).max(cores);
+            let may_workers = std::env::var("FUSILLADE_MAY_WORKERS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or_else(|| total_workers.clamp(cores, may_cap));
             may::config()
                 .set_workers(may_workers)
                 .set_stack_size(may_stack_size);
