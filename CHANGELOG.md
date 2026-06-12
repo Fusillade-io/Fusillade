@@ -5,6 +5,14 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-06-12
+
+### Added
+- `FUSILLADE_MAY_WORKERS` environment variable to override the number of green-thread carrier threads, for tuning throughput on unusual hardware
+
+### Fixed
+- **HTTP throughput no longer plateaus regardless of worker count.** The default (blocking) HTTP path runs each request on a `may` green-thread carrier, and a blocking request parks the entire carrier thread, so the number of requests in flight at once was limited by the carrier-thread count rather than the worker count. The carrier pool was sized too small (effectively the CPU count for any realistic worker count), which pinned single-node throughput at a flat ceiling no matter how many workers were configured. Carriers now scale to an oversubscription of CPU cores, which removes the plateau and raises single-node throughput by roughly 30% on a typical machine
+
 ## [1.6.1] - 2026-06-12
 
 ### Added
