@@ -233,6 +233,8 @@ impl Engine {
             self.warmup(url);
         }
 
+        crate::bridge::set_default_max_redirects(config.max_redirects.unwrap_or(10));
+
         let config = Arc::new(config);
         let shared_data = self.shared_data.clone();
         let script_content = script_content.clone();

@@ -17,6 +17,8 @@ mod test;
 mod utils;
 mod ws;
 
+pub use http_sync::set_default_max_redirects;
+
 // --- Common Error Helpers ---
 // These helpers create consistent error types for JavaScript
 

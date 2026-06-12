@@ -164,11 +164,51 @@ impl<'js> IntoJs<'js> for SyncHttpResponse {
     }
 }
 
-// Thread-local ureq agent for connection pooling
+// Thread-local ureq agent for connection pooling. Auto-redirects are
+// disabled: redirects are followed manually in execute_ureq_request so that
+// per-hop Set-Cookie headers are captured and max_redirects is honored.
 thread_local! {
     static AGENT: ureq::Agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(60))
+        .redirects(0)
         .build();
+}
+
+/// Process-wide default for the maximum number of redirects to follow,
+/// set from config (`max_redirects`) at engine startup. Per-request
+/// `maxRedirects` / `followRedirects: false` options override it.
+static DEFAULT_MAX_REDIRECTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(10);
+
+pub fn set_default_max_redirects(n: u32) {
+    DEFAULT_MAX_REDIRECTS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Resolve the redirect limit for one request from its options object.
+fn max_redirects_from_options(options: Option<&Value<'_>>) -> u32 {
+    if let Some(obj) = options.and_then(|v| v.as_object()) {
+        if let Ok(false) = obj.get::<_, bool>("followRedirects") {
+            return 0;
+        }
+        if let Ok(n) = obj.get::<_, u32>("maxRedirects") {
+            return n;
+        }
+    }
+    DEFAULT_MAX_REDIRECTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// If `status` redirects to `location`, return the absolute next URL and
+/// whether the method must collapse to GET (301/302/303; 307/308 keep the
+/// method and body).
+fn redirect_target(
+    status: u16,
+    location: Option<&str>,
+    current_url: &str,
+) -> Option<(String, bool)> {
+    if !matches!(status, 301..=303 | 307 | 308) {
+        return None;
+    }
+    let next = url::Url::parse(current_url).ok()?.join(location?).ok()?;
+    Some((next.to_string(), matches!(status, 301..=303)))
 }
 
 /// Build an http::Request from JS parameters for IoBridge routing
@@ -279,8 +319,9 @@ fn metric_name(name_tag: Option<&str>, url: &str) -> String {
     )
 }
 
-/// Execute a request through the IoBridge (no_pool mode), emit the request
-/// metric, and convert the outcome into a SyncHttpResponse.
+/// Execute a request through the IoBridge (no_pool mode), following
+/// redirects manually (capturing per-hop cookies), emit the request metric,
+/// and convert the outcome into a SyncHttpResponse.
 #[allow(clippy::too_many_arguments)]
 fn run_bridge_request(
     bridge: &IoBridge,
@@ -289,191 +330,272 @@ fn run_bridge_request(
     body: Option<&str>,
     headers: &HashMap<String, String>,
     timeout: Option<Duration>,
+    max_redirects: u32,
     response_sink: bool,
     tx: &Sender<Metric>,
     name_tag: Option<&str>,
     tags: HashMap<String, String>,
 ) -> SyncHttpResponse {
+    let mut method = method.to_string();
+    let mut current_url = url_str.to_string();
+    let mut headers = headers.clone();
+    let mut body: Option<String> = body.map(str::to_string);
+    let mut hops = 0u32;
+
     let start = Instant::now();
-    match execute_via_bridge(
-        bridge,
-        method,
-        url_str,
-        body,
-        headers,
-        timeout,
-        response_sink,
-    ) {
-        Ok(mut resp) => {
-            resp.timings.duration = start.elapsed();
-            store_response_cookies(url_str, &resp.set_cookie_headers);
-            let _ = tx.send(Metric::Request {
-                name: metric_name(name_tag, url_str),
-                timings: resp.timings,
-                status: resp.status,
-                error: None,
-                tags,
-            });
-            resp
-        }
-        Err(e) => {
-            let timings = RequestTimings {
-                duration: start.elapsed(),
-                ..Default::default()
-            };
-            let (error_type, error_code) = categorize_error(&e);
-            let _ = tx.send(Metric::Request {
-                name: metric_name(name_tag, url_str),
-                timings,
-                status: 0,
-                error: Some(e.clone()),
-                tags,
-            });
-            SyncHttpResponse {
-                status: 0,
-                status_text: status_text_for_code(0),
-                body: e.into_bytes(),
-                headers: HashMap::new(),
-                timings,
-                proto: "h1".to_string(),
-                set_cookie_headers: Vec::new(),
-                error: Some(error_type),
-                error_code: Some(error_code),
+    loop {
+        let mut hop_headers = headers.clone();
+        apply_jar_cookies(&current_url, &mut hop_headers);
+
+        match execute_via_bridge(
+            bridge,
+            &method,
+            &current_url,
+            body.as_deref(),
+            &hop_headers,
+            timeout,
+            response_sink,
+        ) {
+            Ok(mut resp) => {
+                store_response_cookies(&current_url, &resp.set_cookie_headers);
+
+                if hops < max_redirects {
+                    let location = resp.headers.iter().find_map(|(k, v)| {
+                        k.eq_ignore_ascii_case("location").then_some(v.as_str())
+                    });
+                    if let Some((next_url, collapse_to_get)) =
+                        redirect_target(resp.status, location, &current_url)
+                    {
+                        if collapse_to_get && method != "GET" && method != "HEAD" {
+                            method = "GET".to_string();
+                            body = None;
+                            headers.retain(|k, _| {
+                                !k.eq_ignore_ascii_case("content-type")
+                                    && !k.eq_ignore_ascii_case("content-length")
+                            });
+                        }
+                        current_url = next_url;
+                        hops += 1;
+                        continue;
+                    }
+                }
+
+                resp.timings.duration = start.elapsed();
+                let _ = tx.send(Metric::Request {
+                    name: metric_name(name_tag, url_str),
+                    timings: resp.timings,
+                    status: resp.status,
+                    error: None,
+                    tags,
+                });
+                return resp;
+            }
+            Err(e) => {
+                let timings = RequestTimings {
+                    duration: start.elapsed(),
+                    ..Default::default()
+                };
+                let (error_type, error_code) = categorize_error(&e);
+                let _ = tx.send(Metric::Request {
+                    name: metric_name(name_tag, url_str),
+                    timings,
+                    status: 0,
+                    error: Some(e.clone()),
+                    tags,
+                });
+                return SyncHttpResponse {
+                    status: 0,
+                    status_text: status_text_for_code(0),
+                    body: e.into_bytes(),
+                    headers: HashMap::new(),
+                    timings,
+                    proto: "h1".to_string(),
+                    set_cookie_headers: Vec::new(),
+                    error: Some(error_type),
+                    error_code: Some(error_code),
+                };
             }
         }
     }
 }
 
-/// Execute a prepared ureq request, emit the request metric, and convert the
-/// outcome into a SyncHttpResponse.
+/// Execute a request over the pooled ureq agent, following redirects manually
+/// up to `max_redirects` hops (capturing per-hop Set-Cookie headers), emit
+/// the request metric, and convert the outcome into a SyncHttpResponse.
 ///
 /// ureq reports non-2xx responses as `Err(Error::Status)`; those are real HTTP
 /// responses (the JS `status` field is documented as the HTTP status code,
 /// with 0 reserved for network/timeout errors), so they keep their status,
-/// headers, and body. Only transport-level failures map to status 0.
+/// headers, and body. Only transport-level failures map to status 0. When the
+/// redirect limit is exhausted, the last 3xx response is returned as-is.
 #[allow(clippy::too_many_arguments)]
 fn execute_ureq_request(
-    req: ureq::Request,
+    method: &str,
+    url_str: &str,
+    headers: &HashMap<String, String>,
     body: Option<&str>,
     timeout: Option<Duration>,
-    request_size: usize,
+    max_redirects: u32,
     response_sink: bool,
     tx: &Sender<Metric>,
     name_tag: Option<String>,
-    url_str: &str,
     tags: HashMap<String, String>,
 ) -> SyncHttpResponse {
-    let req = match timeout {
-        Some(t) => req.timeout(t),
-        None => req,
-    };
+    let request_size = estimate_request_size(method, url_str, headers, body.map_or(0, str::len));
+
+    let mut method = method.to_string();
+    let mut current_url = url_str.to_string();
+    let mut headers = headers.clone();
+    let mut body: Option<String> = body.map(str::to_string);
+    let mut hops = 0u32;
 
     let start = Instant::now();
-    let result = match body {
-        Some(b) => req.send_string(b),
-        None => req.call(),
-    };
-    let waiting = start.elapsed();
+    loop {
+        let mut hop_headers = headers.clone();
+        apply_jar_cookies(&current_url, &mut hop_headers);
 
-    let result = match result {
-        Err(ureq::Error::Status(_, response)) => Ok(response),
-        other => other,
-    };
+        let req = AGENT.with(|agent| {
+            let mut req = agent.request(&method, &current_url);
+            for (k, v) in &hop_headers {
+                req = req.set(k, v);
+            }
+            match timeout {
+                Some(t) => req.timeout(t),
+                None => req,
+            }
+        });
 
-    match result {
-        Ok(response) => {
-            let status = response.status();
-            let mut headers = HashMap::new();
-            let mut set_cookie_headers = Vec::new();
-            for name in response.headers_names() {
-                if let Some(val) = response.header(&name) {
-                    if name.to_lowercase() == "set-cookie" {
-                        set_cookie_headers.push(val.to_string());
+        let hop_start = Instant::now();
+        let result = match &body {
+            Some(b) => req.send_string(b),
+            None => req.call(),
+        };
+        let waiting = hop_start.elapsed();
+
+        // Non-2xx is a real HTTP response, not a transport failure.
+        let result = match result {
+            Err(ureq::Error::Status(_, response)) => Ok(response),
+            other => other,
+        };
+
+        match result {
+            Ok(response) => {
+                let status = response.status();
+                let mut resp_headers = HashMap::new();
+                let mut set_cookie_headers = Vec::new();
+                for name in response.headers_names() {
+                    if let Some(val) = response.header(&name) {
+                        if name.to_lowercase() == "set-cookie" {
+                            set_cookie_headers.push(val.to_string());
+                        }
+                        resp_headers.insert(name, val.to_string());
                     }
-                    headers.insert(name, val.to_string());
                 }
+
+                store_response_cookies(&current_url, &set_cookie_headers);
+
+                if hops < max_redirects {
+                    let location = resp_headers.iter().find_map(|(k, v)| {
+                        k.eq_ignore_ascii_case("location").then_some(v.as_str())
+                    });
+                    if let Some((next_url, collapse_to_get)) =
+                        redirect_target(status, location, &current_url)
+                    {
+                        // Drain the redirect body so the connection stays reusable.
+                        let _ = response.into_string();
+                        if collapse_to_get && method != "GET" && method != "HEAD" {
+                            method = "GET".to_string();
+                            body = None;
+                            headers.retain(|k, _| {
+                                !k.eq_ignore_ascii_case("content-type")
+                                    && !k.eq_ignore_ascii_case("content-length")
+                            });
+                        }
+                        current_url = next_url;
+                        hops += 1;
+                        continue;
+                    }
+                }
+
+                let body_start = Instant::now();
+                // Read the body even in sink mode so received bytes are tracked
+                // and the connection stays reusable.
+                let resp_body_str = response.into_string().unwrap_or_default();
+                let body_len = resp_body_str.len();
+                let resp_body = if response_sink {
+                    Vec::new()
+                } else {
+                    resp_body_str.into_bytes()
+                };
+                let receiving = body_start.elapsed();
+                let duration = start.elapsed();
+
+                // Approximate wire size: status line + headers + body.
+                let mut response_size = body_len + 15;
+                for (k, v) in &resp_headers {
+                    response_size += k.len() + 2 + v.len() + 2;
+                }
+                response_size += 2;
+
+                let timings = RequestTimings {
+                    duration,
+                    waiting,
+                    receiving,
+                    request_size,
+                    response_size,
+                    pool_reused: pool_reuse_heuristic(&current_url),
+                    ..Default::default()
+                };
+
+                let _ = tx.send(Metric::Request {
+                    name: metric_name(name_tag.as_deref(), url_str),
+                    timings,
+                    status,
+                    error: None,
+                    tags,
+                });
+
+                return SyncHttpResponse {
+                    status,
+                    status_text: status_text_for_code(status),
+                    body: resp_body,
+                    headers: resp_headers,
+                    timings,
+                    proto: "h1".to_string(),
+                    set_cookie_headers,
+                    error: None,
+                    error_code: None,
+                };
             }
+            Err(e) => {
+                let duration = start.elapsed();
+                let timings = RequestTimings {
+                    duration,
+                    request_size,
+                    ..Default::default()
+                };
 
-            store_response_cookies(url_str, &set_cookie_headers);
+                let error_msg = e.to_string();
+                let (error_type, error_code) = categorize_error(&error_msg);
+                let _ = tx.send(Metric::Request {
+                    name: metric_name(name_tag.as_deref(), url_str),
+                    timings,
+                    status: 0,
+                    error: Some(error_msg.clone()),
+                    tags,
+                });
 
-            let body_start = Instant::now();
-            // Read the body even in sink mode so received bytes are tracked
-            // and the connection stays reusable.
-            let resp_body_str = response.into_string().unwrap_or_default();
-            let body_len = resp_body_str.len();
-            let resp_body = if response_sink {
-                Vec::new()
-            } else {
-                resp_body_str.into_bytes()
-            };
-            let receiving = body_start.elapsed();
-            let duration = start.elapsed();
-
-            // Approximate wire size: status line + headers + body.
-            let mut response_size = body_len + 15;
-            for (k, v) in &headers {
-                response_size += k.len() + 2 + v.len() + 2;
-            }
-            response_size += 2;
-
-            let timings = RequestTimings {
-                duration,
-                waiting,
-                receiving,
-                request_size,
-                response_size,
-                pool_reused: pool_reuse_heuristic(url_str),
-                ..Default::default()
-            };
-
-            let _ = tx.send(Metric::Request {
-                name: metric_name(name_tag.as_deref(), url_str),
-                timings,
-                status,
-                error: None,
-                tags,
-            });
-
-            SyncHttpResponse {
-                status,
-                status_text: status_text_for_code(status),
-                body: resp_body,
-                headers,
-                timings,
-                proto: "h1".to_string(),
-                set_cookie_headers,
-                error: None,
-                error_code: None,
-            }
-        }
-        Err(e) => {
-            let duration = start.elapsed();
-            let timings = RequestTimings {
-                duration,
-                request_size,
-                ..Default::default()
-            };
-
-            let error_msg = e.to_string();
-            let (error_type, error_code) = categorize_error(&error_msg);
-            let _ = tx.send(Metric::Request {
-                name: metric_name(name_tag.as_deref(), url_str),
-                timings,
-                status: 0,
-                error: Some(error_msg.clone()),
-                tags,
-            });
-
-            SyncHttpResponse {
-                status: 0,
-                status_text: status_text_for_code(0),
-                body: error_msg.into_bytes(),
-                headers: HashMap::new(),
-                timings,
-                proto: "h1".to_string(),
-                set_cookie_headers: Vec::new(),
-                error: Some(error_type),
-                error_code: Some(error_code),
+                return SyncHttpResponse {
+                    status: 0,
+                    status_text: status_text_for_code(0),
+                    body: error_msg.into_bytes(),
+                    headers: HashMap::new(),
+                    timings,
+                    proto: "h1".to_string(),
+                    set_cookie_headers: Vec::new(),
+                    error: Some(error_type),
+                    error_code: Some(error_code),
+                };
             }
         }
     }
@@ -693,6 +815,21 @@ fn jar_clear() {
     COOKIE_JAR.with(|jar| jar.borrow_mut().clear());
 }
 
+/// Parse `html` and return the inner text of the first element matching the
+/// CSS selector (empty string when nothing matches or the selector is
+/// invalid). Backs the documented `res.html(selector)` helper.
+fn html_select_first_text(html: &str, selector: &str) -> String {
+    let document = scraper::Html::parse_document(html);
+    let Ok(sel) = scraper::Selector::parse(selector) else {
+        return String::new();
+    };
+    document
+        .select(&sel)
+        .next()
+        .map(|el| el.text().collect::<String>())
+        .unwrap_or_default()
+}
+
 // ureq doesn't expose whether a pooled connection was reused, so derive a
 // per-thread heuristic: the first successful request to a host:port is a
 // pool miss, subsequent ones count as hits (the thread-local agent keeps
@@ -751,6 +888,14 @@ pub fn register_sync_http(
     let http = Object::new(ctx.clone())?;
     let global_response_sink = response_sink;
 
+    // Native HTML query helper backing the response html() method
+    ctx.globals().set(
+        "__html_select_first_text",
+        Function::new(ctx.clone(), |html: String, selector: String| -> String {
+            html_select_first_text(&html, &selector)
+        }),
+    )?;
+
     // Create response prototype once — shared by all responses from this worker.
     // Methods use `this.body` and `this.headers` so they work on any response instance.
     ctx.eval::<(), _>(r#"
@@ -758,6 +903,25 @@ pub fn register_sync_http(
             json() { return JSON.parse(this.body); },
             bodyContains(str) { return this.body.includes(str); },
             bodyMatches(pattern) { return new RegExp(pattern).test(this.body); },
+            html(selector) { return globalThis.__html_select_first_text(this.body, selector); },
+            matchesSchema(schema) {
+                var data;
+                try { data = JSON.parse(this.body); } catch (e) { return false; }
+                if (typeof data !== 'object' || data === null) return false;
+                for (var key in schema) {
+                    var expected = schema[key];
+                    var val = data[key];
+                    if (val === undefined) return false;
+                    if (expected === 'array') {
+                        if (!Array.isArray(val)) return false;
+                    } else if (expected === 'object') {
+                        if (typeof val !== 'object' || val === null || Array.isArray(val)) return false;
+                    } else if (typeof val !== expected) {
+                        return false;
+                    }
+                }
+                return true;
+            },
             hasHeader(name, value) {
                 const h = this.headers;
                 if (!h) return false;
@@ -795,9 +959,9 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let mut custom_headers = headers_from_options(options);
-                apply_jar_cookies(&url_str, &mut custom_headers);
+                let custom_headers = headers_from_options(options);
                 let timeout = timeout_from_options(options);
+                let max_redirects = max_redirects_from_options(options);
                 let tx = tx_get.clone();
 
                 if let Some(ref bridge) = bridge_get {
@@ -808,6 +972,7 @@ pub fn register_sync_http(
                         None,
                         &custom_headers,
                         timeout,
+                        max_redirects,
                         sink_get,
                         &tx,
                         name_tag.as_deref(),
@@ -815,23 +980,16 @@ pub fn register_sync_http(
                     ));
                 }
 
-                let req = AGENT.with(|agent| {
-                    let mut req = agent.get(&url_str);
-                    for (k, v) in &custom_headers {
-                        req = req.set(k, v);
-                    }
-                    req
-                });
-                let request_size = estimate_request_size("GET", &url_str, &custom_headers, 0);
                 Ok(execute_ureq_request(
-                    req,
+                    "GET",
+                    &url_str,
+                    &custom_headers,
                     None,
                     timeout,
-                    request_size,
+                    max_redirects,
                     sink_get,
                     &tx,
                     name_tag,
-                    &url_str,
                     tags,
                 ))
             },
@@ -854,8 +1012,8 @@ pub fn register_sync_http(
                 let tags = tags_from_options(options);
                 let mut custom_headers = headers_from_options(options);
                 default_content_type(&mut custom_headers);
-                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
+                let max_redirects = max_redirects_from_options(options);
                 let tx = tx_post.clone();
 
                 if let Some(ref bridge) = bridge_post {
@@ -866,6 +1024,7 @@ pub fn register_sync_http(
                         Some(&body),
                         &custom_headers,
                         timeout,
+                        max_redirects,
                         sink_post,
                         &tx,
                         name_tag.as_deref(),
@@ -873,24 +1032,16 @@ pub fn register_sync_http(
                     ));
                 }
 
-                let req = AGENT.with(|agent| {
-                    let mut req = agent.post(&url_str);
-                    for (k, v) in &custom_headers {
-                        req = req.set(k, v);
-                    }
-                    req
-                });
-                let request_size =
-                    estimate_request_size("POST", &url_str, &custom_headers, body.len());
                 Ok(execute_ureq_request(
-                    req,
+                    "POST",
+                    &url_str,
+                    &custom_headers,
                     Some(&body),
                     timeout,
-                    request_size,
+                    max_redirects,
                     sink_post,
                     &tx,
                     name_tag,
-                    &url_str,
                     tags,
                 ))
             },
@@ -913,8 +1064,8 @@ pub fn register_sync_http(
                 let tags = tags_from_options(options);
                 let mut custom_headers = headers_from_options(options);
                 default_content_type(&mut custom_headers);
-                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
+                let max_redirects = max_redirects_from_options(options);
                 let tx = tx_put.clone();
 
                 if let Some(ref bridge) = bridge_put {
@@ -925,6 +1076,7 @@ pub fn register_sync_http(
                         Some(&body),
                         &custom_headers,
                         timeout,
+                        max_redirects,
                         sink_put,
                         &tx,
                         name_tag.as_deref(),
@@ -932,24 +1084,16 @@ pub fn register_sync_http(
                     ));
                 }
 
-                let req = AGENT.with(|agent| {
-                    let mut req = agent.put(&url_str);
-                    for (k, v) in &custom_headers {
-                        req = req.set(k, v);
-                    }
-                    req
-                });
-                let request_size =
-                    estimate_request_size("PUT", &url_str, &custom_headers, body.len());
                 Ok(execute_ureq_request(
-                    req,
+                    "PUT",
+                    &url_str,
+                    &custom_headers,
                     Some(&body),
                     timeout,
-                    request_size,
+                    max_redirects,
                     sink_put,
                     &tx,
                     name_tag,
-                    &url_str,
                     tags,
                 ))
             },
@@ -969,9 +1113,9 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let mut custom_headers = headers_from_options(options);
-                apply_jar_cookies(&url_str, &mut custom_headers);
+                let custom_headers = headers_from_options(options);
                 let timeout = timeout_from_options(options);
+                let max_redirects = max_redirects_from_options(options);
                 let tx = tx_del.clone();
 
                 if let Some(ref bridge) = bridge_del {
@@ -982,6 +1126,7 @@ pub fn register_sync_http(
                         None,
                         &custom_headers,
                         timeout,
+                        max_redirects,
                         sink_del,
                         &tx,
                         name_tag.as_deref(),
@@ -989,23 +1134,16 @@ pub fn register_sync_http(
                     ));
                 }
 
-                let req = AGENT.with(|agent| {
-                    let mut req = agent.delete(&url_str);
-                    for (k, v) in &custom_headers {
-                        req = req.set(k, v);
-                    }
-                    req
-                });
-                let request_size = estimate_request_size("DELETE", &url_str, &custom_headers, 0);
                 Ok(execute_ureq_request(
-                    req,
+                    "DELETE",
+                    &url_str,
+                    &custom_headers,
                     None,
                     timeout,
-                    request_size,
+                    max_redirects,
                     sink_del,
                     &tx,
                     name_tag,
-                    &url_str,
                     tags,
                 ))
             },
@@ -1029,8 +1167,8 @@ pub fn register_sync_http(
                 let tags = tags_from_options(options);
                 let mut custom_headers = headers_from_options(options);
                 default_content_type(&mut custom_headers);
-                apply_jar_cookies(&url_str, &mut custom_headers);
                 let timeout = timeout_from_options(options);
+                let max_redirects = max_redirects_from_options(options);
                 let tx = tx_patch.clone();
 
                 if let Some(ref bridge) = bridge_patch {
@@ -1041,6 +1179,7 @@ pub fn register_sync_http(
                         Some(&body),
                         &custom_headers,
                         timeout,
+                        max_redirects,
                         sink_patch,
                         &tx,
                         name_tag.as_deref(),
@@ -1048,24 +1187,16 @@ pub fn register_sync_http(
                     ));
                 }
 
-                let req = AGENT.with(|agent| {
-                    let mut req = agent.request("PATCH", &url_str);
-                    for (k, v) in &custom_headers {
-                        req = req.set(k, v);
-                    }
-                    req
-                });
-                let request_size =
-                    estimate_request_size("PATCH", &url_str, &custom_headers, body.len());
                 Ok(execute_ureq_request(
-                    req,
+                    "PATCH",
+                    &url_str,
+                    &custom_headers,
                     Some(&body),
                     timeout,
-                    request_size,
+                    max_redirects,
                     sink_patch,
                     &tx,
                     name_tag,
-                    &url_str,
                     tags,
                 ))
             },
@@ -1086,9 +1217,9 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let mut custom_headers = headers_from_options(options);
-                apply_jar_cookies(&url_str, &mut custom_headers);
+                let custom_headers = headers_from_options(options);
                 let timeout = timeout_from_options(options);
+                let max_redirects = max_redirects_from_options(options);
                 let tx = tx_head.clone();
 
                 if let Some(ref bridge) = bridge_head {
@@ -1099,6 +1230,7 @@ pub fn register_sync_http(
                         None,
                         &custom_headers,
                         timeout,
+                        max_redirects,
                         sink_head,
                         &tx,
                         name_tag.as_deref(),
@@ -1106,23 +1238,16 @@ pub fn register_sync_http(
                     ));
                 }
 
-                let req = AGENT.with(|agent| {
-                    let mut req = agent.head(&url_str);
-                    for (k, v) in &custom_headers {
-                        req = req.set(k, v);
-                    }
-                    req
-                });
-                let request_size = estimate_request_size("HEAD", &url_str, &custom_headers, 0);
                 Ok(execute_ureq_request(
-                    req,
+                    "HEAD",
+                    &url_str,
+                    &custom_headers,
                     None,
                     timeout,
-                    request_size,
+                    max_redirects,
                     sink_head,
                     &tx,
                     name_tag,
-                    &url_str,
                     tags,
                 ))
             },
@@ -1143,9 +1268,9 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let mut custom_headers = headers_from_options(options);
-                apply_jar_cookies(&url_str, &mut custom_headers);
+                let custom_headers = headers_from_options(options);
                 let timeout = timeout_from_options(options);
+                let max_redirects = max_redirects_from_options(options);
                 let tx = tx_options.clone();
 
                 if let Some(ref bridge) = bridge_options {
@@ -1156,6 +1281,7 @@ pub fn register_sync_http(
                         None,
                         &custom_headers,
                         timeout,
+                        max_redirects,
                         sink_options,
                         &tx,
                         name_tag.as_deref(),
@@ -1163,23 +1289,16 @@ pub fn register_sync_http(
                     ));
                 }
 
-                let req = AGENT.with(|agent| {
-                    let mut req = agent.request("OPTIONS", &url_str);
-                    for (k, v) in &custom_headers {
-                        req = req.set(k, v);
-                    }
-                    req
-                });
-                let request_size = estimate_request_size("OPTIONS", &url_str, &custom_headers, 0);
                 Ok(execute_ureq_request(
-                    req,
+                    "OPTIONS",
+                    &url_str,
+                    &custom_headers,
                     None,
                     timeout,
-                    request_size,
+                    max_redirects,
                     sink_options,
                     &tx,
                     name_tag,
-                    &url_str,
                     tags,
                 ))
             },
@@ -1202,9 +1321,9 @@ pub fn register_sync_http(
                 let options = rest.first();
                 let name_tag = name_from_options(options);
                 let tags = tags_from_options(options);
-                let mut custom_headers = headers_from_options(options);
-                apply_jar_cookies(&url_str, &mut custom_headers);
+                let custom_headers = headers_from_options(options);
                 let timeout = timeout_from_options(options);
+                let max_redirects = max_redirects_from_options(options);
                 let tx = tx_request.clone();
                 let method_upper = method_str.to_uppercase();
 
@@ -1216,6 +1335,7 @@ pub fn register_sync_http(
                         body.as_deref(),
                         &custom_headers,
                         timeout,
+                        max_redirects,
                         sink_request,
                         &tx,
                         name_tag.as_deref(),
@@ -1223,28 +1343,16 @@ pub fn register_sync_http(
                     ));
                 }
 
-                let req = AGENT.with(|agent| {
-                    let mut req = agent.request(&method_upper, &url_str);
-                    for (k, v) in &custom_headers {
-                        req = req.set(k, v);
-                    }
-                    req
-                });
-                let request_size = estimate_request_size(
+                Ok(execute_ureq_request(
                     &method_upper,
                     &url_str,
                     &custom_headers,
-                    body.as_deref().map_or(0, str::len),
-                );
-                Ok(execute_ureq_request(
-                    req,
                     body.as_deref(),
                     timeout,
-                    request_size,
+                    max_redirects,
                     sink_request,
                     &tx,
                     name_tag,
-                    &url_str,
                     tags,
                 ))
             },
@@ -1266,15 +1374,21 @@ pub fn register_sync_http(
                     let method: String = obj.get("method").unwrap_or_else(|_| "GET".to_string());
                     let url: String = obj.get("url")?;
                     let body: Option<String> = obj.get("body").ok();
-                    let mut headers: HashMap<String, String> =
-                        obj.get("headers").unwrap_or_default();
-                    apply_jar_cookies(&url, &mut headers);
+                    let headers: HashMap<String, String> = obj.get("headers").unwrap_or_default();
                     let name: Option<String> = obj.get("name").ok();
                     let tags: HashMap<String, String> = obj.get("tags").unwrap_or_default();
                     let timeout: Option<Duration> = obj
                         .get::<_, String>("timeout")
                         .ok()
                         .and_then(|s| crate::utils::parse_duration_str(&s));
+                    let max_redirects: u32 =
+                        if obj.get::<_, bool>("followRedirects").ok() == Some(false) {
+                            0
+                        } else {
+                            obj.get::<_, u32>("maxRedirects").unwrap_or_else(|_| {
+                                DEFAULT_MAX_REDIRECTS.load(std::sync::atomic::Ordering::Relaxed)
+                            })
+                        };
                     let tx = tx_batch.clone();
                     let method_upper = method.to_uppercase();
 
@@ -1286,6 +1400,7 @@ pub fn register_sync_http(
                             body.as_deref(),
                             &headers,
                             timeout,
+                            max_redirects,
                             sink_batch,
                             &tx,
                             name.as_deref(),
@@ -1294,28 +1409,16 @@ pub fn register_sync_http(
                         continue;
                     }
 
-                    let req = AGENT.with(|agent| {
-                        let mut req = agent.request(&method_upper, &url);
-                        for (k, v) in &headers {
-                            req = req.set(k, v);
-                        }
-                        req
-                    });
-                    let request_size = estimate_request_size(
+                    results.push(execute_ureq_request(
                         &method_upper,
                         &url,
                         &headers,
-                        body.as_deref().map_or(0, str::len),
-                    );
-                    results.push(execute_ureq_request(
-                        req,
                         body.as_deref(),
                         timeout,
-                        request_size,
+                        max_redirects,
                         sink_batch,
                         &tx,
                         name,
-                        &url,
                         tags,
                     ));
                 }
@@ -1490,6 +1593,27 @@ pub fn register_sync_http(
                 }
                 merged.headers = req.headers;
                 var res = callNative(req.method, req.url, req.body, merged);
+
+                // Documented retry options: retry on network failure by
+                // default (status 0), or on a custom retryOn(res) predicate,
+                // with exponential backoff (retryDelay doubles, capped 32x).
+                var retries = typeof merged.retry === 'number' ? merged.retry : 0;
+                for (var attempt = 1; attempt <= retries; attempt++) {
+                    var shouldRetry = typeof merged.retryOn === 'function'
+                        ? merged.retryOn(res)
+                        : res.status === 0;
+                    if (!shouldRetry) break;
+                    var delayMs;
+                    if (typeof merged.retryDelayFn === 'function') {
+                        delayMs = merged.retryDelayFn(attempt);
+                    } else {
+                        var base = typeof merged.retryDelay === 'number' ? merged.retryDelay : 100;
+                        delayMs = base * Math.min(Math.pow(2, attempt - 1), 32);
+                    }
+                    if (delayMs > 0) sleep(delayMs / 1000);
+                    res = callNative(req.method, req.url, req.body, merged);
+                }
+
                 globalThis.__http_callAfterResponseHooks(res);
                 return res;
             }

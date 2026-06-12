@@ -89,10 +89,22 @@ fn handle_connection(mut stream: TcpStream, hits: Arc<AtomicUsize>) {
             // Echoes the raw request head so tests can assert on sent headers.
             ("GET", "/echo-headers") => ("200 OK", head.clone().into_bytes(), ""),
             ("GET", "/redirect") => ("302 Found", Vec::new(), "Location: /ok\r\n"),
+            // Sets a cookie on the redirect hop itself
+            ("GET", "/redirect-set-cookie") => (
+                "302 Found",
+                Vec::new(),
+                "Set-Cookie: hop=1; Path=/\r\nLocation: /echo-headers\r\n",
+            ),
+            ("GET", "/redirect-loop") => ("302 Found", Vec::new(), "Location: /redirect-loop\r\n"),
             ("GET", "/set-cookie") => (
                 "200 OK",
                 b"cookie set".to_vec(),
                 "Set-Cookie: session=abc123; Path=/\r\n",
+            ),
+            ("GET", "/html") => (
+                "200 OK",
+                b"<html><body><h1 class=\"title\">Hello <b>World</b></h1></body></html>".to_vec(),
+                "",
             ),
             ("GET", "/slow") => {
                 std::thread::sleep(std::time::Duration::from_secs(3));
@@ -571,4 +583,137 @@ export default function () {{
         );
     }
     assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+}
+
+/// Cookies set on intermediate redirect responses are captured and sent on
+/// the followed request (the documented automatic-cookie behavior).
+#[test]
+fn redirect_hop_cookies_are_captured_and_resent() {
+    let server = TestServer::start();
+    let script = format!(
+        r#"
+export default function () {{
+    // 302 sets hop=1 and redirects to /echo-headers
+    let res = http.get('{base}/redirect-set-cookie');
+    check(res, {{
+        'followed to 200': (r) => r.status === 200,
+        'hop cookie sent on followed request': (r) => r.body.includes('hop=1'),
+    }});
+    check(http.cookieJar().get('{base}', 'hop'), {{
+        'hop cookie stored in jar': (c) => c !== null && c.value === '1',
+    }});
+}}
+"#,
+        base = server.base_url
+    );
+
+    let report = run_script(script, iterations_config(1, 1));
+
+    for name in [
+        "followed to 200",
+        "hop cookie sent on followed request",
+        "hop cookie stored in jar",
+    ] {
+        assert_eq!(
+            report.checks.get(name),
+            Some(&(1, 1)),
+            "check '{name}' did not pass: {:?}",
+            report.checks
+        );
+    }
+}
+
+/// Documented redirect options: followRedirects: false surfaces the 3xx, and
+/// maxRedirects caps the number of hops (returning the last 3xx).
+#[test]
+fn redirect_options_follow_and_max_are_honored() {
+    let server = TestServer::start();
+    let script = format!(
+        r#"
+export default function () {{
+    let no_follow = http.get('{base}/redirect', {{ followRedirects: false }});
+    check(no_follow, {{
+        'no-follow sees the 302': (r) => r.status === 302,
+    }});
+
+    let limited = http.get('{base}/redirect-loop', {{ maxRedirects: 2 }});
+    check(limited, {{
+        'loop stops at limit with 302': (r) => r.status === 302,
+    }});
+}}
+"#,
+        base = server.base_url
+    );
+
+    let report = run_script(script, iterations_config(1, 1));
+
+    assert_eq!(report.checks.get("no-follow sees the 302"), Some(&(1, 1)));
+    assert_eq!(
+        report.checks.get("loop stops at limit with 302"),
+        Some(&(1, 1))
+    );
+    // 1 (no-follow) + 3 (initial + 2 followed hops) = 4 server hits
+    assert_eq!(server.hits.load(Ordering::SeqCst), 4);
+}
+
+/// Documented per-request retry options plus the matchesSchema/html
+/// response helpers.
+#[test]
+fn retry_options_and_response_helpers() {
+    let server = TestServer::start();
+    let script = format!(
+        r#"
+export default function () {{
+    // retryOn predicate retries 5xx responses with a custom delay
+    let attempts_seen = http.get('{base}/status/500', {{
+        retry: 2,
+        retryOn: (r) => r.status === 500,
+        retryDelayFn: () => 1,
+    }});
+    check(attempts_seen, {{
+        'final response is still 500': (r) => r.status === 500,
+    }});
+
+    // matchesSchema validates JSON body types
+    let res = http.post('{base}/echo', JSON.stringify({{
+        name: 'fusillade', count: 3, ok: true, items: [1], meta: {{}}
+    }}), {{ headers: {{ 'Content-Type': 'application/json' }} }});
+    check(res, {{
+        'schema matches': (r) => r.matchesSchema({{
+            name: 'string', count: 'number', ok: 'boolean', items: 'array', meta: 'object'
+        }}),
+        'schema mismatch detected': (r) => !r.matchesSchema({{ name: 'number' }}),
+        'missing key detected': (r) => !r.matchesSchema({{ nope: 'string' }}),
+    }});
+
+    // html() returns the inner text of the first CSS-selector match
+    let page = http.get('{base}/html');
+    check(page, {{
+        'html selector text': (r) => r.html('h1.title') === 'Hello World',
+        'html no match is empty': (r) => r.html('.missing') === '',
+    }});
+}}
+"#,
+        base = server.base_url
+    );
+
+    let report = run_script(script, iterations_config(1, 1));
+
+    for name in [
+        "final response is still 500",
+        "schema matches",
+        "schema mismatch detected",
+        "missing key detected",
+        "html selector text",
+        "html no match is empty",
+    ] {
+        assert_eq!(
+            report.checks.get(name),
+            Some(&(1, 1)),
+            "check '{name}' did not pass: {:?}",
+            report.checks
+        );
+    }
+    // retry: 1 initial + 2 retries on /status/500, then /echo and /html
+    assert_eq!(server.hits.load(Ordering::SeqCst), 5);
 }

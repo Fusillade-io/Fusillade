@@ -870,7 +870,7 @@ The optional `options` argument supports:
 * `retryOn` (Function): Custom function to determine if request should be retried. Receives response object, returns boolean.
 * `retryDelayFn` (Function): Custom function to calculate retry delay. Receives retry count (1-based), returns delay in milliseconds.
 * `followRedirects` (Boolean): Whether to follow HTTP redirects (3xx). Defaults to `true`.
-* `maxRedirects` (Number): Maximum number of redirects to follow. Defaults to `5`.
+* `maxRedirects` (Number): Maximum number of redirects to follow for this request. Defaults to the global `max_redirects` setting (`10`).
 
 ```javascript
 // Retry failed requests with exponential backoff
