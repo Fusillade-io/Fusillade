@@ -1,65 +1,81 @@
+// Browser automation smoke test.
+//
+// Test 1 navigates to a real page over the network: in CI this is the local
+// httpbin service container (via FUSILLADE_BASE_URL), otherwise example.com.
+// Tests 2-4 are fully self-contained data: URLs and need no network.
+//
+// The run gates on a `browser_success` Rate with abort_on_fail, so any failure
+// (or an environment with no usable Chrome) exits non-zero instead of printing
+// and passing — matching the ws/mqtt/amqp/sse/grpc scenarios.
+
+const BASE = __ENV.FUSILLADE_BASE_URL;
+const NAV_URL = BASE ? BASE + '/html' : 'https://example.com';
+const NAV_NEEDLE = BASE ? 'Herman Melville' : 'Example Domain';
+
 export const options = {
-    duration: '5s',
     workers: 1,
+    iterations: 1,
+    thresholds: {
+        'browser_success': ['rate >= 1'],
+    },
+    abort_on_fail: true,
 };
 
 export default function () {
-    print('Launching browser...');
-    const browser = chromium.launch();
+    let ok = false;
 
-    // Test 1: Navigation and Content (External)
-    print('Test 1: Navigating to example.com...');
-    const page = browser.newPage();
-    page.goto('https://example.com');
+    try {
+        print('Launching browser...');
+        const browser = chromium.launch();
 
-    const content = page.content();
-    assertion(content, {
-        'contains Example Domain': (c) => c.includes('Example Domain')
-    });
+        // Test 1: Navigation, content, and performance metrics on a real page.
+        // (navigation timing is only meaningful for an actual page load, not a
+        // data: URL, so metrics must be read here before navigating away.)
+        print('Test 1: Navigating to ' + NAV_URL + '...');
+        const page = browser.newPage();
+        page.goto(NAV_URL);
+        const content = page.content();
+        if (!content.includes(NAV_NEEDLE)) {
+            throw new Error('navigation content missing "' + NAV_NEEDLE + '"');
+        }
+        const m = page.metrics();
+        print('navigationStart: ' + (m && m.navigationStart));
+        if (!(m && m.navigationStart > 0)) {
+            throw new Error('metrics missing navigationStart');
+        }
 
-    // Test 2: Interaction (Data URL)
-    print('Test 2: Interaction (Type, Click, Evaluate)...');
-    // Simple interactive page
-    const html = `
-        <html><body>
-            <input id="input" type="text" />
-            <button id="btn" onclick="document.getElementById('result').innerText = document.getElementById('input').value + ' Clicked'">Submit</button>
-            <div id="result"></div>
-        </body></html>
-    `;
-    page.goto('data:text/html,' + encodeURIComponent(html));
+        // Test 2: Interaction (type, click, evaluate) against a data: URL.
+        print('Test 2: Interaction...');
+        const html = `
+            <html><body>
+                <input id="input" type="text" />
+                <button id="btn" onclick="document.getElementById('result').innerText = document.getElementById('input').value + ' Clicked'">Submit</button>
+                <div id="result"></div>
+            </body></html>
+        `;
+        page.goto('data:text/html,' + encodeURIComponent(html));
+        page.type('#input', 'Hello');
+        page.click('#btn');
+        const resultText = page.evaluate('document.getElementById("result").innerText');
+        print('Interaction Result: ' + resultText);
+        if (resultText !== 'Hello Clicked') {
+            throw new Error('interaction failed, got: ' + resultText);
+        }
 
-    // Type text
-    page.type('#input', 'Hello');
+        // Test 3: Screenshot.
+        print('Test 3: Screenshot...');
+        const png = page.screenshot();
+        print('Screenshot size: ' + png.length + ' bytes');
+        if (!(png.length > 0)) {
+            throw new Error('empty screenshot');
+        }
 
-    // Click button
-    page.click('#btn');
+        browser.close();
+        print('Browser closed.');
+        ok = true;
+    } catch (e) {
+        print('Browser test error (Chrome may be unavailable): ' + e);
+    }
 
-    // Evaluate result (check if click handler worked)
-    const resultText = page.evaluate('document.getElementById("result").innerText');
-    print('Interaction Result: ' + resultText);
-
-    assertion(resultText, {
-        'interaction worked': (t) => t === 'Hello Clicked'
-    });
-
-    // Test 3: Metrics
-    print('Test 3: Performance Metrics...');
-    const metrics = page.metrics();
-    print('Navigation Start: ' + metrics.navigationStart);
-
-    assertion(metrics, {
-        'has navigationStart': (m) => m.navigationStart > 0
-    });
-
-    // Test 4: Screenshot
-    print('Test 4: Taking screenshot...');
-    const png = page.screenshot();
-    print('Screenshot size: ' + png.length + ' bytes');
-    assertion(png, {
-        'screenshot taken': (p) => p.length > 0
-    });
-
-    browser.close();
-    print('Browser closed.');
+    metrics.rateAdd('browser_success', ok);
 }

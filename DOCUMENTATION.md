@@ -1474,6 +1474,11 @@ Fusillade includes native support for headless browser automation via Chromium. 
 * `page.waitForResponse(urlPattern, [timeoutMs])`: Waits for a network response matching the URL pattern. Returns `{ name, duration, startTime, transferSize }`. Default timeout: 30000ms.
 * `page.close()`: Closes the page/tab and releases resources.
 
+`chromium.launch()` auto-detects an installed Chrome/Chromium and runs it sandboxed. Two environment variables tune this for containers and CI:
+
+* `FUSILLADE_CHROME_PATH`: path to a specific Chrome/Chromium binary (overrides auto-detection).
+* `FUSILLADE_BROWSER_NO_SANDBOX`: set to `1`/`true` to launch with the sandbox disabled (`--no-sandbox`). Required in most Docker/CI environments, which lack the privileges the sandbox needs.
+
 ```javascript
 export default function() {
     const browser = chromium.launch();

@@ -5,6 +5,18 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-06-15
+
+### Added
+- `FUSILLADE_CHROME_PATH` and `FUSILLADE_BROWSER_NO_SANDBOX` environment variables to point `chromium.launch()` at a specific Chrome/Chromium binary and to launch with the sandbox disabled (`--no-sandbox`), needed when running browser tests in most container/CI environments
+- The browser-automation scenario now runs hermetically in CI (Chromium installed via `setup-chrome`) and is gated on a success-rate threshold
+
+### Fixed
+- **`page.evaluate()` returned `null` for any object or array result** (only primitive values survived the round-trip); it now materializes the full value. This also fixes `page.metrics()`, which returns an object and was therefore always `null`
+- **`page.screenshot()` failed with an out-of-memory error.** The PNG bytes were expanded into a JS array of one boxed number per byte, which exhausted the per-worker JS heap limit even for a small image. Screenshots are now returned as a `Uint8Array` (compact, and still exposing `.length`)
+- `fusillade whoami` could panic when the first 12 bytes of the stored token split a multi-byte UTF-8 character; the token preview is now taken by characters
+- The metrics aggregator cloned every metric even when no remote (distributed) reporting was active; on local runs it now moves the metric, removing a per-request allocation from the hot path
+
 ## [1.6.2] - 2026-06-12
 
 ### Added

@@ -1266,11 +1266,7 @@ fn main() -> Result<()> {
             match fusillade::cli::cloud::load_token() {
                 Some(auth) => {
                     println!("Logged in to Fusillade Cloud");
-                    let display_token = if auth.token.len() >= 12 {
-                        &auth.token[..12]
-                    } else {
-                        &auth.token
-                    };
+                    let display_token: String = auth.token.chars().take(12).collect();
                     println!("  Token: {}...", display_token);
                     println!("  API:   {}", fusillade::cli::cloud::get_api_url());
                 }

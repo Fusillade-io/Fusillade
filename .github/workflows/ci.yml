@@ -88,6 +88,10 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+
       - name: Build Fusillade
         run: cargo build --release
 
@@ -101,6 +105,10 @@ jobs:
           FUSILLADE_WS_URL: ws://localhost:8090
           FUSILLADE_SSE_URL: http://localhost:8090/.sse
           FUSILLADE_GRPC_URL: http://localhost:9000
+          # Browser scenario: use the Chrome installed above; the sandbox needs
+          # privileges the runner lacks, so disable it.
+          FUSILLADE_CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          FUSILLADE_BROWSER_NO_SANDBOX: "1"
         run: |
           # Unit tests (no HTTP required)
           ./target/release/fusillade run scenarios/unit_test.js --headless
@@ -125,6 +133,9 @@ jobs:
           ./target/release/fusillade run scenarios/amqp_test.js --headless
           ./target/release/fusillade run scenarios/sse_test.js --headless
           ./target/release/fusillade run scenarios/grpc_test.js --headless
+
+          # Browser test (Chromium via setup-chrome; navigates local httpbin + data: URLs)
+          ./target/release/fusillade run scenarios/browser_test.js --headless
 
   coverage:
     name: Coverage

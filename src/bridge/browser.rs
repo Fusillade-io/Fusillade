@@ -3,7 +3,7 @@ use crossbeam_channel::Sender;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use rquickjs::{
     class::{Trace, Tracer},
-    Class, Ctx, Function, IntoJs, JsLifetime, Object, Result, Value,
+    Class, Ctx, Function, IntoJs, JsLifetime, Object, Result, TypedArray, Value,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -212,13 +212,40 @@ impl<'js> JsPage {
     }
 
     pub fn evaluate(&self, ctx: Ctx<'js>, script: String) -> Result<Value<'js>> {
-        let result = self.inner.evaluate(&script, false).map_err(|e| {
-            let msg = format!("Evaluation failed: {}", e);
-            let _ = ctx.throw(msg.into_js(&ctx).unwrap());
-            rquickjs::Error::Exception
-        })?;
+        use headless_chrome::protocol::cdp::Runtime;
+        // `Tab::evaluate` hardcodes `returnByValue: false`, so any object/array
+        // result comes back as a remote handle with no `value` and serializes to
+        // `null` — silently breaking `page.evaluate()` for objects (and thus
+        // `page.metrics()`). Call Runtime.evaluate directly with returnByValue=true
+        // so the full value is materialized.
+        let result = self
+            .inner
+            .call_method(Runtime::Evaluate {
+                expression: script,
+                return_by_value: Some(true),
+                generate_preview: Some(false),
+                silent: Some(false),
+                await_promise: Some(false),
+                include_command_line_api: Some(false),
+                user_gesture: Some(false),
+                object_group: None,
+                context_id: None,
+                throw_on_side_effect: None,
+                timeout: None,
+                disable_breaks: None,
+                repl_mode: None,
+                allow_unsafe_eval_blocked_by_csp: None,
+                unique_context_id: None,
+                serialization_options: None,
+            })
+            .map_err(|e| {
+                let msg = format!("Evaluation failed: {}", e);
+                let _ = ctx.throw(msg.into_js(&ctx).unwrap());
+                rquickjs::Error::Exception
+            })?
+            .result;
 
-        let json_str = serde_json::to_string(&result.value).unwrap_or("null".to_string());
+        let json_str = serde_json::to_string(&result.value).unwrap_or_else(|_| "null".to_string());
         let json_obj: Object = ctx.globals().get("JSON")?;
         let parse: Function = json_obj.get("parse")?;
         parse.call((json_str,))
@@ -238,15 +265,21 @@ impl<'js> JsPage {
         self.evaluate(ctx, script.to_string())
     }
 
-    pub fn screenshot(&self, ctx: Ctx<'_>) -> Result<Vec<u8>> {
+    pub fn screenshot(&self, ctx: Ctx<'js>) -> Result<TypedArray<'js, u8>> {
         use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption;
-        self.inner
+        let bytes = self
+            .inner
             .capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, true)
             .map_err(|e| {
                 let msg = format!("Screenshot failed: {}", e);
                 let _ = ctx.throw(msg.into_js(&ctx).unwrap());
                 rquickjs::Error::Exception
-            })
+            })?;
+        // Return a Uint8Array, not a plain Array: a Vec<u8> would expand into one
+        // boxed JS number per byte, which exhausts the per-worker JS heap limit
+        // even for a small PNG. A typed array stores the bytes compactly and still
+        // exposes `.length`.
+        TypedArray::new(ctx, bytes)
     }
 
     pub fn url(&self) -> String {
@@ -612,7 +645,25 @@ impl<'js> JsPage {
 }
 
 fn launch_browser<'js>(ctx: Ctx<'js>) -> Result<Class<'js, JsBrowser>> {
-    let options = LaunchOptions::default();
+    let mut options = LaunchOptions::default();
+
+    // Containerized/CI environments often need an explicit Chrome binary and a
+    // disabled sandbox (the namespace sandbox requires privileges most containers
+    // lack). These knobs are env-driven so the documented `chromium.launch()` API
+    // and the default local behavior (auto-detect, sandbox on) stay unchanged.
+    if let Ok(path) = std::env::var("FUSILLADE_CHROME_PATH") {
+        if !path.is_empty() {
+            options.path = Some(std::path::PathBuf::from(path));
+        }
+    }
+    let no_sandbox = std::env::var("FUSILLADE_BROWSER_NO_SANDBOX")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if no_sandbox {
+        // headless_chrome appends --no-sandbox/--disable-setuid-sandbox itself.
+        options.sandbox = false;
+    }
+
     let browser = Browser::new(options).map_err(|e| {
         let msg = format!("Failed to launch browser: {}", e);
         let _ = ctx.throw(msg.into_js(&ctx).unwrap());

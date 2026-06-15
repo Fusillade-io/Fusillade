@@ -404,12 +404,17 @@ impl Engine {
 
                     while let Ok(metric) = rx.recv() {
                         // Distribute metrics across shards using worker-local counter
-                        agg_handle.add(local_counter % num_shards, metric.clone());
+                        let shard = local_counter % num_shards;
                         local_counter = local_counter.wrapping_add(num_aggregators);
 
-                        // Only first aggregator handles remote reporting to avoid duplicates
+                        // Only first aggregator handles remote reporting to avoid duplicates.
+                        // When remote reporting is active we need the metric in two places
+                        // (local shard + remote batch) so a clone is unavoidable; otherwise
+                        // move it straight into the aggregator to skip a per-metric allocation
+                        // on the hot path (local-only runs, and every non-primary aggregator).
                         if agg_id == 0 {
                             if let (Some(url), Some(client)) = (&metrics_url, &client) {
+                                agg_handle.add(shard, metric.clone());
                                 batch.push(metric);
                                 if last_send.elapsed() >= Duration::from_secs(1)
                                     || batch.len() >= 100
@@ -429,8 +434,12 @@ impl Engine {
                                     }
                                     last_send = Instant::now();
                                 }
+                                continue;
                             }
                         }
+
+                        // Local-only / non-primary aggregator: move, don't clone.
+                        agg_handle.add(shard, metric);
                     }
                 });
             }
