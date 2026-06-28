@@ -5,6 +5,16 @@ All notable changes to Fusillade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.4] - 2026-06-28
+
+### Fixed
+- **A script that threw on every iteration reported "No metrics collected" with no hint of what went wrong.** The exception message and location were captured internally but never surfaced. The summary now shows an `Errors:` section with the deduped message (e.g. `3× browser is not defined` plus the failing line), a clear `No successful requests — N iteration(s) failed` banner, and the run exits non-zero
+- **The post-run summary was silently discarded whenever the live TUI was active.** The TUI renders on an alternate screen that is wiped on teardown, and the summary was printed before that teardown — so an interactive run ended on a bare prompt with no results. The engine now waits for the TUI to leave the alternate screen before printing, so the summary, threshold results, and errors persist in the terminal
+
+### Changed
+- The process now exits non-zero when any iteration's script threw or a configured threshold was breached, so CI catches failed runs (previously a threshold breach only affected the exit code under `--abort`)
+- The `JS runtime(s) were leaked to prevent shutdown crashes` note is no longer printed on every run; it is internal-only diagnostics, now gated behind `FUSILLADE_DEBUG_RUNTIME_LEAKS`
+
 ## [1.6.3] - 2026-06-15
 
 ### Added

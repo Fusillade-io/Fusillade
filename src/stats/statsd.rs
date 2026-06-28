@@ -329,6 +329,8 @@ mod tests {
             checks: HashMap::new(),
             pool_hits: 0,
             pool_misses: 0,
+            threshold_failures: Vec::new(),
+            failed_iterations: 0,
         };
 
         report.errors.insert("timeout".to_string(), 10);

@@ -572,6 +572,8 @@ mod tests {
             gauges: HashMap::new(),
             pool_hits: 0,
             pool_misses: 0,
+            threshold_failures: Vec::new(),
+            failed_iterations: 0,
         };
         let html = generate_html(&report);
         assert!(html.contains("No requests were made"));
@@ -605,6 +607,8 @@ mod tests {
             gauges: HashMap::new(),
             pool_hits: 0,
             pool_misses: 0,
+            threshold_failures: Vec::new(),
+            failed_iterations: 0,
         };
 
         let html = generate_html(&report);
@@ -732,6 +736,8 @@ mod tests {
             gauges: HashMap::new(),
             pool_hits: 0,
             pool_misses: 0,
+            threshold_failures: Vec::new(),
+            failed_iterations: 0,
         };
 
         let html = generate_html(&report);

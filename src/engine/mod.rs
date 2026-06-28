@@ -1985,6 +1985,24 @@ impl Engine {
             // Signal TUI that the test is done
             control_state.stop();
 
+            // Wait for the TUI (if any) to leave the alternate screen before we
+            // print anything. The TUI renders on an alternate screen buffer that
+            // is discarded on teardown; anything printed while it is still active
+            // — including the entire post-run summary — vanishes with it, leaving
+            // the user staring at a bare prompt. The TUI exits on its own shortly
+            // after the stop() above (see tui::run_tui), flipping TUI_ACTIVE off.
+            // Block until it does, with a bound so we never hang. When no TUI is
+            // running (headless/piped), TUI_ACTIVE is already false and this is a
+            // no-op.
+            {
+                let tui_teardown_deadline = Instant::now() + Duration::from_secs(3);
+                while crate::bridge::TUI_ACTIVE.load(Ordering::Relaxed)
+                    && Instant::now() < tui_teardown_deadline
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+
             // Clean up
             if is_multi_scenario {
                 // Wait for all scenarios to complete
@@ -2023,7 +2041,7 @@ impl Engine {
 
             // Merge all shards into final aggregator for reporting
             let merged_agg = sharded_aggregator.merge();
-            let report = merged_agg.to_report();
+            let mut report = merged_agg.to_report();
 
             if json_output {
                 println!("{}", merged_agg.to_json());
@@ -2138,6 +2156,10 @@ impl Engine {
                 }
             }
 
+            // Carry threshold failures back to the caller so it can set the
+            // process exit code after the TUI has torn down and output is printed.
+            report.threshold_failures = threshold_failures.clone();
+
             // If abort_on_fail is enabled and thresholds failed, print failures and return error
             if config.abort_on_fail.unwrap_or(false) && !threshold_failures.is_empty() {
                 eprintln!("\nThreshold failures:");
@@ -2156,9 +2178,15 @@ impl Engine {
                 }
             }
 
-            // Report leaked JS runtimes (see LEAKED_RUNTIMES doc comment for rationale)
+            // Report leaked JS runtimes (see LEAKED_RUNTIMES doc comment for
+            // rationale). On the one-shot CLI this is harmless — the process
+            // exits immediately and the OS reclaims everything — so it's just
+            // noise. It only matters in a long-lived process that runs many
+            // tests back-to-back (the data-plane worker), where the leaks
+            // accumulate. Keep it silent by default; surface it only when
+            // FUSILLADE_DEBUG_RUNTIME_LEAKS is set.
             let leaked = LEAKED_RUNTIMES.swap(0, Ordering::Relaxed);
-            if leaked > 0 {
+            if leaked > 0 && std::env::var_os("FUSILLADE_DEBUG_RUNTIME_LEAKS").is_some() {
                 let approx_bytes = leaked * heap_size;
                 let approx_mb = approx_bytes as f64 / 1_048_576.0;
                 eprintln!(

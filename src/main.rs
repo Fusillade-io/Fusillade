@@ -982,6 +982,28 @@ fn main() -> Result<()> {
                 }
             }
 
+            // Exit non-zero so CI catches a failed run. Two distinct failure
+            // modes (kept separate from ordinary HTTP request errors, which are
+            // gated by http_req_failed thresholds, not the exit code):
+            //   - the script threw on one or more iterations, or
+            //   - a configured threshold was breached.
+            // Exports and history saves above still run first, so artifacts are
+            // produced even on failure.
+            if report.failed_iterations > 0 || !report.threshold_failures.is_empty() {
+                let mut reasons = Vec::new();
+                if report.failed_iterations > 0 {
+                    reasons.push(format!("{} iteration(s) failed", report.failed_iterations));
+                }
+                if !report.threshold_failures.is_empty() {
+                    reasons.push(format!(
+                        "{} threshold(s) breached",
+                        report.threshold_failures.len()
+                    ));
+                }
+                eprintln!("\nRun failed: {}.", reasons.join(", "));
+                std::process::exit(1);
+            }
+
             Ok(())
         }
         Commands::Init {

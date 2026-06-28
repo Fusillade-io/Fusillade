@@ -47,3 +47,6 @@ __pycache__/
 .env
 .env.local
 CLAUDE.md
+
+# Local demo scripts and generated run reports (not shipped)
+demo/

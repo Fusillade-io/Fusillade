@@ -62,6 +62,7 @@ impl ShardedAggregator {
             merged.total_duration += shard_data.total_duration;
             merged.total_data_sent += shard_data.total_data_sent;
             merged.total_data_received += shard_data.total_data_received;
+            merged.failed_iterations += shard_data.failed_iterations;
 
             // Merge min/max
             if let Some(shard_min) = shard_data.min_duration {
@@ -266,6 +267,14 @@ pub struct ReportStats {
     // Connection pool metrics
     pub pool_hits: usize,
     pub pool_misses: usize,
+    /// Threshold criteria that failed for this run. Populated by the engine
+    /// after the run completes (not by `to_report`), and used to decide the
+    /// process exit code. In-memory only — never serialized to JSON/HTML.
+    #[serde(skip)]
+    pub threshold_failures: Vec<String>,
+    /// Iterations whose JS function threw (script errors). Drives the exit code.
+    #[serde(skip)]
+    pub failed_iterations: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -355,6 +364,9 @@ pub struct StatsAggregator {
     // Connection pool metrics
     pub pool_hits: usize,
     pub pool_misses: usize,
+    /// Count of iterations whose JS function threw (script errors), as opposed
+    /// to ordinary HTTP request failures. Drives the process exit code.
+    pub failed_iterations: usize,
 }
 
 unsafe impl<'js> JsLifetime<'js> for StatsAggregator {
@@ -394,6 +406,7 @@ impl StatsAggregator {
             no_endpoint_tracking: false,
             pool_hits: 0,
             pool_misses: 0,
+            failed_iterations: 0,
         }
     }
 
@@ -408,10 +421,10 @@ impl StatsAggregator {
             } => {
                 // Iteration metrics are internal bookkeeping (JS execution time),
                 // not actual HTTP requests. Track them in grouped stats only.
-                let is_iteration = name == "iteration"
-                    || name == "iteration_total"
-                    || name.ends_with("::iteration")
-                    || name.ends_with("::iteration_total");
+                let is_iteration_total =
+                    name == "iteration_total" || name.ends_with("::iteration_total");
+                let is_iteration =
+                    name == "iteration" || name.ends_with("::iteration") || is_iteration_total;
 
                 if !is_iteration {
                     self.total_requests += 1;
@@ -444,6 +457,18 @@ impl StatsAggregator {
                         self.pool_hits += 1;
                     } else {
                         self.pool_misses += 1;
+                    }
+                }
+
+                // A failed iteration isn't an HTTP request, but it carries the JS
+                // exception message (e.g. a typo or an unhandled throw). Surface it
+                // in the errors map so the summary isn't silently empty. Record only
+                // the `::iteration` metric, not its `::iteration_total` twin, to avoid
+                // double-counting the same failure.
+                if is_iteration && !is_iteration_total {
+                    if let Some(ref err) = error {
+                        *self.errors.entry(err.clone()).or_insert(0) += 1;
+                        self.failed_iterations += 1;
                     }
                 }
 
@@ -676,6 +701,8 @@ impl StatsAggregator {
             total_data_received: self.total_data_received,
             pool_hits: self.pool_hits,
             pool_misses: self.pool_misses,
+            threshold_failures: Vec::new(),
+            failed_iterations: self.failed_iterations,
         }
     }
 
@@ -683,20 +710,39 @@ impl StatsAggregator {
         serde_json::to_string_pretty(&self.to_report()).unwrap_or_default()
     }
 
+    /// Whether the run produced anything worth reporting. Drives the choice
+    /// between the full summary and the "No metrics collected" placeholder.
+    /// Failed iterations populate `errors`/`requests` even when no HTTP request
+    /// ever succeeded, so those must count — otherwise a script that throws on
+    /// every iteration looks identical to a run that never happened.
+    fn has_reportable_data(&self) -> bool {
+        self.total_requests > 0
+            || !self.requests.is_empty()
+            || !self.errors.is_empty()
+            || !self.checks.is_empty()
+            || !self.counters.is_empty()
+            || !self.gauges.is_empty()
+            || !self.histograms.is_empty()
+            || !self.rates.is_empty()
+    }
+
     pub fn report(&self) {
-        if self.total_requests == 0
-            && self.checks.is_empty()
-            && self.counters.is_empty()
-            && self.gauges.is_empty()
-            && self.histograms.is_empty()
-            && self.rates.is_empty()
-        {
+        if !self.has_reportable_data() {
             println!("\n--- Test Summary ---");
             println!("No metrics collected.");
             return;
         }
 
         println!("\n--- Test Summary ---");
+
+        // Make a total wipeout unmistakable: every iteration threw, so there are
+        // errors but zero successful requests.
+        if self.total_requests == 0 && self.failed_iterations > 0 {
+            println!(
+                "\n⚠  No successful requests — {} iteration(s) failed. See Errors below.",
+                self.failed_iterations
+            );
+        }
 
         if self.total_requests > 0 {
             let avg_duration = self.total_duration / self.total_requests as u32;
@@ -765,8 +811,19 @@ impl StatsAggregator {
 
         if !self.errors.is_empty() {
             println!("\nErrors:");
-            for (err, count) in &self.errors {
-                println!("  {}: {}", err, count);
+            // Most frequent first; ties broken by message for stable output.
+            let mut errs: Vec<_> = self.errors.iter().collect();
+            errs.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+            for (err, count) in errs {
+                // An error message may span multiple lines (message + stack
+                // trace). Prefix the first line with the dedup count and indent
+                // any continuation lines so the count stays readable.
+                let mut lines = err.lines();
+                let first = lines.next().unwrap_or("");
+                println!("  {}\u{00d7} {}", count, first);
+                for line in lines {
+                    println!("       {}", line.trim_end());
+                }
             }
         }
 
@@ -1040,6 +1097,64 @@ mod tests {
 
         assert_eq!(agg.total_requests, 1);
         assert_eq!(*agg.errors.get("Timeout").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_iteration_error_message_is_surfaced() {
+        let mut agg = StatsAggregator::new();
+
+        // A failed iteration emits BOTH `::iteration` and `::iteration_total`
+        // carrying the same JS exception message.
+        for name in ["default::iteration", "default::iteration_total"] {
+            agg.add(Metric::Request {
+                name: name.to_string(),
+                timings: RequestTimings {
+                    duration: Duration::from_millis(1),
+                    ..Default::default()
+                },
+                status: 0,
+                error: Some("ReferenceError: browser is not defined".to_string()),
+                tags: HashMap::new(),
+            });
+        }
+
+        // Iteration metrics are internal bookkeeping, not HTTP requests.
+        assert_eq!(agg.total_requests, 0);
+        // But the script error MUST be surfaced, exactly once (the two twin
+        // metrics must not double-count).
+        assert_eq!(
+            *agg.errors
+                .get("ReferenceError: browser is not defined")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_iteration_only_failure_is_reportable() {
+        let mut agg = StatsAggregator::new();
+
+        agg.add(Metric::Request {
+            name: "default::iteration".to_string(),
+            timings: RequestTimings {
+                duration: Duration::from_millis(1),
+                ..Default::default()
+            },
+            status: 0,
+            error: Some("TypeError: x is not a function".to_string()),
+            tags: HashMap::new(),
+        });
+
+        // No successful HTTP request, but the run is NOT empty: a failure was
+        // recorded, so the summary must not claim "No metrics collected".
+        assert_eq!(agg.total_requests, 0);
+        assert!(agg.has_reportable_data());
+    }
+
+    #[test]
+    fn test_empty_run_is_not_reportable() {
+        let agg = StatsAggregator::new();
+        assert!(!agg.has_reportable_data());
     }
 
     #[test]

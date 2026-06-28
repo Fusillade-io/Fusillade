@@ -110,6 +110,8 @@ mod tests {
             gauges: HashMap::new(),
             pool_hits: 0,
             pool_misses: 0,
+            threshold_failures: Vec::new(),
+            failed_iterations: 0,
         }
     }
 
